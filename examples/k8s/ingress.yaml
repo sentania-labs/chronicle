@@ -1,0 +1,53 @@
+# Reference only, not the lab's deployment. See README.md in this directory.
+#
+# Internal-only by convention (no public DNS is ever wired to Chronicle from
+# this repo). Root path goes to api (service, UI, admin); /preview goes to
+# preview (spec section 7 and 14). ingressClassName and host are cluster
+# specifics left for the deployer.
+#
+# Two Ingress objects, not one: `rewrite-target` is a per-Ingress annotation
+# that applies to every path in the object, not just the path that declares
+# the capture group. Putting both rules under one annotated Ingress rewrites
+# the api's root path to an empty capture too, so every api request would
+# land on `/` regardless of the path requested.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: chronicle-api
+  labels:
+    app.kubernetes.io/name: chronicle
+spec:
+  ingressClassName: REPLACE_ME_internal
+  rules:
+    - host: chronicle.REPLACE_ME.internal
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: chronicle
+                port:
+                  number: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: chronicle-preview
+  labels:
+    app.kubernetes.io/name: chronicle
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+spec:
+  ingressClassName: REPLACE_ME_internal
+  rules:
+    - host: chronicle.REPLACE_ME.internal
+      http:
+        paths:
+          - path: /preview(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: chronicle
+                port:
+                  number: 8090

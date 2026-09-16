@@ -1,0 +1,14 @@
+# Reference only, not the lab's deployment. See README.md in this directory.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chronicle-data
+  labels:
+    app.kubernetes.io/name: chronicle
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  # storageClassName intentionally unset: pick the cluster's storage class.

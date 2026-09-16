@@ -1,0 +1,119 @@
+# Reference only, not the lab's deployment. See README.md in this directory.
+#
+# One Deployment, three containers in one pod (spec section 14): api,
+# builder, and preview share the data volume; builder and preview share the
+# preview/site volume. image and imagePullPolicy point at the registry and
+# tag the deployer chooses; nothing here pins a real one.
+#
+# Round C0's builder is a placeholder that logs and exits (see
+# chronicle/builder/main.py); under this Deployment's default restart policy
+# that means a permanent restart count until the real run-queue watcher
+# lands in a later round. Left in so the reference shows the intended
+# three-container pod shape rather than a two-container stand-in.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chronicle
+  labels:
+    app.kubernetes.io/name: chronicle
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chronicle
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chronicle
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: api
+          image: REPLACE_ME/chronicle/api:REPLACE_ME
+          ports:
+            - containerPort: 8080
+          env:
+            - name: CHRONICLE_DATA_DIR
+              value: /data
+          envFrom:
+            - secretRef:
+                name: chronicle-instance-key
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+
+        - name: builder
+          image: REPLACE_ME/chronicle/builder:REPLACE_ME
+          env:
+            - name: CHRONICLE_DATA_DIR
+              value: /data
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: preview-site
+              mountPath: /data/site
+              subPath: site
+            - name: preview-site
+              mountPath: /data/preview
+              subPath: preview
+            - name: tmp
+              mountPath: /tmp
+            # Hugo's cache and uv's venv both expect a writable home
+            # directory; the image's /home/chronicle sits on the read-only
+            # root filesystem, so it needs its own writable mount here.
+            - name: builder-home
+              mountPath: /home/chronicle
+
+        - name: preview
+          image: REPLACE_ME/chronicle/preview:REPLACE_ME
+          ports:
+            - containerPort: 8090
+          env:
+            - name: CHRONICLE_PREVIEW_DIR
+              value: /data/preview
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: preview-site
+              mountPath: /data/preview
+              subPath: preview
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            tcpSocket:
+              port: 8090
+          livenessProbe:
+            tcpSocket:
+              port: 8090
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: chronicle-data
+        - name: preview-site
+          persistentVolumeClaim:
+            claimName: chronicle-preview-site
+        - name: tmp
+          emptyDir: {}
+        - name: builder-home
+          emptyDir: {}
