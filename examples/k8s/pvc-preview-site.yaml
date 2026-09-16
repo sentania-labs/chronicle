@@ -1,0 +1,18 @@
+# Reference only, not the lab's deployment. See README.md in this directory.
+#
+# Shared by the preview and site volumes (spec section 14): both are
+# disposable and may be rebuilt from scratch, but keeping them persistent
+# speeds up the next preview build after a pod restart.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chronicle-preview-site
+  labels:
+    app.kubernetes.io/name: chronicle
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  # storageClassName intentionally unset: pick the cluster's storage class.
