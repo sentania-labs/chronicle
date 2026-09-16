@@ -20,9 +20,15 @@ dependencies = [
     # transitively by fastapi: declare it so a fastapi release that changes
     # its own pydantic pin cannot silently break this import.
     "pydantic>=2.7",
+    # Multipart bodies for the image upload route.
+    "python-multipart>=0.0.9",
+    # Decodes an upload to decide its real type and re-encodes it without
+    # metadata, so the filename extension is never trusted.
+    "pillow>=10.3",
 ]
 
 [project.scripts]
+chronicle = "chronicle.cli:main"
 chronicle-api = "chronicle.api.main:run"
 chronicle-builder = "chronicle.builder.main:run"
 chronicle-preview = "chronicle.preview.main:run"

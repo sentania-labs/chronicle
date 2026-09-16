@@ -1,0 +1,208 @@
+"""The derived query index: SQLite over the files, never the record itself.
+
+Nothing here is durable. Every row restates something a JSON file under
+`data/repo/` (or an image sidecar under `data/images/`) already says, so the
+database can be deleted at any moment and rebuilt with `chronicle reindex`.
+See docs/decisions/006-sqlite-derived-index.md.
+
+The index answers the list queries: records by status, a post by slug, an
+image by sha256, events after a cursor. Single-record reads go to the file,
+because the file is the truth.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+from typing import Any
+
+from .models import Draft, Event, Image, Post, Run, Submission, Version
+
+SCHEMA_VERSION = 1
+INDEX_DIR_NAME = "index"
+INDEX_FILE_NAME = "chronicle.db"
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS submissions (
+    id TEXT PRIMARY KEY, status TEXT NOT NULL, created_at TEXT NOT NULL,
+    from_name TEXT NOT NULL, claimed_by TEXT, draft_id TEXT);
+CREATE INDEX IF NOT EXISTS submissions_status ON submissions(status);
+CREATE TABLE IF NOT EXISTS drafts (
+    id TEXT PRIMARY KEY, status TEXT NOT NULL, slug TEXT, title TEXT NOT NULL,
+    updated_at TEXT NOT NULL, version_no INTEGER NOT NULL, claim_author TEXT);
+CREATE INDEX IF NOT EXISTS drafts_status ON drafts(status);
+CREATE INDEX IF NOT EXISTS drafts_slug ON drafts(slug);
+CREATE TABLE IF NOT EXISTS versions (
+    draft_id TEXT NOT NULL, version_no INTEGER NOT NULL, author TEXT NOT NULL,
+    created_at TEXT NOT NULL, PRIMARY KEY (draft_id, version_no));
+CREATE TABLE IF NOT EXISTS runs (
+    id TEXT PRIMARY KEY, draft_id TEXT NOT NULL, kind TEXT NOT NULL,
+    status TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS runs_status ON runs(status);
+CREATE INDEX IF NOT EXISTS runs_draft ON runs(draft_id, created_at);
+CREATE TABLE IF NOT EXISTS posts (
+    slug TEXT PRIMARY KEY, path TEXT NOT NULL, title TEXT NOT NULL,
+    date TEXT NOT NULL, sha TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS images (
+    image_id TEXT PRIMARY KEY, sha256 TEXT NOT NULL, filename TEXT NOT NULL,
+    bytes INTEGER NOT NULL, mime TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS images_sha ON images(sha256);
+CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, payload TEXT NOT NULL);
+"""
+
+
+def index_path(repo_dir: Path) -> Path:
+    return repo_dir / INDEX_DIR_NAME / INDEX_FILE_NAME
+
+
+class Index:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(self.path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(SCHEMA)
+        # Only a genuinely new database gets stamped. Overwriting the stored
+        # value would make the readyz schema check compare the constant against
+        # itself, so an old build opening a newer database could never say so.
+        if self.schema_version() == 0:
+            self.conn.execute(
+                "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
+                (str(SCHEMA_VERSION),),
+            )
+        self.conn.commit()
+
+    def close(self) -> None:
+        self.conn.close()
+
+    def schema_version(self) -> int:
+        row = self.conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+        return int(row["value"]) if row else 0
+
+    def clear(self) -> None:
+        for table in ("submissions", "drafts", "versions", "runs", "posts", "images", "events"):
+            self.conn.execute(f"DELETE FROM {table}")
+        self.conn.commit()
+
+    def upsert_submission(self, record: Submission) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO submissions"
+            " (id, status, created_at, from_name, claimed_by, draft_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                record.id,
+                record.status,
+                record.created_at,
+                record.from_,
+                record.claimed_by,
+                record.draft_id,
+            ),
+        )
+        self.conn.commit()
+
+    def upsert_draft(self, record: Draft) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO drafts"
+            " (id, status, slug, title, updated_at, version_no, claim_author)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                record.id,
+                record.status,
+                record.slug,
+                record.title,
+                record.updated_at,
+                record.version_no,
+                record.claim.author if record.claim else None,
+            ),
+        )
+        self.conn.commit()
+
+    def upsert_version(self, record: Version) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO versions (draft_id, version_no, author, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            (record.draft_id, record.version_no, record.author, record.created_at),
+        )
+        self.conn.commit()
+
+    def upsert_run(self, record: Run) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO runs (id, draft_id, kind, status, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (record.id, record.draft_id, record.kind, record.status, record.created_at),
+        )
+        self.conn.commit()
+
+    def upsert_post(self, record: Post) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO posts (slug, path, title, date, sha) VALUES (?, ?, ?, ?, ?)",
+            (record.slug, record.path, record.title, record.date, record.sha),
+        )
+        self.conn.commit()
+
+    def upsert_image(self, record: Image) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO images (image_id, sha256, filename, bytes, mime)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (record.image_id, record.sha256, record.filename, record.bytes, record.mime),
+        )
+        self.conn.commit()
+
+    def add_event(self, record: Event) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO events (seq, payload) VALUES (?, ?)",
+            (record.seq, json.dumps(record.model_dump(mode="json"))),
+        )
+        self.conn.commit()
+
+    def submission_ids(self, status: str | None = None) -> list[str]:
+        return self._ids("submissions", "id", "created_at", status)
+
+    def draft_ids(self, status: str | None = None) -> list[str]:
+        return self._ids("drafts", "id", "updated_at", status)
+
+    def _ids(self, table: str, column: str, order: str, status: str | None) -> list[str]:
+        sql = f"SELECT {column} AS value FROM {table}"
+        params: tuple[Any, ...] = ()
+        if status is not None:
+            sql += " WHERE status = ?"
+            params = (status,)
+        sql += f" ORDER BY {order}"
+        return [row["value"] for row in self.conn.execute(sql, params)]
+
+    def post_slugs(self) -> list[str]:
+        return [row["slug"] for row in self.conn.execute("SELECT slug FROM posts ORDER BY slug")]
+
+    def pinned_slugs(self, exclude_draft_id: str | None = None) -> set[str]:
+        rows = self.conn.execute(
+            "SELECT slug FROM drafts WHERE slug IS NOT NULL AND id IS NOT ?",
+            (exclude_draft_id,),
+        )
+        taken = {row["slug"] for row in rows}
+        return taken | set(self.post_slugs())
+
+    def image_id_for_sha(self, sha256: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT image_id FROM images WHERE sha256 = ?", (sha256,)
+        ).fetchone()
+        return row["image_id"] if row else None
+
+    def last_run_id(self, draft_id: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT id FROM runs WHERE draft_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (draft_id,),
+        ).fetchone()
+        return row["id"] if row else None
+
+    def events_since(self, cursor: int, limit: int = 200) -> list[Event]:
+        rows = self.conn.execute(
+            "SELECT payload FROM events WHERE seq > ? ORDER BY seq LIMIT ?", (cursor, limit)
+        )
+        return [Event.model_validate_json(row["payload"]) for row in rows]
+
+    def max_event_seq(self) -> int:
+        row = self.conn.execute("SELECT MAX(seq) AS seq FROM events").fetchone()
+        return int(row["seq"]) if row and row["seq"] is not None else 0
