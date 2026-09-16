@@ -9,7 +9,13 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from chronicle.api import gitrepo
-from chronicle.api.tokens import UI_TOKEN_FILE_NAME, TokenStore, commit_author, hash_token
+from chronicle.api.tokens import (
+    UI_TOKEN_FILE_NAME,
+    UI_TOKEN_NAME,
+    TokenStore,
+    commit_author,
+    hash_token,
+)
 from chronicle.cli import main as cli_main
 
 from .conftest import auth
@@ -84,6 +90,63 @@ def test_git_author_is_the_acting_token_end_to_end(
 
     version = client.get(f"/v1/drafts/{draft_id}/versions/1", headers=auth(agent_token)).json()
     assert version["author"] == "scott"
+
+
+def test_interleaved_stores_both_land(data_dir: Path) -> None:
+    """Two TokenStore instances stand in for the api and the CLI process.
+
+    Both open the same tokens.json under the same interprocess lock, so an
+    issue on one and a revoke on the other, run back to back, must not lose
+    either effect to a stale load-mutate-save.
+    """
+    first = TokenStore(data_dir / "state")
+    second = TokenStore(data_dir / "state")
+
+    first_token = first.issue("dashboard")
+    second.revoke("dashboard")
+
+    records = TokenStore(data_dir / "state").load()
+    dashboard = next(record for record in records if record.name == "dashboard")
+    assert dashboard.revoked_at is not None
+    assert hash_token(first_token) == dashboard.hash
+
+
+def test_ui_token_rotates_when_plaintext_file_is_missing(
+    data_dir: Path, client: TestClient
+) -> None:
+    tokens = TokenStore(data_dir / "state")
+    original = next(r for r in tokens.load() if r.name == UI_TOKEN_NAME and r.revoked_at is None)
+    (data_dir / "state" / UI_TOKEN_FILE_NAME).unlink()
+
+    tokens.ensure_ui_token()
+
+    records = tokens.load()
+    assert any(
+        r.name == UI_TOKEN_NAME and r.hash == original.hash and r.revoked_at for r in records
+    )
+    live = [r for r in records if r.name == UI_TOKEN_NAME and r.revoked_at is None]
+    assert len(live) == 1
+    new_plaintext = (data_dir / "state" / UI_TOKEN_FILE_NAME).read_text(encoding="utf-8").strip()
+    assert hash_token(new_plaintext) == live[0].hash
+
+
+def test_ui_token_rotates_when_plaintext_does_not_authenticate(
+    data_dir: Path, client: TestClient
+) -> None:
+    tokens = TokenStore(data_dir / "state")
+    original = next(r for r in tokens.load() if r.name == UI_TOKEN_NAME and r.revoked_at is None)
+    (data_dir / "state" / UI_TOKEN_FILE_NAME).write_text("not-the-real-token\n", encoding="utf-8")
+
+    tokens.ensure_ui_token()
+
+    records = tokens.load()
+    assert any(
+        r.name == UI_TOKEN_NAME and r.hash == original.hash and r.revoked_at for r in records
+    )
+    live = [r for r in records if r.name == UI_TOKEN_NAME and r.revoked_at is None]
+    assert len(live) == 1
+    new_plaintext = (data_dir / "state" / UI_TOKEN_FILE_NAME).read_text(encoding="utf-8").strip()
+    assert hash_token(new_plaintext) == live[0].hash
 
 
 def test_cli_token_issue_list_and_revoke(data_dir: Path, capsys) -> None:

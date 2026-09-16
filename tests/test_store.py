@@ -151,6 +151,68 @@ def test_an_existing_schema_version_is_never_restamped(tmp_path: Path) -> None:
     index.close()
 
 
+def test_event_sequence_survives_a_dropped_index(store: Store, data_dir: Path) -> None:
+    store.create_submission("ghostwriter", "one", [], [])
+    first_seq = store.events_since(0)[0][-1].seq
+    store.close()
+
+    index_path(store.repo_dir).unlink()
+    reopened = Store.open(data_dir)
+    reopened.create_submission("ghostwriter", "two", [], [])
+    second_seq = reopened.events_since(0)[0][-1].seq
+    reopened.close()
+
+    assert second_seq == first_seq + 1
+    assert cli_main(["--data-dir", str(data_dir), "reindex"]) == 0
+    rebuilt = Store.open(data_dir)
+    seqs = [event.seq for event in rebuilt.events_since(0)[0]]
+    assert seqs == sorted(set(seqs))
+    rebuilt.close()
+
+
+def test_list_submissions_is_a_snapshot_under_the_store_lock(store: Store) -> None:
+    submission = store.create_submission("ghostwriter", "one", [], [])
+
+    entered = threading.Event()
+    release = threading.Event()
+    original_ids = store.index.submission_ids
+
+    def blocking_ids(status: str | None = None) -> list[str]:
+        entered.set()
+        release.wait(timeout=5)
+        return original_ids(status)
+
+    store.index.submission_ids = blocking_ids  # type: ignore[method-assign]
+
+    results: list[list[str]] = []
+    lister = threading.Thread(
+        target=lambda: results.append([item.status for item in store.list_submissions()])
+    )
+    lister.start()
+    assert entered.wait(timeout=5)
+
+    claimed = threading.Event()
+
+    def do_claim() -> None:
+        store.act_on_submission(submission.id, "claim", "ghostwriter")
+        claimed.set()
+
+    claimer = threading.Thread(target=do_claim)
+    claimer.start()
+    # The store lock held by the in-progress list must block a concurrent
+    # mutation; without the fix, act_on_submission would not need the lock
+    # the list holds and this claim would finish immediately.
+    claimer_finished_early = claimed.wait(timeout=0.2)
+
+    release.set()
+    lister.join()
+    claimer.join(timeout=5)
+
+    assert not claimer_finished_early
+    assert results[0] == ["new"]
+    assert store.get_submission(submission.id).status == "claimed"
+
+
 def test_slug_is_pinned_at_first_preview_and_stays(store: Store) -> None:
     draft = store.create_draft("ghostwriter")
     store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")

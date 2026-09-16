@@ -159,10 +159,20 @@ class Store:
     # Events
 
     def _next_seq(self) -> int:
-        # The index cannot drift from the log while every append happens under
-        # the store lock, so MAX(seq) answers this without re-reading a file
-        # that only grows.
-        return self.index.max_event_seq() + 1
+        # The index is a rebuildable cache (ADR 006): if a process died between
+        # the log append and the index upsert, or a reindex is mid-flight, the
+        # index can lag the log. The log itself is the durable record, so the
+        # next sequence is derived from its own last line, never from the
+        # index. Every append happens under the store lock, so this is never
+        # read while another append is writing it.
+        if not self.events_file.exists():
+            return 1
+        last_seq = 0
+        with self.events_file.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    last_seq = json.loads(line)["seq"]
+        return last_seq + 1
 
     def _append_event(self, **fields: Any) -> Event:
         event = Event(seq=self._next_seq(), ts=now_stamp(), **fields)
@@ -214,7 +224,13 @@ class Store:
         return Submission.model_validate(self._read_json(path))
 
     def list_submissions(self, status: str | None = None) -> list[Submission]:
-        return [self.get_submission(sid) for sid in self.index.submission_ids(status)]
+        # A mutation writes its file before its index row (ADR 006's cache is
+        # always one step behind the record), so without the store lock a list
+        # can read the new index and old file, or the old index and new file,
+        # of a submission that changed mid-read. Holding the lock across the
+        # lookup and every file read makes the list one snapshot.
+        with self._lock:
+            return [self.get_submission(sid) for sid in self.index.submission_ids(status)]
 
     @locked
     def act_on_submission(self, submission_id: str, action: str, actor: str) -> Submission:
@@ -290,7 +306,10 @@ class Store:
         return Draft.model_validate(self._read_json(path))
 
     def list_drafts(self, status: str | None = None) -> list[Draft]:
-        return [self.get_draft(did) for did in self.index.draft_ids(status)]
+        # Same race as list_submissions: hold the lock across the index
+        # lookup and the file reads so the list is one snapshot.
+        with self._lock:
+            return [self.get_draft(did) for did in self.index.draft_ids(status)]
 
     def get_version(self, draft_id: str, version_no: int) -> Version:
         path = self._version_path(draft_id, version_no)
@@ -506,7 +525,9 @@ class Store:
     ) -> tuple[Draft, Run | None]:
         draft = self.get_draft(draft_id)
         transition = resolve_draft(draft.status, action, actor_is_ui)
-        if transition.feedback_required and not feedback:
+        # A whitespace-only string is truthy, so the required check tests the
+        # stripped text; the feedback entry itself still stores what was sent.
+        if transition.feedback_required and not (feedback and feedback.strip()):
             raise ApiError(
                 422, "feedback_required", f"action {action!r} requires feedback", action=action
             )

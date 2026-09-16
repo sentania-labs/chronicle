@@ -202,7 +202,3 @@ class Index:
             "SELECT payload FROM events WHERE seq > ? ORDER BY seq LIMIT ?", (cursor, limit)
         )
         return [Event.model_validate_json(row["payload"]) for row in rows]
-
-    def max_event_seq(self) -> int:
-        row = self.conn.execute("SELECT MAX(seq) AS seq FROM events").fetchone()
-        return int(row["seq"]) if row and row["seq"] is not None else 0

@@ -200,6 +200,21 @@ def test_request_revision_without_feedback_is_422(
     assert response.json()["error"] == "feedback_required"
 
 
+def test_request_revision_with_whitespace_only_feedback_is_422(
+    client: TestClient, agent_token: str, ui_token: str
+) -> None:
+    draft_id = new_draft(client, agent_token)
+    save(client, agent_token, draft_id, 0)
+    client.post(f"/v1/drafts/{draft_id}/actions/submit", headers=auth(agent_token))
+    response = client.post(
+        f"/v1/drafts/{draft_id}/actions/request_revision",
+        json={"feedback": "   \n\t  "},
+        headers=auth(ui_token),
+    )
+    assert response.status_code == 422
+    assert response.json()["error"] == "feedback_required"
+
+
 def test_saving_a_revision_requested_draft_moves_it_back_to_drafting(
     client: TestClient, agent_token: str, ui_token: str
 ) -> None:
