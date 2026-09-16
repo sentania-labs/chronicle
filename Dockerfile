@@ -89,6 +89,7 @@ CMD ["uvicorn", "chronicle.api.main:app", "--host", "0.0.0.0", "--port", "8080"]
 FROM base AS builder
 
 ARG HUGO_VERSION
+ARG TARGETARCH
 
 LABEL org.opencontainers.image.title="chronicle-builder" \
       org.opencontainers.image.description="Chronicle preview builder: Hugo extended, blog repo clone, run queue watcher"
@@ -97,11 +98,19 @@ LABEL org.opencontainers.image.title="chronicle-builder" \
 # submodules (spec section 8). Hugo extended is installed from the pinned
 # GitHub release .deb rather than Debian's package so its version tracks
 # HUGO_VERSION exactly; rebuilding this image with a new HUGO_VERSION is how
-# a Hugo version bump is followed.
+# a Hugo version bump is followed. TARGETARCH is set by BuildKit to the
+# Docker platform architecture (amd64, arm64) and picks the matching release
+# artifact; any other value fails the build instead of silently fetching the
+# wrong one.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
+    && case "${TARGETARCH}" in \
+         amd64) hugo_arch="amd64" ;; \
+         arm64) hugo_arch="arm64" ;; \
+         *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+       esac \
     && curl -fsSL -o /tmp/hugo.deb \
-       "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.deb" \
+       "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-${hugo_arch}.deb" \
     && apt-get install -y --no-install-recommends /tmp/hugo.deb \
     && rm -f /tmp/hugo.deb \
     && apt-get purge -y --auto-remove curl \

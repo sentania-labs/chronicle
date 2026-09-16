@@ -21,6 +21,10 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   in C1, not existing code: as of round C0 no `/v1` routes exist yet to
   enforce it on. See
   [docs/decisions/004-ui-no-login-consumer-token.md](docs/decisions/004-ui-no-login-consumer-token.md).
+  FastAPI's own schema routes (`/docs`, `/redoc`, `/openapi.json`,
+  `/docs/oauth2-redirect`) are disabled in `create_app` for the same reason;
+  they come back in a later round only if placed behind the consumer-token
+  layer, never anonymously.
 - **Admin is authenticated always.** Admin's password session is independent
   of the API's consumer tokens and independent of whether the UI ever grows
   user login. Nothing shortcuts Admin's session for convenience. Admin does

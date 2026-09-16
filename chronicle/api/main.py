@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -42,8 +43,13 @@ def _data_dir_check() -> Check:
         return Check(name="data_dir", ok=False, detail=f"{DATA_DIR_ENV} is not set")
     if not os.path.isdir(path):
         return Check(name="data_dir", ok=False, detail=f"{path} does not exist")
-    if not os.access(path, os.W_OK):
-        return Check(name="data_dir", ok=False, detail=f"{path} is not writable")
+    # A permission bit check can pass on a read-only mount even though no
+    # write will actually succeed, so this probes with a real file instead.
+    try:
+        with tempfile.NamedTemporaryFile(dir=path):
+            pass
+    except OSError as exc:
+        return Check(name="data_dir", ok=False, detail=f"{path} is not writable: {exc}")
     return Check(name="data_dir", ok=True, detail=path)
 
 
@@ -59,7 +65,17 @@ def _github_app_check() -> Check:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Chronicle", version="0.1.0.dev0")
+    # docs_url, redoc_url, and openapi_url are disabled because health and
+    # readiness are the only anonymous routes this service ever serves; the
+    # schema routes come back once they sit behind the consumer-token layer
+    # the /v1 routes will use, not before.
+    app = FastAPI(
+        title="Chronicle",
+        version="0.1.0.dev0",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
 
     @app.get("/healthz", response_model=Health, tags=["operations"])
     async def healthz() -> Health:
