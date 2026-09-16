@@ -1,0 +1,48 @@
+# Local development only. This is not how Chronicle is deployed: the lab's
+# reference manifests are in examples/k8s/, and lab-deployment owns the real
+# instance. This file exists so `make compose-up` gives a developer the three
+# images talking to each other on a laptop.
+#
+#   docker compose up -d
+name: chronicle
+
+services:
+  api:
+    build:
+      context: .
+      target: api
+    environment:
+      CHRONICLE_DATA_DIR: /data
+    volumes:
+      - data:/data
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  builder:
+    build:
+      context: .
+      target: builder
+      args:
+        HUGO_VERSION: ${HUGO_VERSION:-0.164.0}
+    environment:
+      CHRONICLE_DATA_DIR: /data
+    volumes:
+      - data:/data
+      - site:/data/site
+      - preview:/data/preview
+
+  preview:
+    build:
+      context: .
+      target: preview
+    environment:
+      CHRONICLE_PREVIEW_DIR: /data/preview
+    volumes:
+      - preview:/data/preview
+    ports:
+      - "127.0.0.1:8090:8090"
+
+volumes:
+  data:
+  site:
+  preview:
