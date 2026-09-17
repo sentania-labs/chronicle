@@ -21,6 +21,7 @@ from .. import ui_templates as tpl
 from ..deps import Consumer, Services
 from ..errors import ApiError
 from ..images import MAX_IMAGE_BYTES
+from ..pagination import paginate
 from ..ui_deps import banner_enabled, check_same_origin, get_services, require_ui_consumer
 
 router = APIRouter(tags=["ui"])
@@ -83,9 +84,12 @@ def home() -> RedirectResponse:
 
 
 @router.get("/content/submissions", response_class=HTMLResponse)
-def submissions_list(request: Request, services: Services = Depends(get_services)) -> HTMLResponse:
+def submissions_list(
+    request: Request, page: int = Query(1, ge=1), services: Services = Depends(get_services)
+) -> HTMLResponse:
     submissions = [_dump(s) for s in services.store.list_submissions()]
-    return HTMLResponse(tpl.submissions_list_page(submissions, banner=banner_enabled(request)))
+    pg = paginate(submissions, page)
+    return HTMLResponse(tpl.submissions_list_page(pg, banner=banner_enabled(request)))
 
 
 @router.get("/content/submissions/{submission_id}", response_class=HTMLResponse)
@@ -133,7 +137,10 @@ def submission_discard(
 
 @router.get("/content/drafts", response_class=HTMLResponse)
 def drafts_board(
-    request: Request, status: str | None = None, services: Services = Depends(get_services)
+    request: Request,
+    status: str | None = None,
+    page: int = Query(1, ge=1),
+    services: Services = Depends(get_services),
 ) -> HTMLResponse:
     store = services.store
     flags_by_draft: dict[str, list[dict[str, Any]]] = {}
@@ -155,8 +162,9 @@ def drafts_board(
                 "flags": flags_by_draft.get(draft.id, []),
             }
         )
+    pg = paginate(rows, page)
     return HTMLResponse(
-        tpl.drafts_board_page(rows, status_filter=status, banner=banner_enabled(request))
+        tpl.drafts_board_page(pg, status_filter=status, banner=banner_enabled(request))
     )
 
 
@@ -444,14 +452,18 @@ def draft_image_detach(
 
 @router.get("/content/import", response_class=HTMLResponse)
 def import_search(
-    request: Request, q: str = "", services: Services = Depends(get_services)
+    request: Request,
+    q: str = "",
+    page: int = Query(1, ge=1),
+    services: Services = Depends(get_services),
 ) -> HTMLResponse:
     posts = services.store.list_posts()
     needle = q.strip().lower()
     if needle:
         posts = [p for p in posts if needle in p.slug.lower() or needle in p.title.lower()]
     posts_dump = [_dump(p) for p in sorted(posts, key=lambda p: p.date, reverse=True)]
-    return HTMLResponse(tpl.import_page(posts_dump, q, banner=banner_enabled(request)))
+    pg = paginate(posts_dump, page)
+    return HTMLResponse(tpl.import_page(pg, q, banner=banner_enabled(request)))
 
 
 @router.post("/content/import")
@@ -467,7 +479,9 @@ async def import_create(
         draft, warnings = services.store.create_draft(consumer.name, from_post=slug)
     except ApiError as exc:
         return HTMLResponse(
-            tpl.import_page([], slug, banner=banner_enabled(request), notice=exc.message),
+            tpl.import_page(
+                paginate([], 1), slug, banner=banner_enabled(request), notice=exc.message
+            ),
             status_code=exc.status_code,
         )
     return _redirect_to_draft(draft.id, warnings)

@@ -173,6 +173,30 @@ def test_reserved_actions_are_labelled_scott_only(client: TestClient, services: 
     assert "reject" in response.text.lower()
 
 
+def test_drafts_board_paginates_at_fifty_with_next_and_previous(
+    client: TestClient, services: Services
+) -> None:
+    for i in range(55):
+        make_draft(services, "drafting", title=f"Draft {i}")
+
+    first = client.get("/content/drafts")
+    assert first.status_code == 200
+    assert "page 1 of 2" in first.text
+    assert "(55 total)" in first.text
+    assert "&laquo; previous</span>" in first.text  # no link: already first page
+    assert 'href="/content/drafts?page=2"' in first.text
+
+    second = client.get("/content/drafts?page=2")
+    assert second.status_code == 200
+    assert "page 2 of 2" in second.text
+    assert "next &raquo;</span>" in second.text  # no link: already last page
+    assert 'href="/content/drafts?page=1"' in second.text
+
+    beyond = client.get("/content/drafts?page=99")
+    assert beyond.status_code == 200
+    assert "page 2 of 2" in beyond.text  # clamped to the last real page
+
+
 def test_drafts_board_shows_flag_and_pr_badges(client: TestClient, services: Services) -> None:
     draft_id = make_draft(services, "published", with_publish=True)
     services.store.create_flag(
