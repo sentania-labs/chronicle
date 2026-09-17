@@ -31,6 +31,8 @@ PUBLISH_POLL_SECONDS_ENV = "CHRONICLE_PUBLISH_POLL_SECONDS"
 WATCH_POLL_SECONDS_ENV = "CHRONICLE_WATCH_POLL_SECONDS"
 WATCH_POLL_MAX_SECONDS_ENV = "CHRONICLE_WATCH_POLL_MAX_SECONDS"
 RECONCILE_INTERVAL_SECONDS_ENV = "CHRONICLE_RECONCILE_INTERVAL_SECONDS"
+# C5, ADR 014: on by default, content and preview carry no login of their own.
+UI_BANNER_ENV = "CHRONICLE_UI_BANNER"
 
 DEFAULT_EXTERNAL_URL = "http://localhost:8080"
 DEFAULT_GITHUB_API_BASE = "https://api.github.com"
@@ -84,6 +86,7 @@ class Settings:
     watch_poll_seconds: float
     watch_poll_max_seconds: float
     reconcile_interval_seconds: float
+    ui_banner: bool
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -121,6 +124,7 @@ class Settings:
             reconcile_interval_seconds=_float_env(
                 RECONCILE_INTERVAL_SECONDS_ENV, DEFAULT_RECONCILE_INTERVAL_SECONDS
             ),
+            ui_banner=_truthy(os.environ.get(UI_BANNER_ENV, "1")),
         )
 
     @property

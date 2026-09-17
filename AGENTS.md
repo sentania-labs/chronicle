@@ -163,6 +163,29 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   Resolving `create_tree`'s `base_tree` needs the base commit's tree sha,
   and `get_ref` alone returns only the commit sha; `get_commit` is the one
   call every publish and reconcile run makes to bridge that gap (ADR 012).
+- **The UI backend calls `Store` in-process, never over loopback HTTP.**
+  `chronicle/api/ui_deps.py:require_ui_consumer` reads
+  `data/state/ui_token.txt` fresh on every request and authenticates it
+  through the same `TokenStore.authenticate` a bearer header would use, so
+  a revoke on `/admin/tokens` disables the whole UI on its very next
+  request (ADR 014). A UI route that calls `services.store` without going
+  through this dependency first is calling a mutating method with no actor
+  at all, which is a type error, not a silent anonymous write, but a
+  reviewer should still treat a route that skips it as a blocking finding
+  the way `/v1` treats a route that skips `require_consumer`.
+- **`ui_templates.py`'s action buttons read `transitions.DRAFT_TRANSITIONS`
+  directly, never a second table.** The board and the editor page both
+  render exactly the actions a draft's current status allows by iterating
+  the same dict `Store.act_on_draft` consults; adding a transition there is
+  what makes it show up as a button, nothing in the UI layer needs updating
+  to match.
+- **The UI's markdown preview pane is client-side only, filled by `ui.js`
+  from the visitor's own textarea, never by anything the server renders.**
+  Every value a UI template does interpolate goes through `html.escape`
+  first, same bar as `admin_templates.py`; `marked.parse`'s output is only
+  ever assigned into the DOM the same browser tab's own input produced it
+  in, which is why it is not a second XSS surface the way echoing another
+  user's content back through it would be.
 
 ## Round C4 status
 
