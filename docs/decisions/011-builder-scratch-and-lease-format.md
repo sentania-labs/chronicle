@@ -13,15 +13,28 @@ crashed one) both thinking they own it.
 
 **Scratch directory.** `data/builder-work/` (`CHRONICLE_BUILDER_WORK_DIR`
 overrides it), holding `scratch/<run_id>` (the copied site plus the
-converted post and its images), `output/<run_id>` (the Hugo build before
-its atomic swap into `data/preview/<slug>/`), `cache/` (Hugo's
-`--cacheDir`), and `resources/` (`HUGO_RESOURCEDIR`). It sits under
-`data/`, not `data/preview/`, on purpose: the preview container mounts only
-the preview volume, and a scratch tree carrying a full site clone and
-Hugo's resource cache has no reason to be reachable through that container
-even by accident. It shares the data volume the builder already writes to,
-so no new volume is needed, and cleanup (`shutil.rmtree` after every run,
-success or failure) never touches anything the preview server serves.
+converted post and its images), `cache/` (Hugo's `--cacheDir`), and
+`resources/` (`HUGO_RESOURCEDIR`). It sits under `data/`, not
+`data/preview/`, on purpose: the preview container mounts only the preview
+volume, and a scratch tree carrying a full site clone and Hugo's resource
+cache has no reason to be reachable through that container even by
+accident. It shares the data volume the builder already writes to, so no
+new volume is needed, and cleanup (`shutil.rmtree` after every run, success
+or failure) never touches anything the preview server serves.
+
+**One exception: the Hugo build output itself.** Hugo writes each run's
+build to `data/preview/.tmp/<run_id>`, not under `builder-work/`, found
+live in the C3 real-blog check: `Path.replace` (`os.replace`) only stays
+atomic when the source and destination share a filesystem, and
+`builder-work` is a deliberately separate mount from `preview` in both
+compose and the k8s reference. Putting the pre-swap output on the
+`builder-work` side made the final `_atomic_swap` into `data/preview/
+<slug>/` cross a mount boundary, which `os.replace` refuses outright
+("Invalid cross-device link") rather than silently falling back to a copy.
+`data/preview/.tmp/<run_id>` costs nothing extra in exposure: it is already
+the run's finished, public-bound output at the moment it lands there, the
+same content `<slug>/` is about to become, just not yet visible under a
+slug the api's status route would ever hand out.
 
 **Lease format.** `data/state/builder/leases/<run_id>.json`:
 

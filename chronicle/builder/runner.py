@@ -153,6 +153,17 @@ def _atomic_swap(built: Path, destination: Path) -> None:
         shutil.rmtree(stale, ignore_errors=True)
 
 
+def output_path(store: Store, run_id: str) -> Path:
+    """Where a run's Hugo build lands before its atomic swap.
+
+    Under `store.preview_dir`, not `settings.work_dir`: see ADR 011. A
+    rename across a mount boundary is not atomic, and `builder-work` is a
+    deliberately separate mount from `preview` in both compose and the k8s
+    reference.
+    """
+    return store.preview_dir / ".tmp" / run_id
+
+
 def build_one(store: Store, settings: BuilderSettings, run: Run) -> None:
     """Claimed, still `queued` in the record: build it, then record the outcome.
 
@@ -173,7 +184,7 @@ def build_one(store: Store, settings: BuilderSettings, run: Run) -> None:
     output = None
     try:
         converted = _write_post_and_images(store, draft, _prepare_scratch(store, scratch))
-        output = settings.work_dir / "output" / run.id
+        output = output_path(store, run.id)
         if output.exists():
             shutil.rmtree(output)
         base_url = f"{settings.external_url}/preview/{converted.slug}/"

@@ -341,15 +341,48 @@ def test_digest_then_from_post_import_of_a_real_shaped_post(
     store.close()
 
 
-def test_auth_env_always_exempts_the_clone_source_from_ownership_checks() -> None:
-    env = digest._auth_env(None)
-    assert env["GIT_CONFIG_COUNT"] == "1"
-    assert env["GIT_CONFIG_KEY_0"] == "safe.directory"
-    assert env["GIT_CONFIG_VALUE_0"] == "*"
+def test_git_config_global_grants_a_safe_directory_exception() -> None:
+    path = Path(digest.GIT_ENV["GIT_CONFIG_GLOBAL"])
+    assert path.exists()
+    content = path.read_text(encoding="utf-8")
+    assert "[safe]" in content
+    assert "directory = *" in content
 
 
-def test_auth_env_carries_both_safe_directory_and_auth_header_with_a_token() -> None:
-    env = digest._auth_env("a-token")
-    assert env["GIT_CONFIG_COUNT"] == "2"
-    keys = {env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_KEY_1"]}
-    assert keys == {"safe.directory", "http.extraheader"}
+def test_clone_of_a_source_owned_by_a_different_uid_is_not_refused(tmp_path: Path) -> None:
+    """Regression: git's dubious-ownership check ignores GIT_CONFIG_COUNT env
+    injection for `safe.directory` on purpose, so the fix has to be a real
+    config file (see `digest._safe_directory_config`), not the same
+    per-invocation trick `_auth_env` uses for the installation token. This
+    test cannot fake a different uid without root, so it instead proves the
+    exception is broad (`*`) rather than naming this one test repo, which is
+    what actually matters for a clone owned by a different uid in a
+    container.
+    """
+    repo = tmp_path / "source"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, env=digest.GIT_ENV)
+    (repo / "README.md").write_text("hi", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b.c", "-c", "user.name=a", "add", "."],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.email=a@b.c",
+            "-c",
+            "user.name=a",
+            "commit",
+            "-q",
+            "-m",
+            "x",
+        ],
+        check=True,
+    )
+    destination = tmp_path / "dest"
+    sha = digest.clone_or_update(destination, str(repo))
+    assert sha

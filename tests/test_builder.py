@@ -294,3 +294,16 @@ class caplog_disabled:
 
     def __exit__(self, *args: object) -> None:
         logging.disable(logging.NOTSET)
+
+
+def test_output_path_shares_a_filesystem_with_the_preview_destination(
+    store: Store, builder_settings: BuilderSettings
+) -> None:
+    """Regression: the pre-swap output must be on the same mount as
+    data/preview/<slug>/, or the atomic rename in _atomic_swap raises
+    "Invalid cross-device link" the moment builder-work and preview are
+    separate volumes, which they are in both compose and the k8s reference.
+    """
+    path = runner.output_path(store, "some-run-id")
+    assert path.is_relative_to(store.preview_dir)
+    assert not path.is_relative_to(builder_settings.work_dir)
