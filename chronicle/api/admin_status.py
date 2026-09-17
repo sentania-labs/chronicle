@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,9 @@ from .admin_deps import AdminServices
 from .deps import Services
 from .github_app import readiness_state
 from .index import SCHEMA_VERSION
-from .models import DRAFT_STATUSES, SUBMISSION_STATUSES
+from .models import DRAFT_STATUSES, RUN_STATUSES, SUBMISSION_STATUSES
+
+BUILDER_HEARTBEAT_PATH = ("state", "builder", "heartbeat.json")
 
 
 def _dir_size(path: Path) -> int:
@@ -57,6 +60,20 @@ def toolchain_summary(admin: AdminServices) -> dict[str, Any]:
     }
 
 
+def builder_heartbeat(data_dir: Path) -> dict[str, Any] | None:
+    path = data_dir.joinpath(*BUILDER_HEARTBEAT_PATH)
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return dict(loaded)
+
+
+def preview_run_counts(services: Services) -> dict[str, int]:
+    counts = services.store.run_counts("preview")
+    return {status: counts.get(status, 0) for status in RUN_STATUSES}
+
+
 def build_status(admin: AdminServices, services: Services) -> dict[str, Any]:
     store = services.store
     app_record = admin.github_store.load()
@@ -88,4 +105,6 @@ def build_status(admin: AdminServices, services: Services) -> dict[str, Any]:
         "git_health": git_health(store.repo_dir),
         "index_schema_version": SCHEMA_VERSION,
         "digest_running": admin.digest_running,
+        "builder_heartbeat": builder_heartbeat(store.data_dir),
+        "preview_runs_by_status": preview_run_counts(services),
     }

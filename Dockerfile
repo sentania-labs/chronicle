@@ -118,10 +118,21 @@ RUN apt-get update \
 
 USER 1000
 
-# Placeholder in this round (chronicle/builder/main.py logs and exits); the
-# health check only confirms the interpreter runs.
+# The builder has no HTTP port to probe; liveness is the heartbeat file it
+# writes every poll tick (chronicle/builder/runner.py). A heartbeat older
+# than five poll intervals means the loop has stopped making progress, not
+# necessarily crashed, which is exactly what a liveness probe should catch
+# either way.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD ["python3", "-c", "pass"]
+    CMD ["python3", "-c", "\
+import json, os, sys; \
+from datetime import datetime; \
+path = os.path.join(os.environ.get('CHRONICLE_DATA_DIR', '/data'), 'state', 'builder', 'heartbeat.json'); \
+poll = float(os.environ.get('CHRONICLE_BUILDER_POLL_SECONDS', '5')); \
+data = json.load(open(path)); \
+last = datetime.fromisoformat(data['last_loop_at']); \
+age = datetime.now().astimezone() - last; \
+sys.exit(0 if age.total_seconds() < poll * 5 + 30 else 1)"]
 
 CMD ["python3", "-m", "chronicle.builder.main"]
 
@@ -134,10 +145,7 @@ LABEL org.opencontainers.image.title="chronicle-preview" \
 USER 1000
 EXPOSE 8090
 
-# A plain connect, not a GET: the root path answers 403 (listing disabled)
-# once no index.html exists yet, and urlopen would treat that as a failure
-# even though the server is healthy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD ["python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 8090), timeout=3).close()"]
+    CMD ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz')"]
 
 CMD ["python3", "-m", "chronicle.preview.main"]

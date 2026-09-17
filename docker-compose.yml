@@ -1,9 +1,22 @@
 # Local development only. This is not how Chronicle is deployed: the lab's
 # reference manifests are in examples/k8s/, and lab-deployment owns the real
 # instance. This file exists so `make compose-up` gives a developer the three
-# images talking to each other on a laptop.
+# images talking to each other on a laptop, preview link included.
 #
 #   docker compose up -d
+#
+# To point the digest at a local clone instead of a real GitHub App (this is
+# how the C3 live check exercised the whole preview path), set
+# CHRONICLE_DIGEST_REPO_URL to a filesystem path before starting:
+#
+#   CHRONICLE_DIGEST_REPO_URL=/path/to/a/local/clone docker compose up -d
+#
+# CHRONICLE_EXTERNAL_URL below points at the preview container's own port
+# (8090), not the api's (8080), so a preview_url the api returns is directly
+# clickable in this compose shape. That is the wrong value for the two
+# browser steps of the GitHub App manifest flow (they redirect back to the
+# api); exercising those locally means overriding it back to
+# http://localhost:8080 for that one session.
 name: chronicle
 
 services:
@@ -13,8 +26,11 @@ services:
       target: api
     environment:
       CHRONICLE_DATA_DIR: /data
+      CHRONICLE_EXTERNAL_URL: http://localhost:8090
+      CHRONICLE_DIGEST_REPO_URL: ${CHRONICLE_DIGEST_REPO_URL:-}
     volumes:
       - data:/data
+      - preview:/data/preview
     ports:
       - "127.0.0.1:8080:8080"
 
@@ -26,9 +42,9 @@ services:
         HUGO_VERSION: ${HUGO_VERSION:-0.164.0}
     environment:
       CHRONICLE_DATA_DIR: /data
+      CHRONICLE_EXTERNAL_URL: http://localhost:8090
     volumes:
       - data:/data
-      - site:/data/site
       - preview:/data/preview
 
   preview:
@@ -42,7 +58,13 @@ services:
     ports:
       - "127.0.0.1:8090:8090"
 
+# `preview` is its own volume, mounted at /data/preview in all three
+# containers, so the preview container's tree is exactly what the builder
+# just wrote and never anything else under /data: state/tokens.json,
+# state/github-app.json, and state/instance.key never reach a container
+# that has no business opening them. `data` carries everything else,
+# including data/site, so the api's digest and the builder's own read of
+# the same clone are the same files, not two independent copies.
 volumes:
   data:
-  site:
   preview:

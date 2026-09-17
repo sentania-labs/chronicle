@@ -5,11 +5,17 @@
 # preview (spec section 7 and 14). ingressClassName and host are cluster
 # specifics left for the deployer.
 #
-# Two Ingress objects, not one: `rewrite-target` is a per-Ingress annotation
-# that applies to every path in the object, not just the path that declares
-# the capture group. Putting both rules under one annotated Ingress rewrites
-# the api's root path to an empty capture too, so every api request would
-# land on `/` regardless of the path requested.
+# Two Ingress objects, not one: a path-rewrite annotation applies to every
+# path in the object, not just the one that declares a capture group, so
+# combining both routes under one annotated Ingress would rewrite the api's
+# root path too.
+#
+# No rewrite on the preview path, unlike C0's placeholder version of this
+# file: chronicle/preview/main.py (C3) matches on the literal `/preview/`
+# prefix itself, because Hugo's own `--baseURL` for a build (chronicle/
+# builder/hugo.py) bakes that same prefix into every absolute link the build
+# emits. Stripping the prefix here would make the ingress and the HTML
+# disagree about where a preview's own assets live.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -36,16 +42,14 @@ metadata:
   name: chronicle-preview
   labels:
     app.kubernetes.io/name: chronicle
-  annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /$2
 spec:
   ingressClassName: REPLACE_ME_internal
   rules:
     - host: chronicle.REPLACE_ME.internal
       http:
         paths:
-          - path: /preview(/|$)(.*)
-            pathType: ImplementationSpecific
+          - path: /preview
+            pathType: Prefix
             backend:
               service:
                 name: chronicle
