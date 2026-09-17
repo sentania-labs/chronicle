@@ -63,6 +63,12 @@ spec:
             httpGet:
               path: /healthz
               port: 8080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
 
         - name: builder
           image: REPLACE_ME/chronicle/builder:REPLACE_ME
@@ -93,25 +99,24 @@ spec:
             - name: builder-home
               mountPath: /home/chronicle
           # No HTTP port to probe: liveness is the heartbeat file
-          # chronicle/builder/runner.py writes every poll tick. A stale
-          # heartbeat means the loop stopped making progress, not
-          # necessarily that the process died, which is exactly what a
-          # liveness probe should still catch.
+          # chronicle/builder/runner.py writes every poll tick, checked by
+          # `chronicle-builder --healthcheck` (chronicle/builder/main.py),
+          # not an inline script here: the staleness rule lives in one
+          # place a test can import and exercise, not copy-pasted into this
+          # manifest a second time.
           livenessProbe:
             exec:
               command:
-                - python3
-                - -c
-                - |
-                  import json, os, sys
-                  from datetime import datetime
-                  path = os.path.join(os.environ["CHRONICLE_DATA_DIR"], "state", "builder", "heartbeat.json")
-                  poll = float(os.environ.get("CHRONICLE_BUILDER_POLL_SECONDS", "5"))
-                  data = json.load(open(path))
-                  age = datetime.now().astimezone() - datetime.fromisoformat(data["last_loop_at"])
-                  sys.exit(0 if age.total_seconds() < poll * 5 + 30 else 1)
+                - chronicle-builder
+                - --healthcheck
             initialDelaySeconds: 20
             periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
 
         - name: preview
           image: REPLACE_ME/chronicle/preview:REPLACE_ME
@@ -137,6 +142,12 @@ spec:
             httpGet:
               path: /healthz
               port: 8090
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
 
       volumes:
         - name: data

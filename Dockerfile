@@ -131,15 +131,7 @@ USER 1000
 # necessarily crashed, which is exactly what a liveness probe should catch
 # either way.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD ["python3", "-c", "\
-import json, os, sys; \
-from datetime import datetime; \
-path = os.path.join(os.environ.get('CHRONICLE_DATA_DIR', '/data'), 'state', 'builder', 'heartbeat.json'); \
-poll = float(os.environ.get('CHRONICLE_BUILDER_POLL_SECONDS', '5')); \
-data = json.load(open(path)); \
-last = datetime.fromisoformat(data['last_loop_at']); \
-age = datetime.now().astimezone() - last; \
-sys.exit(0 if age.total_seconds() < poll * 5 + 30 else 1)"]
+    CMD ["python3", "-m", "chronicle.builder.main", "--healthcheck"]
 
 CMD ["python3", "-m", "chronicle.builder.main"]
 

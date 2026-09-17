@@ -293,6 +293,32 @@ def test_heartbeat_written_with_builder_id_and_queue_depth(
     assert heartbeat["preview_writable"] is True
 
 
+# --- healthcheck subcommand (examples/k8s/deployment.yaml's liveness probe) -
+
+
+def test_healthcheck_fails_with_no_heartbeat_file(builder_settings: BuilderSettings) -> None:
+    assert builder_main.healthcheck(builder_settings) == 1
+
+
+def test_healthcheck_succeeds_with_a_fresh_heartbeat(
+    store: Store, builder_settings: BuilderSettings
+) -> None:
+    _prep_site(store)
+    draft_id = _make_draft(store)
+    _queue_preview(store, draft_id)
+    runner.tick(store, builder_settings, _leases(builder_settings))
+    assert builder_main.healthcheck(builder_settings) == 0
+
+
+def test_healthcheck_fails_with_a_stale_heartbeat(builder_settings: BuilderSettings) -> None:
+    builder_settings.heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+    stale = (datetime.now().astimezone() - timedelta(hours=1)).isoformat()
+    builder_settings.heartbeat_path.write_text(
+        json.dumps({"last_loop_at": stale}), encoding="utf-8"
+    )
+    assert builder_main.healthcheck(builder_settings) == 1
+
+
 # --- fresh-volume writability: C3 compose fix ----------------------------
 
 
