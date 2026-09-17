@@ -93,7 +93,7 @@ class Draft(BaseModel):
     status: str = "drafting"
     version_no: int = 0
     source_submission: str | None = None
-    source_post: str | None = None
+    source_post: dict[str, str] | None = None
     images: list[DraftImage] = []
     claim: Claim | None = None
 

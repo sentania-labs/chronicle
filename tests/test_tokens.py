@@ -163,3 +163,38 @@ def test_cli_token_issue_list_and_revoke(data_dir: Path, capsys) -> None:
     assert cli_main(["--data-dir", str(data_dir), "token", "revoke", "dashboard"]) == 0
     capsys.readouterr()
     assert TokenStore(data_dir / "state").authenticate(token) is None
+
+
+def test_cli_token_issue_ui_is_rejected(data_dir: Path, capsys) -> None:
+    (data_dir / "state").mkdir(parents=True, exist_ok=True)
+    assert cli_main(["--data-dir", str(data_dir), "token", "issue", "ui"]) == 1
+    err = capsys.readouterr().err
+    assert "reserved" in err
+    assert TokenStore(data_dir / "state").load() == []
+
+
+def test_admin_tokens_page_rejects_the_name_ui(admin_client: TestClient) -> None:
+    response = admin_client.post("/admin/tokens", data={"name": "ui"})
+    assert response.status_code == 422
+    assert "reserved" in response.text
+
+
+def test_admin_tokens_api_rejects_the_name_ui(admin_client: TestClient) -> None:
+    response = admin_client.post("/admin/api/tokens", json={"name": "ui"})
+    assert response.status_code == 422
+    assert response.json()["error"] == "token_name_reserved"
+
+
+def test_admin_tokens_api_issue_list_and_revoke(admin_client: TestClient) -> None:
+    issued = admin_client.post("/admin/api/tokens", json={"name": "dashboard"})
+    assert issued.status_code == 200
+    token = issued.json()["token"]
+    assert token
+
+    listed = admin_client.get("/admin/api/tokens")
+    names = [t["name"] for t in listed.json()["tokens"]]
+    assert "dashboard" in names
+
+    revoked = admin_client.post("/admin/api/tokens/dashboard/revoke")
+    assert revoked.status_code == 200
+    assert revoked.json()["revoked"] == 1

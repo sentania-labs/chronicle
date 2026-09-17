@@ -370,10 +370,13 @@ def test_reject_then_restore(client: TestClient, agent_token: str, ui_token: str
     assert restored.json()["draft"]["status"] == "drafting"
 
 
-def test_from_post_import_is_501(client: TestClient, agent_token: str) -> None:
+def test_from_post_import_of_an_unknown_slug_is_404(client: TestClient, agent_token: str) -> None:
+    # The happy path (a real post record and file under data/site/) is
+    # covered in tests/test_from_post.py; this just confirms the route wires
+    # the store's 404 through rather than the old 501 stub.
     response = client.post("/v1/drafts", json={"from_post": "some-slug"}, headers=auth(agent_token))
-    assert response.status_code == 501
-    assert response.json()["error"] == "import_not_implemented"
+    assert response.status_code == 404
+    assert response.json()["error"] == "post_not_found"
 
 
 def test_unknown_action_is_404(client: TestClient, agent_token: str) -> None:

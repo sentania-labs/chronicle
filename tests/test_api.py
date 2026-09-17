@@ -66,7 +66,7 @@ def test_readyz_fails_when_data_dir_not_writable(tmp_path, monkeypatch) -> None:
 
 def test_startup_rebuilds_a_missing_index(data_dir: Path) -> None:
     store = Store.open(data_dir)
-    draft = store.create_draft("ghostwriter")
+    draft, _ = store.create_draft("ghostwriter")
     store.save_draft(draft.id, "ghostwriter", 0, {"title": "Restored"}, "body")
     store.close()
     index_path(store.repo_dir).unlink()

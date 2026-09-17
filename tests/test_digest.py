@@ -1,0 +1,215 @@
+"""Digest of main: fixture repo, idempotence, toolchain parse and drift.
+
+Builds a real local git repository (two posts, one page bundle, a submodule
+stub, and a hugo.yml) so `digest.py`'s clone/fetch, frontmatter parsing, and
+toolchain parsing all run against real git plumbing, the same as they will
+against the actual blog repo.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from chronicle.api import digest
+from chronicle.api.admin_deps import AdminServices
+from chronicle.api.digest_runner import DigestNotConfigured
+from chronicle.api.digest_runner import run as run_digest
+from chronicle.api.store import Store
+
+GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo), *args],
+        env={
+            **GIT_ENV,
+            "GIT_AUTHOR_NAME": "fixture",
+            "GIT_AUTHOR_EMAIL": "fixture@example.com",
+            "GIT_COMMITTER_NAME": "fixture",
+            "GIT_COMMITTER_EMAIL": "fixture@example.com",
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.fixture
+def blog_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "blog.git-src"
+    repo.mkdir()
+    _git(repo, "init", "--initial-branch=main")
+
+    posts = repo / "content" / "posts"
+    posts.mkdir(parents=True)
+    (posts / "first-post.md").write_text(
+        "---\ntitle: First Post\ndate: 2024-01-01\ntags:\n  - meta\n---\nbody one\n",
+        encoding="utf-8",
+    )
+    bundle = posts / "bundled-post"
+    bundle.mkdir()
+    (bundle / "index.md").write_text(
+        "---\ntitle: Bundled Post\ndate: 2024-02-02\nslug: custom-bundle-slug\n"
+        "featureImage: cover.jpg\n---\nbundle body\n",
+        encoding="utf-8",
+    )
+    (bundle / "cover.jpg").write_bytes(b"\xff\xd8\xff\xe0not a real jpeg but a stand-in")
+
+    workflows = repo / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "hugo.yml").write_text(
+        "name: hugo\n"
+        "on: push\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    env:\n"
+        "      HUGO_VERSION: 0.164.0\n"
+        "    steps:\n"
+        "      - run: echo build\n",
+        encoding="utf-8",
+    )
+
+    theme_src = tmp_path / "theme-src"
+    theme_src.mkdir()
+    _git(theme_src, "init", "--initial-branch=main")
+    (theme_src / "theme.txt").write_text("stub theme\n", encoding="utf-8")
+    _git(theme_src, "add", "-A")
+    _git(theme_src, "commit", "-m", "theme stub")
+
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "initial posts")
+    _git(
+        repo,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        str(theme_src),
+        "themes/stub-theme",
+    )
+    _git(repo, "commit", "-m", "add theme submodule")
+    return repo
+
+
+def test_discover_posts_finds_both_a_flat_post_and_a_bundle(
+    tmp_path: Path, blog_repo: Path
+) -> None:
+    site_dir = tmp_path / "site"
+    digest.clone_or_update(site_dir, str(blog_repo), "main")
+    posts = digest.discover_posts(site_dir)
+    slugs = {p.slug for p in posts}
+    assert slugs == {"first-post", "custom-bundle-slug"}
+    for post in posts:
+        assert post.sha  # every post has a real git blob sha
+
+
+def test_slug_rule_prefers_frontmatter_then_bundle_dir_then_filename() -> None:
+    assert digest.slug_for("content/posts/x.md", {}) == "x"
+    assert digest.slug_for("content/posts/x/index.md", {}) == "x"
+    assert digest.slug_for("content/posts/x.md", {"slug": "explicit"}) == "explicit"
+
+
+def test_toolchain_reports_hugo_version_and_theme_submodule(
+    tmp_path: Path, blog_repo: Path
+) -> None:
+    site_dir = tmp_path / "site"
+    digest.clone_or_update(site_dir, str(blog_repo), "main")
+    toolchain = digest.parse_toolchain(site_dir)
+    assert toolchain.hugo_version == "0.164.0"
+    assert len(toolchain.submodules) == 1
+    assert toolchain.submodules[0]["path"] == "themes/stub-theme"
+    assert toolchain.submodules[0]["commit"]
+
+
+def _build(
+    data_dir: Path, blog_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Store, AdminServices]:
+    monkeypatch.setenv("CHRONICLE_DIGEST_REPO_URL", str(blog_repo))
+    store = Store.open(data_dir)
+    admin = AdminServices.build(data_dir)
+    return store, admin
+
+
+def test_digest_without_any_source_configured_fails_honestly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CHRONICLE_DIGEST_REPO_URL", raising=False)
+    data_dir = tmp_path / "data"
+    store = Store.open(data_dir)
+    admin = AdminServices.build(data_dir)
+    with pytest.raises(DigestNotConfigured):
+        run_digest(store, "chronicle", admin)
+
+
+def test_digest_run_creates_posts_and_a_second_run_is_a_no_op(
+    tmp_path: Path, blog_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, admin = _build(tmp_path / "data", blog_repo, monkeypatch)
+
+    first = run_digest(store, "chronicle", admin)
+    assert first.created == 2
+    assert first.updated == 0
+    assert first.hugo_version == "0.164.0"
+    assert first.submodule_count == 1
+
+    posts = {p.slug for p in store.list_posts()}
+    assert posts == {"first-post", "custom-bundle-slug"}
+
+    before_head = subprocess.run(
+        ["git", "-C", str(store.repo_dir), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    second = run_digest(store, "chronicle", admin)
+    assert second.created == 0
+    assert second.updated == 0
+    assert second.unchanged == 2
+
+    after_head = subprocess.run(
+        ["git", "-C", str(store.repo_dir), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert before_head == after_head, "an unchanged digest must make no commit"
+
+    status = admin.read_digest_status()
+    assert status is not None
+    assert status["created"] == 0
+
+    toolchain = admin.read_toolchain()
+    assert toolchain is not None
+    assert toolchain["hugo_version"] == "0.164.0"
+    assert toolchain["submodules"][0]["path"] == "themes/stub-theme"
+
+    store.close()
+
+
+def test_digest_reports_an_update_when_a_post_changes(
+    tmp_path: Path, blog_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, admin = _build(tmp_path / "data", blog_repo, monkeypatch)
+    run_digest(store, "chronicle", admin)
+
+    post_path = blog_repo / "content" / "posts" / "first-post.md"
+    post_path.write_text(
+        "---\ntitle: First Post Revised\ndate: 2024-01-01\n---\nbody one, edited\n",
+        encoding="utf-8",
+    )
+    _git(blog_repo, "add", "-A")
+    _git(blog_repo, "commit", "-m", "revise first post")
+
+    second = run_digest(store, "chronicle", admin)
+    assert second.created == 0
+    assert second.updated == 1
+    assert second.unchanged == 1
+    assert store.get_post("first-post").title == "First Post Revised"
+    store.close()

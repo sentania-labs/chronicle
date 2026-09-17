@@ -46,3 +46,35 @@ def test_events_are_cursor_based(client: TestClient, agent_token: str) -> None:
     assert client.get(
         "/v1/events", params={"since": later["next_cursor"]}, headers=auth(agent_token)
     ).json() == {"events": [], "next_cursor": 3}
+
+
+def test_claim_release_and_image_attach_detach_all_write_events(
+    client: TestClient, agent_token: str
+) -> None:
+    from .conftest import png_bytes
+
+    draft_id = client.post("/v1/drafts", json={}, headers=auth(agent_token)).json()["id"]
+    client.post(f"/v1/drafts/{draft_id}/claim", headers=auth(agent_token))
+    client.post(f"/v1/drafts/{draft_id}/release", headers=auth(agent_token))
+
+    image_id = client.post(
+        "/v1/images",
+        files={"file": ("f.png", png_bytes(), "image/png")},
+        headers=auth(agent_token),
+    ).json()["image_id"]
+    client.put(
+        f"/v1/drafts/{draft_id}/images/{image_id}",
+        json={"role": "inline"},
+        headers=auth(agent_token),
+    )
+    client.delete(f"/v1/drafts/{draft_id}/images/{image_id}", headers=auth(agent_token))
+
+    events = client.get("/v1/events", headers=auth(agent_token)).json()["events"]
+    types = [event["type"] for event in events]
+    assert types == [
+        "draft.created",
+        "draft.claim",
+        "draft.release",
+        "draft.image_attach",
+        "draft.image_detach",
+    ]

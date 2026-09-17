@@ -1,9 +1,12 @@
 """The `chronicle` command: operator jobs that do not need the API running.
 
-Two of them today. `reindex` rebuilds the derived SQLite index from the files
-under `data/repo/` and `data/images/` (ADR 006). `token` issues, revokes, and
-lists consumer tokens; an issued token is printed once to stdout and never
-logged or stored in plaintext.
+`reindex` rebuilds the derived SQLite index from the files under
+`data/repo/` and `data/images/` (ADR 006). `token` issues, revokes, and lists
+consumer tokens; an issued token is printed once to stdout and never logged
+or stored in plaintext. `digest` clones or fetches the configured blog repo
+into `data/site/` and writes post records (spec section 10 step 3); with no
+GitHub App configured yet, pass `CHRONICLE_DIGEST_REPO_URL` for a public
+https clone, which needs no credentials.
 """
 
 from __future__ import annotations
@@ -13,9 +16,12 @@ import os
 import sys
 from pathlib import Path
 
+from .api.admin_deps import AdminServices
+from .api.digest_runner import DigestNotConfigured
+from .api.digest_runner import run as run_digest
 from .api.main import DATA_DIR_ENV
 from .api.store import Store
-from .api.tokens import TokenStore
+from .api.tokens import UI_TOKEN_NAME, TokenStore
 
 
 def _data_dir(args: argparse.Namespace) -> Path:
@@ -34,9 +40,31 @@ def _reindex(args: argparse.Namespace) -> int:
     return 0
 
 
+def _digest(args: argparse.Namespace) -> int:
+    data_dir = _data_dir(args)
+    store = Store.open(data_dir)
+    admin = AdminServices.build(data_dir)
+    try:
+        summary = run_digest(store, "chronicle", admin)
+    except DigestNotConfigured as exc:
+        print(f"digest not configured: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+    print(f"created: {summary.created}")
+    print(f"updated: {summary.updated}")
+    print(f"unchanged: {summary.unchanged}")
+    print(f"hugo version: {summary.hugo_version}")
+    print(f"theme submodules: {summary.submodule_count}")
+    return 0
+
+
 def _token(args: argparse.Namespace) -> int:
     tokens = TokenStore(_data_dir(args) / "state")
     if args.token_command == "issue":
+        if args.name == UI_TOKEN_NAME:
+            print(f"{UI_TOKEN_NAME!r} is reserved for the UI backend", file=sys.stderr)
+            return 1
         print(tokens.issue(args.name))
         return 0
     if args.token_command == "revoke":
@@ -68,6 +96,9 @@ def build_parser() -> argparse.ArgumentParser:
     revoke = token_commands.add_parser("revoke", help="revoke every token with this name")
     revoke.add_argument("name")
     token_commands.add_parser("list", help="list token names and use, never secrets")
+
+    digest = commands.add_parser("digest", help="digest the configured blog repo's main branch")
+    digest.set_defaults(handler=_digest)
 
     return parser
 

@@ -24,7 +24,7 @@ def seed(store: Store) -> dict[str, str]:
         "ghostwriter", "a brief", [Material(name="notes", text="raw")], []
     )
     store.act_on_submission(submission.id, "claim", "ghostwriter")
-    draft = store.create_draft("ghostwriter", from_submission=submission.id)
+    draft, _ = store.create_draft("ghostwriter", from_submission=submission.id)
     store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "first body")
     store.save_draft(draft.id, "scott", 1, FRONTMATTER, "second body", message="tightened")
     image, _ = store.put_image(png_bytes(), "feature.png")
@@ -59,7 +59,7 @@ def test_every_write_is_one_commit(store: Store) -> None:
 
 
 def test_feedback_lands_in_the_same_commit_as_the_status_change(store: Store) -> None:
-    draft = store.create_draft("ghostwriter")
+    draft, _ = store.create_draft("ghostwriter")
     store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
     store.act_on_draft(draft.id, "submit", "ghostwriter", actor_is_ui=False)
     store.act_on_draft(
@@ -109,7 +109,7 @@ def seed_sha(store: Store) -> str:
 
 
 def test_concurrent_saves_at_one_base_version_leave_a_single_winner(store: Store) -> None:
-    draft = store.create_draft("ghostwriter")
+    draft, _ = store.create_draft("ghostwriter")
     writers = 8
     start = threading.Barrier(writers)
     outcomes: list[str] = []
@@ -214,7 +214,7 @@ def test_list_submissions_is_a_snapshot_under_the_store_lock(store: Store) -> No
 
 
 def test_slug_is_pinned_at_first_preview_and_stays(store: Store) -> None:
-    draft = store.create_draft("ghostwriter")
+    draft, _ = store.create_draft("ghostwriter")
     store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
     previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
     assert previewed.slug == "a-post-about-drift"
