@@ -113,33 +113,71 @@ def create_backup(data_dir: Path, out: Path | None = None) -> Path:
     of record, and shipping it would only grow the bundle and go stale the
     moment restore's own reindex runs.
     """
-    members = [
+    candidates = [
         (path, arcname)
         for path, arcname in _iter_bundle_files(data_dir)
         if not arcname.startswith("repo/index/")
     ]
     counts = _counts(data_dir)
-    manifest: dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION,
-        "created_at": datetime.now(tz=UTC).isoformat(timespec="seconds"),
-        "chronicle_version": chronicle_version,
-        "counts": counts,
-        "files": {arcname: _sha256_file(path) for path, arcname in members},
-    }
 
     bundle_name = f"chronicle-backup-{_utc_stamp()}.tar.gz"
     bundle_path = (out / bundle_name) if out and out.is_dir() else (out or Path(bundle_name))
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Each member is hashed and tarred from the same single read of the
+    # file, through _HashingReader, rather than one read to hash and a
+    # second (tar.add's own) to tar: this is a live tree (the api keeps
+    # writing while a backup runs), and two separate reads of a file
+    # rewritten in between would produce a bundle whose own manifest
+    # checksum does not match its own tar member. The manifest itself is
+    # written last, once every real member's hash is known, so it can
+    # still be the thing a caller reads first on extraction (member order
+    # in a tar does not matter, `_load_manifest` looks it up by name). A
+    # file that vanishes between listing and opening it (a builder
+    # claiming `repo/runs/queue/<run_id>.json`, a git repack) is dropped
+    # from the bundle rather than crashing the whole backup; it is
+    # domain-transient, not a record backup exists to protect.
+    files: dict[str, str] = {}
     with tarfile.open(bundle_path, "w:gz") as tar:
+        for path, arcname in candidates:
+            try:
+                info = tar.gettarinfo(path, arcname=arcname)
+                handle = path.open("rb")
+            except FileNotFoundError:
+                continue
+            with handle:
+                reader = _HashingReader(handle)
+                tar.addfile(info, reader)
+                files[arcname] = reader.sha256.hexdigest()
+
+        manifest: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "created_at": datetime.now(tz=UTC).isoformat(timespec="seconds"),
+            "chronicle_version": chronicle_version,
+            "counts": counts,
+            "files": files,
+        }
         manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
-        info = tarfile.TarInfo(name=MANIFEST_NAME)
-        info.size = len(manifest_bytes)
-        tar.addfile(info, io.BytesIO(manifest_bytes))
-        for path, arcname in members:
-            tar.add(path, arcname=arcname, recursive=False)
+        manifest_info = tarfile.TarInfo(name=MANIFEST_NAME)
+        manifest_info.size = len(manifest_bytes)
+        tar.addfile(manifest_info, io.BytesIO(manifest_bytes))
 
     return bundle_path
+
+
+class _HashingReader:
+    """Wraps a file so tar.addfile's own streamed read computes sha256
+    over the identical bytes it writes into the tar, one filesystem read
+    per member, never a separate read for hashing and another for taring."""
+
+    def __init__(self, fileobj: Any) -> None:
+        self._fileobj = fileobj
+        self.sha256 = hashlib.sha256()
+
+    def read(self, size: int = -1) -> bytes:
+        chunk: bytes = self._fileobj.read(size)
+        self.sha256.update(chunk)
+        return chunk
 
 
 def _safe_member(member: tarfile.TarInfo, staging: Path) -> Path:
