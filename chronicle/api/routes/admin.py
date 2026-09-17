@@ -11,14 +11,17 @@ from __future__ import annotations
 
 import json
 import secrets
+import tarfile
 import threading
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
+from ... import backup as backup_mod
 from .. import admin_templates as tpl
 from .. import crypto
 from ..admin_auth import (
@@ -528,6 +531,140 @@ def tokens_reenable_ui(
 ) -> HTMLResponse:
     token = services.tokens.reenable_ui_token()
     return HTMLResponse(tpl.tokens_page(_token_rows(services), minted=token))
+
+
+# --- Backup and restore (spec section 13, ADR 016) -------------------------
+
+LAST_BACKUP_FILE_NAME = "last_backup.json"
+BACKUP_TMP_DIR_NAME = "backup-tmp"
+
+
+def _data_dir(admin: AdminServices) -> Path:
+    return admin.state_dir.parent
+
+
+def _backup_tmp_dir(admin: AdminServices) -> Path:
+    tmp_dir = admin.state_dir / BACKUP_TMP_DIR_NAME
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    return tmp_dir
+
+
+def _read_last_backup(admin: AdminServices) -> str | None:
+    path = admin.state_dir / LAST_BACKUP_FILE_NAME
+    if not path.exists():
+        return None
+    try:
+        return str(json.loads(path.read_text(encoding="utf-8"))["created_at"])
+    except (OSError, json.JSONDecodeError, KeyError):
+        return None
+
+
+def _record_last_backup(admin: AdminServices) -> None:
+    path = admin.state_dir / LAST_BACKUP_FILE_NAME
+    payload = {"created_at": datetime.now(tz=UTC).isoformat(timespec="seconds")}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+@router.get("/backup", response_class=HTMLResponse)
+def backup_page(admin: AdminServices = Depends(require_admin_session_html)) -> HTMLResponse:
+    return HTMLResponse(tpl.backup_page(last_backup=_read_last_backup(admin)))
+
+
+@router.get("/backup/create")
+def backup_create_download(admin: AdminServices = Depends(require_admin_session_html)) -> Any:
+    # Written under state/backup-tmp/, never a web-served path (spec
+    # section 10): the file exists only long enough to stream, and the
+    # generator's `finally` deletes it whether the download completes,
+    # fails partway, or the client disconnects.
+    bundle_path = backup_mod.create_backup(_data_dir(admin), _backup_tmp_dir(admin))
+    _record_last_backup(admin)
+
+    def stream() -> Any:
+        try:
+            with bundle_path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(1 << 20)
+                    if not chunk:
+                        break
+                    yield chunk
+        finally:
+            bundle_path.unlink(missing_ok=True)
+
+    return StreamingResponse(
+        stream(),
+        media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{bundle_path.name}"'},
+    )
+
+
+@router.post("/backup/upload", response_class=HTMLResponse)
+async def backup_upload(
+    admin: AdminServices = Depends(require_admin_session_html),
+    file: UploadFile = File(...),
+) -> HTMLResponse:
+    """Save the upload and show its manifest counts, without restoring
+    anything yet: `backup_restore` below re-validates checksums and member
+    safety from scratch, so this preview only ever reads `manifest.json`."""
+    token = secrets.token_hex(16)
+    staged_path = _backup_tmp_dir(admin) / f"upload-{token}.tar.gz"
+    raw = await file.read()
+    staged_path.write_bytes(raw)
+    try:
+        with tarfile.open(staged_path, "r:gz") as tar:
+            manifest_bytes = tar.extractfile(tar.getmember(backup_mod.MANIFEST_NAME))
+            if manifest_bytes is None:
+                raise KeyError(backup_mod.MANIFEST_NAME)
+            manifest = json.loads(manifest_bytes.read())
+    except (tarfile.TarError, KeyError, json.JSONDecodeError) as exc:
+        staged_path.unlink(missing_ok=True)
+        return HTMLResponse(
+            tpl.backup_page(
+                last_backup=_read_last_backup(admin), notice=f"not a valid bundle: {exc}"
+            ),
+            status_code=400,
+        )
+    return HTMLResponse(tpl.backup_confirm_page(token=token, manifest=manifest))
+
+
+@router.post("/backup/restore", response_class=HTMLResponse)
+def backup_restore(
+    token: str = Form(...),
+    confirm: str = Form(...),
+    admin: AdminServices = Depends(require_admin_session_html),
+) -> HTMLResponse:
+    if confirm.strip() != "restore":
+        return HTMLResponse(
+            tpl.backup_page(
+                last_backup=_read_last_backup(admin), notice='type "restore" to confirm'
+            ),
+            status_code=400,
+        )
+    staged_path = _backup_tmp_dir(admin) / f"upload-{token}.tar.gz"
+    if not staged_path.exists():
+        return HTMLResponse(
+            tpl.backup_page(
+                last_backup=_read_last_backup(admin), notice="upload expired, try again"
+            ),
+            status_code=400,
+        )
+    try:
+        report = backup_mod.restore_backup(_data_dir(admin), staged_path)
+    except backup_mod.BackupError as exc:
+        return HTMLResponse(
+            tpl.backup_page(last_backup=_read_last_backup(admin), notice=str(exc)), status_code=400
+        )
+    finally:
+        staged_path.unlink(missing_ok=True)
+
+    notice = f"restored: before={report.before} after={report.after}"
+    if report.credentials_decryptable is False:
+        notice += (
+            "; github-app.json could not be decrypted under this instance's key"
+            " (reconnect GitHub through the manifest flow)"
+        )
+    return HTMLResponse(
+        tpl.backup_page(last_backup=_read_last_backup(admin), notice=notice, notice_kind="ok")
+    )
 
 
 @api_router.get("/tokens")
