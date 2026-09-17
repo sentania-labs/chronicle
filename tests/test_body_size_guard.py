@@ -18,6 +18,24 @@ from chronicle.api.main import MAX_REQUEST_BODY_BYTES, BodySizeLimitMiddleware
 from tests.conftest import auth
 
 
+def test_backup_upload_path_gets_a_higher_ceiling_than_the_default(
+    admin_client: TestClient,
+) -> None:
+    """A restore bundle (repo/ with .git history, every image) routinely
+    exceeds the default 8 MiB ceiling; /admin/backup/upload must accept a
+    body past that default without needing the whole request exempted from
+    size limits altogether. Body is garbage, so this only proves the size
+    gate let it through (it fails validation afterwards, not on size)."""
+    oversized = b"0" * (MAX_REQUEST_BODY_BYTES + (1024 * 1024))
+    response = admin_client.post(
+        "/admin/backup/upload",
+        files={"file": ("bundle.tar.gz", oversized, "application/gzip")},
+    )
+    assert response.status_code != 413
+    assert response.status_code == 400
+    assert "not a valid bundle" in response.text
+
+
 def test_declared_content_length_over_the_ceiling_is_rejected(
     client: TestClient, agent_token: str
 ) -> None:

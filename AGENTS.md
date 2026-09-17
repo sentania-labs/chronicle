@@ -199,6 +199,23 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   submit every state-changing UI form. Only the genuine absence of both
   `Origin` and `Referer` is allowed through; a present-but-unparsable value
   never is.
+- **The image directory is pinned once and stored, never recomputed from
+  `draft.slug`.** `Draft.image_dir` (ADR 015) is the last non-empty path
+  segment of `frontmatter["url"]` when set, the pinned slug otherwise; it
+  is set at `_fill_from_post` (import) or `_pin_slug` (a new draft's first
+  preview or approve) and read as-is by `convert.convert`. A real post's
+  digest slug (`digest.slug_for`) can carry a dated filename stem
+  (`2026-08-01-my-post`) that is never what `static/images/` on main is
+  named; `_import_post_images`'s fallback filesystem sweep looks in
+  `static/images/<image_dir>/`, not `static/images/<slug>/`, for exactly
+  this reason (found live in the C6 three-post diff: the wrong directory
+  silently dropped every unreferenced image on a dated-filename post).
+- **`chronicle/backup.py`'s restore swap keeps the displaced tree until
+  reindex succeeds, and `_safe_member` runs before any extraction.** A tar
+  member with an absolute path, a `..` segment, or a symlink is refused
+  before `tarfile.extractall` ever touches disk; the manifest's checksums
+  are then verified against the extracted staging tree before anything
+  under the data directory is renamed. See ADR 016.
 - **The editor's action buttons and the 409 conflict view both know about
   more than `transitions.DRAFT_TRANSITIONS` alone.** `Store.act_on_draft`
   separately refuses a re-approve while a publish PR is already open
@@ -255,11 +272,19 @@ container.
 The preview build (C3) is unchanged: `chronicle/builder/main.py` still
 polls the queue for `preview` runs only.
 
+## Round C6 status
+
+Image directory rule (ADR 015), backup and restore (ADR 016, `chronicle
+backup create|restore`, `/admin/backup`), a release pipeline gated to `v*`
+tags (SBOM, cosign keyless sign and verify, immutable ghcr.io tags),
+`compose-smoke` wired into CI on pull requests (it needed no GitHub App or
+network access; the C3/C4 note below was stale), a Content-Security-Policy
+header on every response, and pagination on the three UI listing pages.
+See `docs/pr-bodies/c6.md` for the live-check evidence and the adversarial
+review's findings and disposition.
+
 ### Not done, noticed
 
-- `ci/compose-smoke.sh` is not wired into CI: the runners have no fixture
-  blog repo or GitHub App to digest against (carried over from C3; still
-  C6's problem, not a C4 fix).
 - This round assumes a single api replica (ADR 013): the publisher has no
   lease the way the builder does, because nothing today runs more than one
   api process against the same data directory. A second replica needs that

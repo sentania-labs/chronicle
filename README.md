@@ -295,9 +295,9 @@ data/
   site/                          clone of the blog repo main, disposable
 ```
 
-`instance.key` is never included in a backup bundle (the bundle format
-itself arrives in a later round): a bundle that carried it would make
-`github-app.json`'s encryption pointless. See ADR 008.
+`instance.key` is never included in a backup bundle: a bundle that carried
+it would make `github-app.json`'s encryption pointless. See ADR 008 and
+"Backup and restore" below.
 
 A queue entry is `{"run_id", "draft_id", "kind", "enqueued_at"}`, where
 `kind` is `preview`, `publish`, or `unpublish`.
@@ -305,6 +305,47 @@ A queue entry is `{"run_id", "draft_id", "kind", "enqueued_at"}`, where
 Every write under `repo/` is one git commit authored by the acting token's
 name, or `scott` for the `ui` token. `chronicle reindex` rebuilds
 `index/chronicle.db` from the files; nothing is lost if it is deleted.
+
+## Image directory
+
+Every attached image lands at `static/images/<image_dir>/<filename>` in
+the published post, where `image_dir` is the post's own URL slug (the
+last non-empty path segment of `url`), never the dated filename and never
+`draft.slug` when the two differ (ADR 015). It is pinned once, at the
+same moment the slug is, and stored on `Draft.image_dir`; nothing
+relocates it on a later save or republish. Preview and publish share the
+same conversion (`chronicle/api/convert.py`), so a preview's image paths
+are always what publish would write. `chronicle convert-dry-run <draft_id>`
+prints the post path, every image destination, and the rewritten
+references without touching GitHub, which is how this rule is checked
+against a real blog clone without a live publish.
+
+## Backup and restore
+
+`chronicle backup create [--out path]` writes a checksummed, gzip tarball
+(`chronicle-backup-<UTC stamp>.tar.gz`): `repo/` with its git history,
+`images/`, and the encrypted portion of `state/` (`tokens.json`,
+`admin.json`, `github-app.json`, `ui_disabled` if present). Never
+`instance.key`, `preview/`, `site/`, `builder-work/`, `claim-code`, or
+`ui_token.txt`. `manifest.json` at the root carries record counts and a
+sha256 for every other member.
+
+`chronicle backup restore <bundle> --yes` validates the manifest, refuses
+an unknown `schema_version`, verifies every member's checksum (refusing on
+any mismatch, missing, or extra member), then swaps `repo/`, `images/`,
+and the state files into place, keeping the displaced tree until
+`chronicle reindex` against the new one succeeds. Run it against a stopped
+instance (api and builder both, ADR 016) since the builder holds its own
+long-lived connection to the index that does not notice the swap; the one
+exception is `/admin/backup`'s upload path, which restores from within
+the running instance after Scott types `restore` to confirm, and then
+needs a manual builder restart for the same reason. Either path needs a
+`chronicle digest` run afterward before a preview or publish will work,
+since `site/` is not part of the bundle.
+
+See [docs/backup.md](docs/backup.md) for the exact file layout and JSON
+schema, precise enough to hand-build an import bundle without reading the
+code, and ADR 016 for the restore swap's reasoning.
 
 ## The three images
 
@@ -426,6 +467,17 @@ consumer tokens at any point after claiming; `ui` is reserved. `/admin`
 itself is the status page: last digest, post count, toolchain drift, App and
 repo connection state, submissions and drafts by status, disk use, and git
 health.
+
+## Release
+
+Images are built and pushed only on a `v*` tag, never from a pull request
+or from main: `.github/workflows/ci.yml`'s `publish` job builds each of
+the three images once, attaches an SBOM, refuses a tag whose image already
+exists in the registry (immutable tags), signs with cosign keyless, and
+verifies the signature before the `release` job writes the GitHub release
+from merged pull request titles. `pull_request` runs also get
+`make compose-smoke` against fresh volumes. See CONTRIBUTING.md for the
+tag-and-verify procedure.
 
 ## Where the spec lives
 

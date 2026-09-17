@@ -15,6 +15,7 @@ from html import escape
 from posixpath import basename
 from typing import Any
 
+from .pagination import Page
 from .transitions import DRAFT_TRANSITIONS, RESERVED_ACTIONS
 
 STYLE_LINKS = (
@@ -53,7 +54,29 @@ def page(
 <h1>{escape(title)}</h1>
 {notice_html}
 {body}
+<script src="/static/ui.js"></script>
 </body></html>"""
+
+
+def _pagination_links(pg: Page[Any], base_url: str, *, extra: str = "") -> str:
+    """Previous/next links and the total count, `?page=N` on `base_url`,
+    with whatever other query string (`extra`, already a leading `&...`)
+    the current listing carries (a status filter, a search term)."""
+    prev_html = (
+        f'<a href="{base_url}?page={pg.page - 1}{extra}">&laquo; previous</a>'
+        if pg.has_previous
+        else "<span>&laquo; previous</span>"
+    )
+    next_html = (
+        f'<a href="{base_url}?page={pg.page + 1}{extra}">next &raquo;</a>'
+        if pg.has_next
+        else "<span>next &raquo;</span>"
+    )
+    return (
+        f'<p class="pagination">{prev_html} &nbsp; '
+        f"page {pg.page} of {pg.total_pages} &nbsp; ({pg.total} total) &nbsp; "
+        f"{next_html}</p>"
+    )
 
 
 def _status_options(current: str | None) -> str:
@@ -69,8 +92,8 @@ def _status_options(current: str | None) -> str:
 # --- Submissions -------------------------------------------------------
 
 
-def submissions_list_page(submissions: list[dict[str, Any]], *, banner: bool) -> str:
-    if not submissions:
+def submissions_list_page(pg: Page[dict[str, Any]], *, banner: bool) -> str:
+    if not pg.items:
         rows = "<tr><td colspan=6>none</td></tr>"
     else:
         rows = "".join(
@@ -82,13 +105,14 @@ def submissions_list_page(submissions: list[dict[str, Any]], *, banner: bool) ->
             f"<td>{len(s['image_ids'])}</td>"
             f"<td>{escape(s['claimed_by'] or '-')}</td>"
             "</tr>"
-            for s in submissions
+            for s in pg.items
         )
     body = f"""
 <table>
 <tr><th>brief</th><th>status</th><th>from</th><th>created</th><th>images</th><th>claimed by</th></tr>
 {rows}
 </table>
+{_pagination_links(pg, "/content/submissions")}
 """
     return page("Submissions", body, banner=banner)
 
@@ -189,22 +213,23 @@ author: {escape(last_author)} | updated: {escape(draft["updated_at"])} | claim: 
 """
 
 
-def drafts_board_page(
-    rows: list[dict[str, Any]], *, status_filter: str | None, banner: bool
-) -> str:
+def drafts_board_page(pg: Page[dict[str, Any]], *, status_filter: str | None, banner: bool) -> str:
     cards = (
         "".join(
             _draft_card(row["draft"], row["last_author"], row["run_info"], row["flags"])
-            for row in rows
+            for row in pg.items
         )
         or "<p>no drafts.</p>"
     )
+    extra = f"&status={escape(status_filter)}" if status_filter else ""
     body = f"""
 <form method="get" action="/content/drafts">
 <label for="status">Filter by status</label>
-<select id="status" name="status" onchange="this.form.submit()">{_status_options(status_filter)}</select>
+<select id="status" name="status">{_status_options(status_filter)}</select>
+<button type="submit">Filter</button>
 </form>
 {cards}
+{_pagination_links(pg, "/content/drafts", extra=extra)}
 """
     return page("Drafts", body, banner=banner)
 
@@ -213,7 +238,7 @@ def drafts_board_page(
 
 
 def import_page(
-    posts: list[dict[str, Any]], q: str, *, banner: bool, notice: str | None = None
+    pg: Page[dict[str, Any]], q: str, *, banner: bool, notice: str | None = None
 ) -> str:
     rows = "".join(
         "<tr>"
@@ -224,8 +249,9 @@ def import_page(
         f'<input type="hidden" name="slug" value="{escape(p["slug"])}">'
         '<button type="submit">Import as draft</button></form></td>'
         "</tr>"
-        for p in posts
+        for p in pg.items
     )
+    extra = f"&q={escape(q)}" if q else ""
     body = f"""
 <form method="get" action="/content/import">
 <label for="q">Search published posts</label>
@@ -236,6 +262,7 @@ def import_page(
 <tr><th>slug</th><th>title</th><th>date</th><th></th></tr>
 {rows or "<tr><td colspan=4>no posts match.</td></tr>"}
 </table>
+{_pagination_links(pg, "/content/import", extra=extra)}
 """
     return page(
         "Import published post",
@@ -481,7 +508,6 @@ def editor_page(
 </div>
 <button type="submit">Save</button>
 </form>
-<script src="/static/ui.js"></script>
 <h2>Images</h2>
 {_image_list(draft["id"], draft["images"])}
 <form method="post" action="/content/drafts/{escape(draft["id"])}/images" enctype="multipart/form-data">

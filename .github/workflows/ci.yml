@@ -1,23 +1,26 @@
 # Placement, decided per the lab's CI rule rather than by habit: this
 # repository is private, but every job here either needs a Docker daemon
-# (the three image builds) or needs nothing special (lint, test), so nothing
-# uses `runs-on: lab`. Deploying Chronicle is lab-deployment's job, on the far
-# side of publication.
+# (the three image builds, compose smoke) or needs nothing special (lint,
+# test), so nothing uses `runs-on: lab`. Deploying Chronicle is
+# lab-deployment's job, on the far side of publication.
 #
-# This round (C0) only lints, tests, and proves the three images build.
-# Image signing, SBOM generation, publishing, and release-from-tag jobs
-# follow coppermind's ci.yml shape and arrive in round C6, once there is
-# something worth releasing.
+# Gates, in order: lint and test -> release-tag validation -> image build
+# (every push and PR, never pushed) -> compose-smoke (pull requests only) ->
+# publish (only a v* tag: push, SBOM, sign, verify, release notes).
 #
 # Every job that fires on pull_request carries the sentania-labs fork gate,
 # so a fork's pull request cannot run privileged steps under this repo's
-# context.
+# context. Images are never pushed, signed, or released from a pull request
+# or from a push to main: only `publish`, gated on `refs/tags/v*`, has
+# `packages: write` or `id-token: write`, and only that job logs in to
+# ghcr.io.
 name: ci
 
 on:
   pull_request:
   push:
     branches: [main]
+    tags: ["v*"]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -55,8 +58,28 @@ jobs:
       - run: make setup
       - run: make test
 
+  # Tags are releases. Refuse malformed, lightweight, or off-main tags
+  # before the publish job (which needs this tag to be trustworthy) runs.
+  # Non-tag runs pass this gate with nothing to check.
+  release-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          bash ci/check-release-tag.sh
+
   # Builds only, no push: proves the three targets build from this single
-  # Dockerfile. Publishing arrives in C6.
+  # Dockerfile, on every push and pull request. `publish` (tag-only) is what
+  # actually ships an image; this job's own build is not reused there, since
+  # a tag build stamps CHRONICLE_BUILD_VERSION from the tag and a PR build
+  # never should.
   image:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.owner.login == 'sentania-labs'
     needs: [lint, test]
@@ -78,3 +101,109 @@ jobs:
           load: true
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+
+  # Seen working, not merely built: fresh named volumes, a fixture blog repo
+  # built in a temp dir (no GitHub App or network access needed), digest,
+  # import, preview, and the built page answers through the preview
+  # container. Pull requests only, the same fork gate as every other
+  # privileged job; a push to main gets the same coverage from the pull
+  # request that landed it.
+  compose-smoke:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.owner.login == 'sentania-labs'
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make compose-smoke
+
+  # Only a tag push receives package and signing authority. Builds each
+  # image exactly once, attaches an SBOM, pushes to ghcr.io under an
+  # immutable version tag (refuses if that tag already exists), signs with
+  # cosign keyless, and verifies the signature in the same job before
+  # creating the GitHub release.
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    # compose-smoke is pull_request-only and always shows as skipped on a
+    # tag push; naming it here would make `needs` treat that skip as a
+    # failure and `publish` would never run. A tag is always cut from a
+    # commit that already went through compose-smoke on the pull request
+    # that landed it (CONTRIBUTING.md's release procedure), so this does not
+    # skip the check, only the redundant second run of it.
+    needs: [lint, test, image, release-tag]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [api, builder, preview]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Login to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refuse a tag that has already published this image
+        env:
+          IMAGE: ghcr.io/sentania-labs/chronicle-${{ matrix.target }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          if docker manifest inspect "$IMAGE:$VERSION" >/dev/null 2>&1; then
+            echo "$IMAGE:$VERSION already exists in the registry; tags are immutable, cut a new version" >&2
+            exit 1
+          fi
+      - name: Build and push ${{ matrix.target }}
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          tags: ghcr.io/sentania-labs/chronicle-${{ matrix.target }}:${{ github.ref_name }}
+          push: true
+          sbom: true
+          build-args: |
+            HUGO_VERSION=0.164.0
+            BUILD_VERSION=${{ github.ref_name }}
+            BUILD_SHA=${{ github.sha }}
+      - name: Sign the pushed image (keyless)
+        env:
+          IMAGE: ghcr.io/sentania-labs/chronicle-${{ matrix.target }}
+        run: cosign sign --yes "$IMAGE@${{ steps.build.outputs.digest }}"
+      - name: Verify the signature
+        env:
+          IMAGE: ghcr.io/sentania-labs/chronicle-${{ matrix.target }}
+        run: |
+          cosign verify "$IMAGE@${{ steps.build.outputs.digest }}" \
+            --certificate-identity-regexp "^https://github.com/sentania-labs/chronicle/.github/workflows/ci.yml@refs/tags/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Build release notes from merged PR titles
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: bash ci/release-notes.sh > "$RUNNER_TEMP/release-notes.md"
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          gh release create "$VERSION" --verify-tag --title "$VERSION" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"

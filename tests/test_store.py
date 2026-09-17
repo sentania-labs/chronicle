@@ -229,6 +229,42 @@ def test_slug_is_pinned_at_first_preview_and_stays(store: Store) -> None:
     assert store.get_draft(draft.id).slug == "a-post-about-drift"
 
 
+def test_slug_pin_sets_image_dir_from_slug_when_no_url(store: Store) -> None:
+    draft, _ = store.create_draft("ghostwriter")
+    store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
+    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+    assert previewed.image_dir == "a-post-about-drift"
+
+
+def test_slug_pin_refuses_when_image_dir_exists_on_main(store: Store) -> None:
+    (store.site_dir / "static" / "images" / "a-post-about-drift").mkdir(parents=True)
+    draft, _ = store.create_draft("ghostwriter")
+    store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
+    with pytest.raises(ApiError) as excinfo:
+        store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.code == "image_dir_collision"
+
+
+def test_slug_pin_refuses_when_another_draft_already_pins_the_image_dir(store: Store) -> None:
+    first, _ = store.create_draft("ghostwriter")
+    store.save_draft(first.id, "ghostwriter", 0, FRONTMATTER, "body")
+    store.act_on_draft(first.id, "preview", "ghostwriter", actor_is_ui=False)
+
+    second, _ = store.create_draft("ghostwriter")
+    store.save_draft(
+        second.id,
+        "ghostwriter",
+        0,
+        {**FRONTMATTER, "slug": "a-second-post", "url": "/2026/09/a-post-about-drift/"},
+        "body",
+    )
+    with pytest.raises(ApiError) as excinfo:
+        store.act_on_draft(second.id, "preview", "ghostwriter", actor_is_ui=False)
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.code == "image_dir_collision"
+
+
 @pytest.mark.parametrize("bad_slug", ["../x", "a/b", ""])
 def test_is_valid_slug_rejects_path_components(bad_slug: str) -> None:
     assert not is_valid_slug(bad_slug)

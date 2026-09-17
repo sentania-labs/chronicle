@@ -18,6 +18,19 @@ BUILDER_HEARTBEAT_PATH = ("state", "builder", "heartbeat.json")
 PUBLISHER_HEARTBEAT_PATH = ("state", "publisher", "heartbeat.json")
 WATCHER_HEARTBEAT_PATH = ("state", "watcher", "heartbeat.json")
 RECONCILE_HEARTBEAT_PATH = ("state", "reconcile", "heartbeat.json")
+# Matches routes/admin.py's LAST_BACKUP_FILE_NAME; duplicated as a literal
+# rather than imported to avoid a routes -> status -> routes import cycle.
+LAST_BACKUP_FILE_NAME = "last_backup.json"
+
+
+def _last_backup_at(admin: AdminServices) -> str | None:
+    path = admin.state_dir / LAST_BACKUP_FILE_NAME
+    if not path.exists():
+        return None
+    try:
+        return str(json.loads(path.read_text(encoding="utf-8"))["created_at"])
+    except (OSError, json.JSONDecodeError, KeyError):
+        return None
 
 
 def _dir_size(path: Path) -> int:
@@ -148,6 +161,7 @@ def build_status(admin: AdminServices, services: Services) -> dict[str, Any]:
         "github_repo": app_record.owner_repo if app_record else admin.settings.github_test_repo,
         "github_default_branch": app_record.default_branch if app_record else None,
         "last_digest_at": digest_status.get("finished_at") if digest_status else None,
+        "last_backup_at": _last_backup_at(admin),
         "post_count": len(store.list_posts()),
         "toolchain": toolchain_summary(admin, builder_hb),
         "submissions_by_status": submissions_by_status,

@@ -39,6 +39,7 @@ from .errors import ApiError, api_error_handler, http_error_handler, validation_
 from .index import SCHEMA_VERSION
 from .routes import build_v1_router
 from .routes.admin import api_router as admin_api_router
+from .routes.admin import cleanup_stale_backup_uploads
 from .routes.admin import router as admin_router
 from .routes.ui import router as ui_router
 
@@ -54,12 +55,57 @@ DATA_DIR_ENV = "CHRONICLE_DATA_DIR"
 # BodySizeLimitMiddleware below also enforces this on the stream itself, so a
 # chunked request with no (or a lying) Content-Length cannot get around it.
 MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024
+# A restore bundle carries repo/ (with .git history) and every image, easily
+# past the 8 MiB default; /admin/backup/upload is the one route that needs
+# a much larger ceiling. Still bounded, not exempted: even though the route
+# now copies the upload to disk in bounded chunks
+# (chronicle/api/routes/admin.py:backup_upload) rather than reading it whole
+# into memory, an unbounded cap would let a single upload exhaust the data
+# volume even though this route already sits behind an authenticated admin
+# session.
+MAX_BACKUP_UPLOAD_BYTES = 512 * 1024 * 1024
+BACKUP_UPLOAD_PATH = "/admin/backup/upload"
 
 
 class OversizedBody(Exception):
     def __init__(self, total: int) -> None:
         super().__init__(total)
         self.total = total
+
+
+CSP_HEADER = (
+    b"content-security-policy",
+    b"default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+)
+
+
+class ContentSecurityPolicyMiddleware:
+    """No inline scripts, ever, on any response: `ui.js`'s DOM sanitiser and
+    the CSP are two layers against the same threat (a draft body that
+    carries a script-bearing payload another consumer token wrote), not one
+    substituting for the other. `style-src 'unsafe-inline'` is here only for
+    `style="display:inline"` on a handful of one-line forms in
+    admin_templates.py and ui_templates.py; `img-src data:` is Hugo's own
+    inline-svg icon convention in the preview's rendered markdown, not
+    anything Chronicle's own templates emit.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_csp(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append(CSP_HEADER)
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_csp)
 
 
 class BodySizeLimitMiddleware:
@@ -71,15 +117,22 @@ class BodySizeLimitMiddleware:
     crossed, before a route handler ever sees the rest of the body.
     """
 
-    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+    def __init__(
+        self, app: ASGIApp, max_bytes: int, path_overrides: dict[str, int] | None = None
+    ) -> None:
         self.app = app
         self.max_bytes = max_bytes
+        self.path_overrides = path_overrides or {}
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
+        # Local, not `self.max_bytes`: the middleware instance is shared
+        # across every concurrent request, so a per-path ceiling must live
+        # on the stack, never mutated on `self`.
+        max_bytes = self.path_overrides.get(scope.get("path", ""), self.max_bytes)
         headers = dict(scope.get("headers") or [])
         content_length = headers.get(b"content-length")
         if content_length is not None:
@@ -87,8 +140,8 @@ class BodySizeLimitMiddleware:
                 declared = int(content_length)
             except ValueError:
                 declared = 0
-            if declared > self.max_bytes:
-                await _oversized_response(declared, self.max_bytes, send)
+            if declared > max_bytes:
+                await _oversized_response(declared, max_bytes, send)
                 return
 
         total = 0
@@ -100,14 +153,14 @@ class BodySizeLimitMiddleware:
                 total += (
                     len(message.get("body", b"")) if isinstance(message.get("body"), bytes) else 0
                 )
-                if total > self.max_bytes:
+                if total > max_bytes:
                     raise OversizedBody(total)
             return message
 
         try:
             await self.app(scope, limited_receive, send)
         except OversizedBody as exc:
-            await _oversized_response(exc.total, self.max_bytes, send)
+            await _oversized_response(exc.total, max_bytes, send)
 
 
 async def _oversized_response(declared: int, max_bytes: int, send: Send) -> None:
@@ -131,6 +184,7 @@ async def _oversized_response(declared: int, max_bytes: int, send: Send) -> None
 class Health(BaseModel):
     service: str
     status: str = "ok"
+    version: str = "dev"
 
 
 class Check(BaseModel):
@@ -188,6 +242,34 @@ def _index_check(services: Services | None) -> Check:
     return Check(name="index", ok=True, detail=f"schema version {found}")
 
 
+def _start_services(path: Path) -> tuple[Services, AdminServices, background.Background]:
+    services = Services(path)
+    # The index is derived and the backup bundle carries none (ADR 006), so
+    # a restored data directory would otherwise come up ready while serving
+    # empty lists and checking slug collisions against nothing.
+    if services.store.index.schema_version() == SCHEMA_VERSION:
+        services.store.reindex()
+    admin_services = AdminServices.build(path)
+    # A staged restore upload nobody confirmed (Cancel, a closed tab, a
+    # lost session) has no other expiry; sweep it here so a restart bounds
+    # however many have piled up under state/backup-tmp/, on top of the
+    # sweep backup_page and backup_upload each run on every visit.
+    cleanup_stale_backup_uploads(admin_services)
+    if admin_services.credentials.is_claimed():
+        log.info("admin: claimed, admin.json present")
+    else:
+        log.info(
+            "admin: a claim code exists at %s; visit /admin to claim this instance",
+            admin_services.credentials.claim_code_path,
+        )
+    # ADR 013: the publisher, watcher, and reconcile loops run inside this
+    # process, started once here so every caller of create_app (the real
+    # server and the test suite alike) exercises the same background
+    # behaviour rather than a test-only stand-in.
+    started_background = background.start(services, admin_services)
+    return services, admin_services, started_background
+
+
 def _bootstrap(app: FastAPI) -> None:
     app.state.services = None
     app.state.admin_services = None
@@ -198,31 +280,59 @@ def _bootstrap(app: FastAPI) -> None:
     if not path or not os.path.isdir(path):
         return
     try:
-        services = Services(Path(path))
-        # The index is derived and the backup bundle carries none (ADR 006), so
-        # a restored data directory would otherwise come up ready while serving
-        # empty lists and checking slug collisions against nothing.
-        if services.store.index.schema_version() == SCHEMA_VERSION:
-            services.store.reindex()
+        services, admin_services, started_background = _start_services(Path(path))
         app.state.services = services
-        admin_services = AdminServices.build(Path(path))
         app.state.admin_services = admin_services
-        if admin_services.credentials.is_claimed():
-            log.info("admin: claimed, admin.json present")
-        else:
-            log.info(
-                "admin: a claim code exists at %s; visit /admin to claim this instance",
-                admin_services.credentials.claim_code_path,
-            )
-        # ADR 013: the publisher, watcher, and reconcile loops run inside this
-        # process, started once here so every caller of create_app (the real
-        # server and the test suite alike) exercises the same background
-        # behaviour rather than a test-only stand-in.
-        app.state.background = background.start(services, admin_services)
+        app.state.background = started_background
     except (OSError, sqlite3.Error, subprocess.CalledProcessError) as exc:
         # A read-only or missing mount is a real operational state, not a
         # crash: readyz reports it and the process stays up to say so.
         log.warning("data directory not usable, /v1 and /admin will report unready: %s", exc)
+
+
+def quiesce_for_restore(app: FastAPI) -> None:
+    """Stop every long-lived handle before a live restore's tree swap.
+
+    `restore_backup`'s own docstring says the api process must be stopped
+    first: its swap is a bare `shutil.move` of `repo/` and `images/`, not
+    taken under any lock, on the same single-writer assumption ADR 013
+    makes for the publisher. `/admin/backup/restore` is the one caller that
+    can't actually stop the process (it's running inside it), so it must
+    still get the same effect: this must run and complete, stopping the
+    publisher, watcher, and reconcile threads and closing the store's
+    SQLite connection and advisory lock, before `restore_backup` is called,
+    never after. `resume_after_restore` below is `_bootstrap`'s reopen
+    sequence, replayed after the swap; it must run whether `restore_backup`
+    succeeded or raised, or the process is left with no services at all
+    until a real restart.
+    """
+    if app.state.background is not None:
+        app.state.background.stop()
+    if app.state.services is not None:
+        app.state.services.close()
+    app.state.services = None
+    app.state.admin_services = None
+    app.state.background = None
+
+
+def resume_after_restore(app: FastAPI) -> None:
+    """Rebind every long-lived handle onto the data directory a restore just replaced.
+
+    Reopening `Services` also re-runs `TokenStore.ensure_ui_token`, which
+    revokes a `ui` record the restored `tokens.json` no longer matches the
+    surviving local `ui_token.txt` and mints a fresh one, the same self-heal
+    a real process restart already gets for free.
+    """
+    path = os.environ.get(DATA_DIR_ENV)
+    if not path or not os.path.isdir(path):
+        app.state.services = None
+        app.state.admin_services = None
+        app.state.background = None
+        return
+    services, admin_services, started_background = _start_services(Path(path))
+    app.state.services = services
+    app.state.admin_services = admin_services
+    app.state.background = started_background
 
 
 def _shutdown(app: FastAPI) -> None:
@@ -261,7 +371,12 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, validation_error_handler)
     app.add_exception_handler(StarletteHTTPException, http_error_handler)
     app.add_exception_handler(AdminAuthRedirect, admin_redirect_handler)
-    app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
+    app.add_middleware(
+        BodySizeLimitMiddleware,
+        max_bytes=MAX_REQUEST_BODY_BYTES,
+        path_overrides={BACKUP_UPLOAD_PATH: MAX_BACKUP_UPLOAD_BYTES},
+    )
+    app.add_middleware(ContentSecurityPolicyMiddleware)
 
     _bootstrap(app)
     app.include_router(build_v1_router())
@@ -274,7 +389,11 @@ def create_app() -> FastAPI:
 
     @app.get("/healthz", response_model=Health, tags=["operations"])
     async def healthz() -> Health:
-        return Health(service=SERVICE)
+        # Set by the Dockerfile's BUILD_VERSION arg on a release build; "dev"
+        # locally and in every non-tag CI build, which is the honest answer
+        # when no release tag names this exact build.
+        version = os.environ.get("CHRONICLE_BUILD_VERSION", "dev")
+        return Health(service=SERVICE, version=version)
 
     @app.get("/readyz", tags=["operations"])
     async def readyz() -> JSONResponse:

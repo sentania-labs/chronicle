@@ -401,6 +401,12 @@ No change to the service is needed for that.
   API is never anonymous.
 - Images: 5 MB ceiling, png/jpg/webp/gif.
 - Reconciliation: flags only, with Scott choosing the resolution.
+- 2026-09-17, Scott: the image directory is always `static/images/<post
+  slug>/`, where "post slug" is the last non-empty path segment of the
+  post's `url` (the pinned slug for a new draft with no `url` yet), never
+  the dated filename. One rule for imported and new drafts; nothing
+  relocates on republish; unpublish deletes that directory; preview and
+  publish use the same rule. See ADR 015.
 
 ## 18. Not decided here, deliberately
 

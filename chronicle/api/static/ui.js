@@ -86,6 +86,23 @@ function sanitize(html) {
   render();
 })();
 
+(function () {
+  if (typeof document === "undefined") {
+    return;
+  }
+  // The CSP's default-src 'self' has no script-src exception for inline
+  // event handlers, so the status filter's auto-submit-on-change lives
+  // here instead of an onchange="" attribute; a plain <select> with no
+  // submit button degrades to doing nothing without this.
+  var status = document.getElementById("status");
+  if (!status || !status.form) {
+    return;
+  }
+  status.addEventListener("change", function () {
+    status.form.submit();
+  });
+})();
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = { isSafeUrl: isSafeUrl, sanitize: sanitize };
 }

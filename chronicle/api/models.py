@@ -115,6 +115,12 @@ class Draft(BaseModel):
     created_at: str
     updated_at: str
     slug: str | None = None
+    # The directory name under static/images/ this draft's images live in,
+    # pinned once and never recomputed (ADR 015): the last non-empty path
+    # segment of frontmatter["url"] when one is set (an import, or a new
+    # draft that already has a url), the pinned slug otherwise. Set at the
+    # same moment the slug is pinned (import, or first preview/approve).
+    image_dir: str | None = None
     title: str = ""
     frontmatter: dict[str, Any] = {}
     body: str = ""

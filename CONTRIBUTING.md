@@ -31,13 +31,46 @@ no command in a pull request's workflow that you cannot run here.
    Build the images, run them, hit the endpoint the change claims to affect,
    and put what you saw in the body. A healthy `/healthz` next to a broken
    `/readyz` is the failure this rule exists for.
-5. **Tags release.** From a merged `main` commit, `git tag -a vX.Y.Z -m
-   vX.Y.Z` and push the tag. No version-bump pull request: the quickstart
-   tracks `latest`, and anything deploying Chronicle for real pins a version
-   or a digest in its own repository (lab-deployment, not here).
+5. **Tags release.** See "Release procedure" below.
 
 Write the body in operational terms: what changes for someone running it,
 what the blast radius is, how to recover if it is wrong.
+
+## Release procedure
+
+From a merged `main` commit, tag it (annotated, not lightweight):
+
+```bash
+git tag -a vX.Y.Z -m vX.Y.Z
+git push origin vX.Y.Z
+```
+
+No version-bump pull request: nothing in the repository carries a version
+number outside the tag itself and `CHRONICLE_BUILD_VERSION`, which the
+release workflow stamps at build time.
+
+`.github/workflows/ci.yml`'s `release-tag` job refuses a tag that is not
+`vMAJOR.MINOR.PATCH`, not annotated, or not reachable from `main` before
+anything else runs. On a valid tag, `publish` builds each of the three
+images once (`api`, `builder`, `preview`), attaches an SBOM, refuses to
+push if `ghcr.io/sentania-labs/chronicle-<target>:vX.Y.Z` already exists
+(tags are immutable), pushes, signs with cosign keyless, and verifies the
+signature in the same job. `release` then writes the GitHub release from
+merged pull request titles since the previous tag. Nothing here runs from
+a pull request or a push to `main`; only `publish`, gated on the tag, ever
+gets `packages: write` or `id-token: write`.
+
+Verify a published image yourself:
+
+```bash
+cosign verify ghcr.io/sentania-labs/chronicle-api:vX.Y.Z \
+  --certificate-identity-regexp '^https://github.com/sentania-labs/chronicle/.github/workflows/ci.yml@refs/tags/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+The repository is private, so `ghcr.io/sentania-labs/chronicle-*` packages
+inherit that visibility; nothing in this workflow makes them public. Scott
+flips a package's visibility by hand on GitHub when there is a reason to.
 
 ## House style
 

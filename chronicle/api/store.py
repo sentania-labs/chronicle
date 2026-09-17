@@ -25,8 +25,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, cast
 
+from . import convert, gitrepo
 from . import digest as digest_mod
-from . import gitrepo
 from .atomic import write_atomic
 from .errors import ApiError
 from .images import normalise
@@ -454,9 +454,34 @@ class Store:
         draft.frontmatter = allowed
         draft.body = body
         draft.source_post = {"slug": post.slug, "path": post.path, "sha": post.sha}
+        # ADR 015: the image directory is the post's own url slug, never
+        # `post.slug` (digest's slug can carry a dated filename stem), so an
+        # import reproduces the real blog's static/images/<dir>/ byte for
+        # byte even when the two differ.
+        draft.image_dir = convert.image_dir_name(allowed.get("url"), slug)
+        # `_pin_slug`'s own image_dir_collision check never runs for an
+        # import (it only fires when `draft.slug is None`, and this method
+        # sets it directly), so a second import of the same post, or of a
+        # different post whose url happens to collide, would silently pin
+        # a second draft onto the same static/images/<dir>/ another draft
+        # already owns. The "already exists on main" half of that check
+        # would always fire for a legitimate import (the directory being
+        # imported from is exactly what's on main), so only the
+        # other-draft check applies here.
+        if draft.image_dir in self.index.pinned_image_dirs(exclude_draft_id=draft.id):
+            raise ApiError(
+                409,
+                "image_dir_collision",
+                f"static/images/{draft.image_dir}/ is already pinned by another draft",
+                image_dir=draft.image_dir,
+            )
 
         images, image_warnings = self._import_post_images(
-            source_path, slug, body, allowed.get("featureImage"), allowed.get("shareImage")
+            source_path,
+            draft.image_dir,
+            body,
+            allowed.get("featureImage"),
+            allowed.get("shareImage"),
         )
         draft.images = images
         warnings.extend(image_warnings)
@@ -503,7 +528,7 @@ class Store:
     def _import_post_images(
         self,
         source_path: Path,
-        slug: str,
+        image_dir: str,
         body: str,
         feature_image: Any,
         share_image: Any,
@@ -534,16 +559,19 @@ class Store:
             )
             imported_names.add(path.name)
 
-        # Fallback sweep for the page-bundle and static/images/<slug>/ layouts
-        # (ADR 007 predates the real-post case): anything not already picked
-        # up by an explicit reference still gets attached, with no reference
-        # path to record.
+        # Fallback sweep for the page-bundle and static/images/<image_dir>/
+        # layouts (ADR 007 predates the real-post case; ADR 015 fixed this
+        # sweep to look in the post's actual, url-derived image directory
+        # rather than a dated digest slug, which found nothing on a real
+        # dated-filename post and silently dropped every unreferenced
+        # image): anything not already picked up by an explicit reference
+        # still gets attached, with no reference path to record.
         candidates: list[Path] = []
         if source_path.name == "index.md":
             candidates.extend(
                 p for p in source_path.parent.iterdir() if p.is_file() and p != source_path
             )
-        bundle_dir = self.site_dir / "static" / "images" / slug
+        bundle_dir = self.site_dir / "static" / "images" / image_dir
         if bundle_dir.is_dir():
             candidates.extend(p for p in bundle_dir.iterdir() if p.is_file())
 
@@ -785,7 +813,23 @@ class Store:
                 f"slug {candidate!r} is already taken; set a unique slug in frontmatter first",
                 slug=candidate,
             )
+        image_dir = convert.image_dir_name(draft.frontmatter.get("url"), candidate)
+        if image_dir in self.index.pinned_image_dirs(exclude_draft_id=draft.id):
+            raise ApiError(
+                409,
+                "image_dir_collision",
+                f"static/images/{image_dir}/ is already pinned by another draft",
+                image_dir=image_dir,
+            )
+        if (self.site_dir / "static" / "images" / image_dir).is_dir():
+            raise ApiError(
+                409,
+                "image_dir_collision",
+                f"static/images/{image_dir}/ already exists on main for a different post",
+                image_dir=image_dir,
+            )
         draft.slug = candidate
+        draft.image_dir = image_dir
 
     def _queue_run(self, draft_id: str, kind: str) -> Run:
         run = Run(id=new_id(), draft_id=draft_id, kind=kind, created_at=now_stamp())

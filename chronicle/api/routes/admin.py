@@ -11,14 +11,18 @@ from __future__ import annotations
 
 import json
 import secrets
+import tarfile
 import threading
+import time
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
+from ... import backup as backup_mod
 from .. import admin_templates as tpl
 from .. import crypto
 from ..admin_auth import (
@@ -528,6 +532,225 @@ def tokens_reenable_ui(
 ) -> HTMLResponse:
     token = services.tokens.reenable_ui_token()
     return HTMLResponse(tpl.tokens_page(_token_rows(services), minted=token))
+
+
+# --- Backup and restore (spec section 13, ADR 016) -------------------------
+
+LAST_BACKUP_FILE_NAME = "last_backup.json"
+BACKUP_TMP_DIR_NAME = "backup-tmp"
+UPLOAD_CHUNK_BYTES = 1 << 20
+# Long enough to fill in the confirm-page form, short enough that an upload
+# abandoned by a Cancel, a closed tab, or a lost session does not sit under
+# state/backup-tmp/ forever. A file older than this is stale by definition:
+# nothing in this flow re-uses a token past the confirm step that follows
+# the upload directly.
+UPLOAD_TTL_SECONDS = 3600
+
+
+def _data_dir(admin: AdminServices) -> Path:
+    return admin.state_dir.parent
+
+
+def _backup_tmp_dir(admin: AdminServices) -> Path:
+    tmp_dir = admin.state_dir / BACKUP_TMP_DIR_NAME
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    return tmp_dir
+
+
+def cleanup_stale_backup_uploads(admin: AdminServices, now: float | None = None) -> None:
+    """Remove every staged upload older than UPLOAD_TTL_SECONDS.
+
+    Called at api startup (main.py:_start_services) so a restart bounds
+    however much an operator's abandoned uploads have piled up, and again
+    on every visit to the backup page and every new upload, so the sweep
+    also runs without a restart in between.
+    """
+    cutoff = (now if now is not None else time.time()) - UPLOAD_TTL_SECONDS
+    for path in _backup_tmp_dir(admin).glob("upload-*.tar.gz"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def _read_last_backup(admin: AdminServices) -> str | None:
+    path = admin.state_dir / LAST_BACKUP_FILE_NAME
+    if not path.exists():
+        return None
+    try:
+        return str(json.loads(path.read_text(encoding="utf-8"))["created_at"])
+    except (OSError, json.JSONDecodeError, KeyError):
+        return None
+
+
+def _record_last_backup(admin: AdminServices) -> None:
+    path = admin.state_dir / LAST_BACKUP_FILE_NAME
+    payload = {"created_at": datetime.now(tz=UTC).isoformat(timespec="seconds")}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+@router.get("/backup", response_class=HTMLResponse)
+def backup_page(admin: AdminServices = Depends(require_admin_session_html)) -> HTMLResponse:
+    cleanup_stale_backup_uploads(admin)
+    return HTMLResponse(tpl.backup_page(last_backup=_read_last_backup(admin)))
+
+
+@router.get("/backup/create")
+def backup_create_download(admin: AdminServices = Depends(require_admin_session_html)) -> Any:
+    # Written under state/backup-tmp/, never a web-served path (spec
+    # section 10): the file exists only long enough to stream, and the
+    # generator's `finally` deletes it whether the download completes,
+    # fails partway, or the client disconnects.
+    bundle_path = backup_mod.create_backup(_data_dir(admin), _backup_tmp_dir(admin))
+    _record_last_backup(admin)
+
+    def stream() -> Any:
+        try:
+            with bundle_path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(1 << 20)
+                    if not chunk:
+                        break
+                    yield chunk
+        finally:
+            bundle_path.unlink(missing_ok=True)
+
+    return StreamingResponse(
+        stream(),
+        media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{bundle_path.name}"'},
+    )
+
+
+@router.post("/backup/upload", response_class=HTMLResponse)
+async def backup_upload(
+    admin: AdminServices = Depends(require_admin_session_html),
+    file: UploadFile = File(...),
+) -> HTMLResponse:
+    """Save the upload and show its manifest counts, without restoring
+    anything yet: `backup_restore` below re-validates checksums and member
+    safety from scratch, so this preview only ever reads `manifest.json`."""
+    # Deferred import: see the same note on the circular import in
+    # backup_restore below.
+    from .. import main as main_module
+
+    cleanup_stale_backup_uploads(admin)
+    token = secrets.token_hex(16)
+    staged_path = _backup_tmp_dir(admin) / f"upload-{token}.tar.gz"
+    total = 0
+    # Copied in bounded chunks, never `await file.read()`: reading the
+    # whole upload into one `bytes` object risks OOMing the api process,
+    # which the reference deployment caps at 512 MiB of memory
+    # (examples/k8s/deployment.yaml) while this route allows uploads
+    # nearly that large. BodySizeLimitMiddleware already rejects an
+    # oversized request before it reaches this route; this loop enforces
+    # the same ceiling again on what actually gets written to disk.
+    with staged_path.open("wb") as out:
+        while True:
+            chunk = await file.read(UPLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > main_module.MAX_BACKUP_UPLOAD_BYTES:
+                out.close()
+                staged_path.unlink(missing_ok=True)
+                return HTMLResponse(
+                    tpl.backup_page(
+                        last_backup=_read_last_backup(admin), notice="upload too large"
+                    ),
+                    status_code=413,
+                )
+            out.write(chunk)
+    try:
+        with tarfile.open(staged_path, "r:gz") as tar:
+            manifest_bytes = tar.extractfile(tar.getmember(backup_mod.MANIFEST_NAME))
+            if manifest_bytes is None:
+                raise KeyError(backup_mod.MANIFEST_NAME)
+            manifest = json.loads(manifest_bytes.read())
+    except (tarfile.TarError, KeyError, json.JSONDecodeError) as exc:
+        staged_path.unlink(missing_ok=True)
+        return HTMLResponse(
+            tpl.backup_page(
+                last_backup=_read_last_backup(admin), notice=f"not a valid bundle: {exc}"
+            ),
+            status_code=400,
+        )
+    return HTMLResponse(tpl.backup_confirm_page(token=token, manifest=manifest))
+
+
+def _is_upload_token(token: str) -> bool:
+    # Must match exactly what backup_upload mints (secrets.token_hex(16)):
+    # 32 lowercase hex characters, never a path segment taken from the form
+    # value as-is. `staged_path` below is built from this token, so an
+    # unvalidated value (a `..` segment, an absolute path) would let the
+    # confirm step read and then delete an arbitrary file on disk.
+    return len(token) == 32 and all(c in "0123456789abcdef" for c in token)
+
+
+@router.post("/backup/restore", response_class=HTMLResponse)
+def backup_restore(
+    request: Request,
+    token: str = Form(...),
+    confirm: str = Form(...),
+    admin: AdminServices = Depends(require_admin_session_html),
+) -> HTMLResponse:
+    if confirm.strip() != "restore":
+        return HTMLResponse(
+            tpl.backup_page(
+                last_backup=_read_last_backup(admin), notice='type "restore" to confirm'
+            ),
+            status_code=400,
+        )
+    if not _is_upload_token(token):
+        return HTMLResponse(
+            tpl.backup_page(
+                last_backup=_read_last_backup(admin), notice="upload expired, try again"
+            ),
+            status_code=400,
+        )
+    staged_path = _backup_tmp_dir(admin) / f"upload-{token}.tar.gz"
+    if not staged_path.exists() or (time.time() - staged_path.stat().st_mtime > UPLOAD_TTL_SECONDS):
+        staged_path.unlink(missing_ok=True)
+        return HTMLResponse(
+            tpl.backup_page(
+                last_backup=_read_last_backup(admin), notice="upload expired, try again"
+            ),
+            status_code=400,
+        )
+
+    # Deferred import: `main` imports this module at startup to mount the
+    # router, so importing it back at module scope here would be circular.
+    from .. import main as main_module
+
+    data_dir = _data_dir(admin)
+    # restore_backup's own contract is that the api process is stopped
+    # first: its tree swap is a bare shutil.move, not taken under any lock,
+    # on the single-writer assumption ADR 013 makes for the publisher. This
+    # route can't stop the process, so it gets the same effect by stopping
+    # the publisher, watcher, reconcile threads, and the store's own SQLite
+    # connection before the swap runs, never after; a write racing the swap
+    # would otherwise land in the pre-restore tree this same call deletes.
+    main_module.quiesce_for_restore(request.app)
+    try:
+        report = backup_mod.restore_backup(data_dir, staged_path)
+    except backup_mod.BackupError as exc:
+        return HTMLResponse(
+            tpl.backup_page(last_backup=_read_last_backup(admin), notice=str(exc)), status_code=400
+        )
+    finally:
+        staged_path.unlink(missing_ok=True)
+        main_module.resume_after_restore(request.app)
+
+    notice = f"restored: before={report.before} after={report.after}"
+    if report.credentials_decryptable is False:
+        notice += (
+            "; github-app.json could not be decrypted under this instance's key"
+            " (reconnect GitHub through the manifest flow)"
+        )
+    return HTMLResponse(
+        tpl.backup_page(last_backup=_read_last_backup(admin), notice=notice, notice_kind="ok")
+    )
 
 
 @api_router.get("/tokens")

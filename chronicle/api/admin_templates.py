@@ -43,10 +43,65 @@ def page(title: str, body: str, notice: str | None = None, notice_kind: str = "e
 def nav() -> str:
     return (
         '<nav><a href="/admin">Status</a><a href="/admin/github/connect">GitHub</a>'
-        '<a href="/admin/tokens">Tokens</a><a href="/admin/password">Password</a>'
+        '<a href="/admin/tokens">Tokens</a><a href="/admin/backup">Backup</a>'
+        '<a href="/admin/password">Password</a>'
         '<form style="display:inline" method="post" action="/admin/logout">'
         '<button type="submit">Log out</button></form></nav>'
     )
+
+
+def backup_page(
+    *, last_backup: str | None, notice: str | None = None, notice_kind: str = "error"
+) -> str:
+    last_html = escape(last_backup) if last_backup else "never"
+    body = f"""
+{nav()}
+<p>Last backup created: {last_html}</p>
+<h2>Create a backup</h2>
+<p>Downloads a gzip tarball: repo history, images, and the encrypted
+credential store. Never the instance key.</p>
+<form method="get" action="/admin/backup/create">
+<button type="submit">Create and download backup</button>
+</form>
+<h2>Restore from a backup</h2>
+<p>Upload a bundle to see its manifest counts before anything is touched.
+Restoring replaces this instance's repo, images, and credential store; the
+running instance's own instance key is kept.</p>
+<form method="post" action="/admin/backup/upload" enctype="multipart/form-data">
+<label for="file">Bundle (.tar.gz)</label>
+<input type="file" id="file" name="file" accept=".tar.gz,.tgz" required>
+<button type="submit">Upload and preview</button>
+</form>
+"""
+    return page("Backup", body, notice=notice, notice_kind=notice_kind)
+
+
+def backup_confirm_page(*, token: str, manifest: dict[str, Any]) -> str:
+    counts = manifest.get("counts", {})
+    rows = "".join(
+        f"<tr><td>{escape(str(key))}</td><td>{escape(str(value))}</td></tr>"
+        for key, value in sorted(counts.items())
+    )
+    body = f"""
+{nav()}
+<p>Bundle created {escape(str(manifest.get("created_at", "?")))} by Chronicle
+{escape(str(manifest.get("chronicle_version", "?")))}.</p>
+<table><tr><th>record</th><th>count</th></tr>{rows}</table>
+<p><strong>This replaces the current repo, images, and credential store.</strong>
+If a builder is running against this instance, restart it after the
+restore finishes: it holds its own connection to the index and will not
+notice the swap on its own. Run <code>chronicle digest</code> again after
+restoring, since the site checkout is not part of the bundle.
+Type <code>restore</code> below to confirm.</p>
+<form method="post" action="/admin/backup/restore">
+<input type="hidden" name="token" value="{escape(token)}">
+<label for="confirm">Type "restore" to confirm</label>
+<input type="text" id="confirm" name="confirm" required autocomplete="off">
+<button type="submit">Restore now</button>
+</form>
+<p><a href="/admin/backup">Cancel</a></p>
+"""
+    return page("Confirm restore", body)
 
 
 def claim_page(notice: str | None = None) -> str:
@@ -151,6 +206,11 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
 <form method="post" action="/admin/digest">
 <button type="submit">Run digest now</button>
 </form>
+<h2>Backup</h2>
+<table>
+{row("last backup", status["last_backup_at"] or "never")}
+</table>
+<p><a href="/admin/backup">Backup and restore</a></p>
 <h2>Digest</h2>
 <table>
 {row("last digest", status["last_digest_at"] or "never")}

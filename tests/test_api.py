@@ -14,6 +14,14 @@ from chronicle.api.tokens import UI_TOKEN_FILE_NAME
 from .conftest import auth
 
 
+def test_csp_header_present_and_scripts_stay_self_only() -> None:
+    client = TestClient(create_app())
+    response = client.get("/healthz")
+    csp = response.headers["content-security-policy"]
+    assert "default-src 'self'" in csp
+    assert "script-src" not in csp  # falls back to default-src 'self': no inline allowance anywhere
+
+
 def test_healthz_reports_up() -> None:
     client = TestClient(create_app())
     response = client.get("/healthz")
@@ -21,6 +29,14 @@ def test_healthz_reports_up() -> None:
     body = response.json()
     assert body["service"] == "chronicle-api"
     assert body["status"] == "ok"
+    assert body["version"] == "dev"
+
+
+def test_healthz_reports_the_build_version_env(monkeypatch) -> None:
+    monkeypatch.setenv("CHRONICLE_BUILD_VERSION", "v1.2.3")
+    client = TestClient(create_app())
+    response = client.get("/healthz")
+    assert response.json()["version"] == "v1.2.3"
 
 
 def test_readyz_ok_when_data_dir_writable(tmp_path, monkeypatch) -> None:
