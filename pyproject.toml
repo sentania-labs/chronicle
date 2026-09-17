@@ -72,6 +72,10 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.ruff.lint.per-file-ignores]
 # FastAPI dependencies idiomatically use Depends(...) and Header(...) as defaults.
 "chronicle/api/*.py" = ["B008"]
+# Hand-written HTML template strings read worse forced onto multiple lines
+# than left as one row per markup line, the same tradeoff admin_templates.py
+# already accepts implicitly by staying just under the limit.
+"chronicle/api/ui_templates.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"

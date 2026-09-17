@@ -27,6 +27,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -39,6 +40,9 @@ from .index import SCHEMA_VERSION
 from .routes import build_v1_router
 from .routes.admin import api_router as admin_api_router
 from .routes.admin import router as admin_router
+from .routes.ui import router as ui_router
+
+STATIC_DIR = Path(__file__).parent / "static"
 
 log = logging.getLogger("chronicle.api")
 
@@ -263,6 +267,10 @@ def create_app() -> FastAPI:
     app.include_router(build_v1_router())
     app.include_router(admin_router)
     app.include_router(admin_api_router)
+    app.include_router(ui_router)
+    # No CDN, no network fetch at page load (AGENTS.md): vendored JS/CSS is
+    # served from this same process, never fetched from anywhere else.
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/healthz", response_model=Health, tags=["operations"])
     async def healthz() -> Health:

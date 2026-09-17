@@ -182,6 +182,63 @@ reserved for the `ui` token (spec section 11, ADR 004); any other token gets
 a 403 naming the action. `preview`, `approve`, and `unpublish` return a
 `run_id` for the build or GitHub operation a later round will perform.
 
+## The UI
+
+C5 adds a content and preview UI, served by the api process at `/`, with no
+login of its own (spec section 11, ADR 004, ADR 014): `/admin` keeps its
+password session exactly as before, and the two never share a dependency.
+The UI backend authenticates its own calls into the store the same way any
+other consumer would, reading `data/state/ui_token.txt` fresh on every
+request rather than caching it, so a revoke on `/admin/tokens` disables the
+UI immediately (ADR 014's "in-process, not loopback" reasoning covers why).
+Every version, event, and commit the UI produces is authored `scott`, same
+as any other call the `ui` token makes.
+
+Because there is no login, a banner on every content and preview page says
+so: "This Chronicle instance is internal-only and unauthenticated. Anyone
+who can reach it on the network can create, edit, and act on content." It is
+on by default; `CHRONICLE_UI_BANNER=0` turns it off for an operator who has
+already put the whole thing behind their own auth proxy.
+
+- **Submissions** (`/content/submissions`): the intake queue, with a detail
+  page per submission (materials, attached images, "create draft from it",
+  "discard").
+- **Drafts board** (`/content/drafts`): filterable by status, one card per
+  draft (title, slug, last author, updated, claim holder, open PR link,
+  preview link, open reconciliation flags).
+- **Import** (`/content/import`): a searchable list of `/v1/posts`, each row
+  a one-click `from_post` import.
+- **Editor** (`/content/drafts/{id}`): frontmatter fields, a body textarea
+  with a client-side live markdown preview pane (vendored `marked`, see
+  [THIRD_PARTY.md](THIRD_PARTY.md)), image upload and detach, a claim
+  indicator, version history with a unified diff between any two versions,
+  the feedback log, and one action button per transition the draft's
+  current status allows (`chronicle/api/transitions.py` is the only table
+  consulted; the UI never hand-codes a second one). Reserved actions
+  (`approve`, `request_revision`, `reject`, `restore`, `unpublish`) are
+  labelled "Scott only" because the UI holds the `ui` token and can always
+  reach them, not because anything blocks a click.
+- **Conflict view:** a save with a stale `base_version` never overwrites.
+  It renders a 409 page instead: the server's diff summary, the current
+  version reloaded into the save form (ready to reapply on top of), and the
+  visitor's own attempted title and body in a second, read-only pane to
+  copy from by hand.
+- **Preview** (`/content/previews`): every draft with a built preview, its
+  build time, wall seconds, and toolchain-drift flag, plus a rebuild button;
+  a run log page (`/runs/{run_id}`) for any run. Deliberately not `/preview`
+  itself: `examples/k8s/ingress.yaml` routes that whole prefix to the static
+  preview container on port 8090, so a UI route living there would be
+  unreachable through the instance hostname. `/preview/<slug>/...` stays
+  the static build output's own prefix (unchanged, Hugo bakes it into every
+  built page's links); only the UI's list and rebuild controls moved.
+
+No CDN and no network fetch at page load: `marked.min.js` and the
+hand-written `style.css`/`ui.js` are all served from this same process.
+
+The C5 live check's evidence (rendered HTML fragments; Playwright was
+unavailable that session, so these stand in for screenshots) is under
+[docs/screenshots/c5/](docs/screenshots/c5/).
+
 ## Tokens
 
 ```bash

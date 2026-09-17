@@ -483,7 +483,8 @@ def tokens_html(
     admin: AdminServices = Depends(require_admin_session_html),
     services: Services = Depends(get_services),
 ) -> HTMLResponse:
-    return HTMLResponse(tpl.tokens_page(_token_rows(services)))
+    ui_disabled = services.tokens.ui_disabled_path.exists()
+    return HTMLResponse(tpl.tokens_page(_token_rows(services), ui_disabled=ui_disabled))
 
 
 @router.post("/tokens", response_class=HTMLResponse)
@@ -516,7 +517,17 @@ def tokens_revoke(
     services: Services = Depends(get_services),
 ) -> HTMLResponse:
     services.tokens.revoke(name)
-    return HTMLResponse(tpl.tokens_page(_token_rows(services)))
+    ui_disabled = services.tokens.ui_disabled_path.exists()
+    return HTMLResponse(tpl.tokens_page(_token_rows(services), ui_disabled=ui_disabled))
+
+
+@router.post("/tokens/ui/reenable", response_class=HTMLResponse)
+def tokens_reenable_ui(
+    admin: AdminServices = Depends(require_admin_session_html),
+    services: Services = Depends(get_services),
+) -> HTMLResponse:
+    token = services.tokens.reenable_ui_token()
+    return HTMLResponse(tpl.tokens_page(_token_rows(services), minted=token))
 
 
 @api_router.get("/tokens")

@@ -163,6 +163,51 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   Resolving `create_tree`'s `base_tree` needs the base commit's tree sha,
   and `get_ref` alone returns only the commit sha; `get_commit` is the one
   call every publish and reconcile run makes to bridge that gap (ADR 012).
+- **The UI backend calls `Store` in-process, never over loopback HTTP.**
+  `chronicle/api/ui_deps.py:require_ui_consumer` reads
+  `data/state/ui_token.txt` fresh on every request and authenticates it
+  through the same `TokenStore.authenticate` a bearer header would use, so
+  a revoke on `/admin/tokens` disables the whole UI on its very next
+  request (ADR 014). A UI route that calls `services.store` without going
+  through this dependency first is calling a mutating method with no actor
+  at all, which is a type error, not a silent anonymous write, but a
+  reviewer should still treat a route that skips it as a blocking finding
+  the way `/v1` treats a route that skips `require_consumer`.
+- **`ui_templates.py`'s action buttons read `transitions.DRAFT_TRANSITIONS`
+  directly, never a second table.** The board and the editor page both
+  render exactly the actions a draft's current status allows by iterating
+  the same dict `Store.act_on_draft` consults; adding a transition there is
+  what makes it show up as a button, nothing in the UI layer needs updating
+  to match.
+- **The UI's markdown preview pane is client-side only, filled by `ui.js`
+  from the visitor's own textarea, never by anything the server renders.**
+  Every value a UI template does interpolate goes through `html.escape`
+  first, same bar as `admin_templates.py`. A round C5 review found that a
+  draft's body is not trusted input even here: a different consumer token
+  can `PUT` a body containing an event-handler payload, and Scott's own
+  browser is what later renders it when he opens the editor. `ui.js` now
+  runs `marked.parse`'s output through a small hand-written DOM sanitiser
+  (strips script-bearing tags, `on*` attributes, and `javascript:` URLs)
+  before assigning it into the preview pane; do not remove that step to
+  "simplify" the preview, and do not add a second `innerHTML` assignment of
+  parsed markdown anywhere without the same treatment.
+- **`ui_deps.check_same_origin` treats an `Origin` header that does not
+  resolve to this host as cross-origin, including the literal string
+  `"null"` a sandboxed iframe sends.** A round C5 review found that
+  `urlsplit("null").netloc` is empty, which used to fall through the same
+  branch as "no header sent at all" and let a cross-origin sandboxed iframe
+  submit every state-changing UI form. Only the genuine absence of both
+  `Origin` and `Referer` is allowed through; a present-but-unparsable value
+  never is.
+- **The editor's action buttons and the 409 conflict view both know about
+  more than `transitions.DRAFT_TRANSITIONS` alone.** `Store.act_on_draft`
+  separately refuses a re-approve while a publish PR is already open
+  (409 `publish_pr_open`), which the transition table itself cannot see;
+  `_action_buttons` takes a `publish_pr_open` flag so that button does not
+  render only to 409 on click, and `draft_save`'s 409 handler checks
+  `exc.code == "stale_base_version"` before treating a 409 as the
+  conflict-view case, because `publish_pr_open` is also a 409 with no
+  meaningful diff to show. A round C5 review found both gaps live.
 
 ## Round C4 status
 

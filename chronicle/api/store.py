@@ -600,6 +600,10 @@ class Store:
             )
         )
 
+    def diff_between(self, draft_id: str, from_version: int, to_version: int) -> str:
+        """A unified diff between any two versions, for the UI's diff view."""
+        return self._diff(draft_id, from_version, to_version)
+
     def _diff_summary(self, draft_id: str, from_version: int, to_version: int) -> str:
         if from_version != 0 and not self._version_path(draft_id, from_version).exists():
             return f"base_version {from_version} does not exist, no diff available"
