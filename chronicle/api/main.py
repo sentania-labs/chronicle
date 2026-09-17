@@ -62,6 +62,41 @@ class OversizedBody(Exception):
         self.total = total
 
 
+CSP_HEADER = (
+    b"content-security-policy",
+    b"default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+)
+
+
+class ContentSecurityPolicyMiddleware:
+    """No inline scripts, ever, on any response: `ui.js`'s DOM sanitiser and
+    the CSP are two layers against the same threat (a draft body that
+    carries a script-bearing payload another consumer token wrote), not one
+    substituting for the other. `style-src 'unsafe-inline'` is here only for
+    `style="display:inline"` on a handful of one-line forms in
+    admin_templates.py and ui_templates.py; `img-src data:` is Hugo's own
+    inline-svg icon convention in the preview's rendered markdown, not
+    anything Chronicle's own templates emit.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_csp(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append(CSP_HEADER)
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_csp)
+
+
 class BodySizeLimitMiddleware:
     """Enforce the body ceiling on the stream itself, not only Content-Length.
 
@@ -263,6 +298,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(StarletteHTTPException, http_error_handler)
     app.add_exception_handler(AdminAuthRedirect, admin_redirect_handler)
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
+    app.add_middleware(ContentSecurityPolicyMiddleware)
 
     _bootstrap(app)
     app.include_router(build_v1_router())
