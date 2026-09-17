@@ -18,5 +18,15 @@ fi
 
 echo "## Changes since $previous_tag"
 echo
-git log --pretty=format:'- %s' "${previous_tag}..${VERSION}" \
-  | grep -E '\(#[0-9]+\)$' | sort -u
+# grep exits 1 when nothing matches (no squash-merge commit in range, e.g.
+# a tag cut straight off unsquashed merge commits); under set -o pipefail
+# that would fail the whole script after the images are already built,
+# signed, and pushed by the job before this one, so a merge-free range is
+# reported as "no listed changes" instead of crashing the release.
+notes="$(git log --pretty=format:'- %s' "${previous_tag}..${VERSION}" \
+  | grep -E '\(#[0-9]+\)$' | sort -u || true)"
+if [ -z "$notes" ]; then
+  echo "(no merged pull requests found in this range)"
+else
+  echo "$notes"
+fi
