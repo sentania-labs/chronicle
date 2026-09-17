@@ -54,6 +54,7 @@ def page(
 <h1>{escape(title)}</h1>
 {notice_html}
 {body}
+<script src="/static/ui.js"></script>
 </body></html>"""
 
 
@@ -224,7 +225,8 @@ def drafts_board_page(pg: Page[dict[str, Any]], *, status_filter: str | None, ba
     body = f"""
 <form method="get" action="/content/drafts">
 <label for="status">Filter by status</label>
-<select id="status" name="status" onchange="this.form.submit()">{_status_options(status_filter)}</select>
+<select id="status" name="status">{_status_options(status_filter)}</select>
+<button type="submit">Filter</button>
 </form>
 {cards}
 {_pagination_links(pg, "/content/drafts", extra=extra)}
@@ -506,7 +508,6 @@ def editor_page(
 </div>
 <button type="submit">Save</button>
 </form>
-<script src="/static/ui.js"></script>
 <h2>Images</h2>
 {_image_list(draft["id"], draft["images"])}
 <form method="post" action="/content/drafts/{escape(draft["id"])}/images" enctype="multipart/form-data">

@@ -197,6 +197,18 @@ def test_drafts_board_paginates_at_fifty_with_next_and_previous(
     assert "page 2 of 2" in beyond.text  # clamped to the last real page
 
 
+def test_drafts_board_status_filter_has_no_inline_handler(client: TestClient) -> None:
+    """The CSP (default-src 'self', no script-src exception) blocks inline
+    event handlers; the status filter must auto-submit via ui.js instead of
+    an onchange="" attribute, and still work with a plain submit button when
+    JS is unavailable."""
+    response = client.get("/content/drafts")
+    assert response.status_code == 200
+    assert "onchange" not in response.text
+    assert '<button type="submit">Filter</button>' in response.text
+    assert '<script src="/static/ui.js"></script>' in response.text
+
+
 def test_drafts_board_shows_flag_and_pr_badges(client: TestClient, services: Services) -> None:
     draft_id = make_draft(services, "published", with_publish=True)
     services.store.create_flag(
