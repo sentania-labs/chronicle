@@ -638,6 +638,83 @@ def test_imported_feature_image_path_survives_an_unchanged_save(
     assert updated.frontmatter["featureImage"] == stored_feature_image
 
 
+def test_save_preserves_pinned_url_when_form_omits_it(
+    client: TestClient, services: Services
+) -> None:
+    """The url input is readonly once a slug is pinned: a convenience echo,
+    never the source of truth. A request that leaves it out entirely (not
+    just blank) must not erase the stored url."""
+    draft_id = make_draft(services, "drafting", title="Pinned")
+    store = services.store
+    draft = store.get_draft(draft_id)
+    draft.slug = "pinned-slug"
+    draft.frontmatter["url"] = "/pinned-slug/"
+    store._write_json(store._draft_path(draft.id), draft.model_dump(mode="json"))
+    store.index.upsert_draft(draft)
+    draft = store.get_draft(draft_id)
+
+    form = {
+        "base_version": str(draft.version_no),
+        "title": "Pinned",
+        "date": "",
+        "categories": "",
+        "tags": "",
+        "summary": "",
+        "featureImage": "",
+        "body": "body text",
+        # url intentionally omitted, unlike a normal browser submit.
+    }
+    response = client.post(f"/content/drafts/{draft_id}/save", data=form)
+    assert response.status_code == 200
+
+    updated = store.get_draft(draft_id)
+    assert updated.frontmatter["url"] == "/pinned-slug/"
+
+
+def test_save_never_writes_pinned_slug_into_frontmatter(
+    client: TestClient, services: Services
+) -> None:
+    """`draft.slug` (the pinned value) must never be injected into the
+    frontmatter dict on a save. A `github`-authored save
+    (`Store.record_github_version`) can legitimately carry a different
+    `slug` key than `draft.slug`; injecting `draft.slug` here would
+    silently revert content Scott wrote on GitHub, which is
+    reconciliation's job to flag, never to correct automatically. When a
+    draft's frontmatter genuinely carries a stale `slug` key, `save_draft`
+    itself already refuses the save (`slug_immutable`) rather than picking
+    a winner, so the UI route must never smooth that over by overwriting
+    one side."""
+    draft_id = make_draft(services, "drafting", title="Pinned")
+    store = services.store
+    draft = store.get_draft(draft_id)
+    draft.slug = "pinned-slug"
+    draft.frontmatter["url"] = "/pinned-slug/"
+    draft.frontmatter["slug"] = "drifted-from-github"
+    store._write_json(store._draft_path(draft.id), draft.model_dump(mode="json"))
+    store.index.upsert_draft(draft)
+    draft = store.get_draft(draft_id)
+
+    form = {
+        "base_version": str(draft.version_no),
+        "title": "Pinned",
+        "date": "",
+        "categories": "",
+        "tags": "",
+        "summary": "",
+        "url": "/pinned-slug/",
+        "featureImage": "",
+        "body": "body text",
+    }
+    response = client.post(f"/content/drafts/{draft_id}/save", data=form)
+    # save_draft's own slug_immutable check catches the drift, visibly,
+    # rather than the UI route silently resolving it either direction.
+    assert response.status_code == 422
+
+    unchanged = store.get_draft(draft_id)
+    assert unchanged.frontmatter["slug"] == "drifted-from-github"
+    assert unchanged.slug == "pinned-slug"
+
+
 def test_feature_image_select_prefers_exact_match_over_basename_collision(
     client: TestClient, services: Services
 ) -> None:

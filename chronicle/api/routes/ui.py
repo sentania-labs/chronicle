@@ -178,15 +178,35 @@ def draft_editor(
     return _editor_response(services, draft_id, banner=banner_enabled(request))
 
 
-def _build_frontmatter(existing: dict[str, Any], form: dict[str, str]) -> dict[str, Any]:
+def _build_frontmatter(
+    existing: dict[str, Any], form: dict[str, str], pinned_slug: str | None
+) -> dict[str, Any]:
     frontmatter = dict(existing)
     frontmatter["title"] = form.get("title", "").strip()
-    for key, form_key in (("date", "date"), ("url", "url"), ("summary", "summary")):
+    for key, form_key in (("date", "date"), ("summary", "summary")):
         value = form.get(form_key, "").strip()
         if value:
             frontmatter[key] = value
         else:
             frontmatter.pop(key, None)
+    if pinned_slug:
+        # The url field is readonly once a slug is pinned (`draft.slug`,
+        # not any `slug` key in frontmatter): the form's own value is a
+        # convenience echo, never the source of truth, so a request that
+        # omits it (or sends it blank) must not erase the stored url. Never
+        # write `pinned_slug` into frontmatter here: a `github`-authored
+        # save (`Store.record_github_version`) can legitimately carry a
+        # different `slug` key than `draft.slug`, and overwriting it would
+        # silently revert content Scott wrote on GitHub, which is exactly
+        # what reconciliation exists to flag, not correct automatically.
+        if existing.get("url"):
+            frontmatter["url"] = existing["url"]
+    else:
+        value = form.get("url", "").strip()
+        if value:
+            frontmatter["url"] = value
+        else:
+            frontmatter.pop("url", None)
     frontmatter.pop("description", None)
     for key in ("categories", "tags"):
         raw = form.get(key, "").strip()
@@ -200,8 +220,6 @@ def _build_frontmatter(existing: dict[str, Any], form: dict[str, str]) -> dict[s
         frontmatter["featureImage"] = feature
     else:
         frontmatter.pop("featureImage", None)
-    if existing.get("slug"):
-        frontmatter["slug"] = existing["slug"]
     return frontmatter
 
 
@@ -217,7 +235,7 @@ async def draft_save(
     form = {key: str(value) for key, value in form_data.items()}
     base_version = int(form.get("base_version", "0") or "0")
     draft = services.store.get_draft(draft_id)
-    frontmatter = _build_frontmatter(draft.frontmatter, form)
+    frontmatter = _build_frontmatter(draft.frontmatter, form, draft.slug)
     body_text = form.get("body", "")
     try:
         services.store.save_draft(draft_id, consumer.name, base_version, frontmatter, body_text)
