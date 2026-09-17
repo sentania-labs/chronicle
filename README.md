@@ -335,9 +335,13 @@ an unknown `schema_version`, verifies every member's checksum (refusing on
 any mismatch, missing, or extra member), then swaps `repo/`, `images/`,
 and the state files into place, keeping the displaced tree until
 `chronicle reindex` against the new one succeeds. Run it against a stopped
-api process (ADR 016); the one exception is `/admin/backup`'s upload path,
-which restores from within the running instance after Scott types
-`restore` to confirm.
+instance (api and builder both, ADR 016) since the builder holds its own
+long-lived connection to the index that does not notice the swap; the one
+exception is `/admin/backup`'s upload path, which restores from within
+the running instance after Scott types `restore` to confirm, and then
+needs a manual builder restart for the same reason. Either path needs a
+`chronicle digest` run afterward before a preview or publish will work,
+since `site/` is not part of the bundle.
 
 See [docs/backup.md](docs/backup.md) for the exact file layout and JSON
 schema, precise enough to hand-build an import bundle without reading the

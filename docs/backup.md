@@ -260,6 +260,28 @@ commit, authored `chronicle`, over whatever files the bundle carried
 a hand-built bundle skip having a git binary in its assembly path
 entirely; just lay out the files above and tar them up.
 
+## After a restore
+
+Two steps the restore command itself does not do, because neither is
+part of what the bundle carries (ADR 016):
+
+- **Restart the builder.** It holds its own long-lived connection to
+  `repo/index/chronicle.db`, opened before the swap; it does not notice
+  the file underneath it has been replaced. Found live in the C6 check:
+  the next build after a restore failed with `sqlite3.OperationalError:
+  attempt to write a readonly database` and kept failing until the
+  builder process (or container) was restarted. The CLI path documents
+  restore as an operator command run against a stopped instance for this
+  reason, meaning the builder as well as the api; the admin page's live
+  restore is the one exception, and its confirmation page names the
+  restart as the required next step.
+- **Run `chronicle digest` again.** `site/` (the Hugo working checkout)
+  is deliberately not part of the bundle, the same reasoning as excluding
+  the derived `repo/index/`. A preview or publish attempted before the
+  first post-restore digest fails (Hugo has no config to build against);
+  digest is idempotent and cheap, so running it once right after restore
+  is the normal next step, not a special recovery path.
+
 ## Worked example: two drafts, one with feedback and two images
 
 ```

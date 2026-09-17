@@ -55,16 +55,34 @@ rollback, because the files are already moved into place by the time
 reindex could fail, but nothing that was previously on disk is deleted
 until reindex has proven the new tree readable.
 
-**Restore requires the api stopped.** This mirrors ADR 013's own
-single-replica assumption for the publisher: nothing in this round adds a
-lock between an in-flight request and a restore's tree rename, so `chronicle
-backup restore` is an operator command run against a stopped instance, not
-an endpoint the running api process serves against itself. The admin
-`/admin/backup` upload path is the one exception spec section 10 asks for;
-it shells out to the same `restore_backup` function but only after the
-confirmation step, and Scott accepts the brief window where in-flight
-requests during that call see a data directory mid-swap, the same way any
-process restart already does.
+**Restore requires the api stopped, and the builder too.** This mirrors
+ADR 013's own single-replica assumption for the publisher: nothing in this
+round adds a lock between an in-flight request and a restore's tree
+rename, so `chronicle backup restore` is an operator command run against a
+stopped instance, not an endpoint the running api process serves against
+itself. "Stopped instance" means the builder container as well as api,
+not api alone: found live in the C6 backup and restore check, restoring
+into a stack with the builder still running left it holding a SQLite
+connection opened against the pre-restore `repo/index/chronicle.db`
+inode; the next build attempt failed with `sqlite3.OperationalError:
+attempt to write a readonly database` and kept failing until the builder
+container was restarted, because a long-lived connection does not get a
+fresh chance to reopen the file the way a per-request api handler does.
+The admin `/admin/backup` upload path is the one exception spec section 10
+asks for; it shells out to the same `restore_backup` function but only
+after the confirmation step, and Scott accepts the brief window where
+in-flight api requests during that call see a data directory mid-swap the
+same way any process restart already does, and accepts that the builder
+container needs a manual restart afterward for the same reason the CLI
+path needs it stopped first.
+
+**Restore does not bring back `data/site`.** `site/` is deliberately
+excluded from the bundle (it is `digest`'s own derived checkout, the same
+reasoning as excluding `repo/index/`), so a preview or publish attempted
+right after a restore fails until `chronicle digest` has run at least
+once against the restored instance to repopulate it. `docs/backup.md` and
+the admin backup page's restore confirmation both call this out as the
+required next step, not an optional cleanup.
 
 **No `.git` is not an error.** A bundle whose `repo/` has no `.git`
 directory (the hand-built migration bundle docs/backup.md describes) gets

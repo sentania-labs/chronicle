@@ -88,6 +88,10 @@ def backup_confirm_page(*, token: str, manifest: dict[str, Any]) -> str:
 {escape(str(manifest.get("chronicle_version", "?")))}.</p>
 <table><tr><th>record</th><th>count</th></tr>{rows}</table>
 <p><strong>This replaces the current repo, images, and credential store.</strong>
+If a builder is running against this instance, restart it after the
+restore finishes: it holds its own connection to the index and will not
+notice the swap on its own. Run <code>chronicle digest</code> again after
+restoring, since the site checkout is not part of the bundle.
 Type <code>restore</code> below to confirm.</p>
 <form method="post" action="/admin/backup/restore">
 <input type="hidden" name="token" value="{escape(token)}">
