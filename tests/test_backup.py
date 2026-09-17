@@ -138,6 +138,25 @@ def test_restore_refuses_path_traversal_member(tmp_path: Path) -> None:
         backup.restore_backup(tmp_path / "fresh5", traversal)
 
 
+def test_restore_removes_a_state_file_the_bundle_omits(tmp_path: Path) -> None:
+    """A bundle that never had admin.json (never claimed, or the operator
+    left it out by hand per docs/backup.md) must leave the restored
+    instance unclaimed, not carry over whatever the destination already
+    had staged for it."""
+    data_dir = tmp_path / "data"
+    _seed(data_dir).close()
+    bundle = backup.create_backup(data_dir, tmp_path / "out")
+
+    fresh_dir = tmp_path / "fresh"
+    Store.open(fresh_dir).close()
+    (fresh_dir / "state").mkdir(parents=True, exist_ok=True)
+    (fresh_dir / "state" / "admin.json").write_text("claimed-elsewhere", encoding="utf-8")
+
+    backup.restore_backup(fresh_dir, bundle)
+
+    assert not (fresh_dir / "state" / "admin.json").exists()
+
+
 def test_restore_initialises_git_when_bundle_repo_has_none(tmp_path: Path) -> None:
     """The hand-built import bundle case (docs/backup.md): a bundle may
     arrive with no .git at all, and restore gives it one commit authored

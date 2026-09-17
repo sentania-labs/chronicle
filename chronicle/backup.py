@@ -315,17 +315,20 @@ def restore_backup(data_dir: Path, bundle_path: Path) -> RestoreReport:
         else:
             current.mkdir(parents=True, exist_ok=True)
 
+    # Every one of STATE_MEMBERS is moved aside into pre_restore whenever it
+    # currently exists, whether or not the bundle carries a replacement: a
+    # bundle omitting admin.json or github-app.json means "unclaimed" or
+    # "disconnected" after restore, not "leave whatever is already there".
+    # Only the presence of a staged file decides whether one gets installed.
     staged_state = staging / "state"
-    if staged_state.exists():
-        pre_state = pre_restore / "state"
-        pre_state.mkdir(parents=True, exist_ok=True)
-        for name in STATE_MEMBERS:
-            staged_file = staged_state / name
-            if not staged_file.exists():
-                continue
-            current_file = state_dir / name
-            if current_file.exists():
-                shutil.move(str(current_file), str(pre_state / name))
+    pre_state = pre_restore / "state"
+    pre_state.mkdir(parents=True, exist_ok=True)
+    for name in STATE_MEMBERS:
+        current_file = state_dir / name
+        if current_file.exists():
+            shutil.move(str(current_file), str(pre_state / name))
+        staged_file = staged_state / name
+        if staged_file.exists():
             shutil.move(str(staged_file), str(current_file))
 
     after = _counts(data_dir)
