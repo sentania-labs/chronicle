@@ -1,0 +1,85 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Draft: VCF Operations Can Now See My UniFi Network</title><link rel="stylesheet" href="/static/style.css"><script src="/static/vendor/marked.min.js"></script></head>
+<body>
+<p class="banner">This Chronicle instance is internal-only and unauthenticated. Anyone who can reach it on the network can create, edit, and act on content.</p>
+<nav><a href="/content/submissions">Submissions</a><a href="/content/drafts">Drafts</a><a href="/content/import">Import</a><a href="/preview">Preview</a></nav>
+<h1>Draft: VCF Operations Can Now See My UniFi Network</h1>
+
+
+<p>Unclaimed. <form style="display:inline" method="post" action="/content/drafts/b7f46468586341ec8fee70923abbafbe/claim"><button type="submit">Claim</button></form></p>
+<p><a href="http://localhost:8090/preview/2026-08-01-vcf-operations-can-now-see-my-unifi-network/">Last built preview</a></p>
+<p>last run: preview &mdash; succeeded at 2026-09-17T05:09:43+00:00 (<a href="/runs/908b851dafe342bfb376bb3c48fd8aaf">log</a>)</p>
+<h2>Edit</h2>
+<form method="post" action="/content/drafts/b7f46468586341ec8fee70923abbafbe/save">
+<input type="hidden" name="base_version" value="2">
+
+<label for="title">Title</label>
+<input type="text" id="title" name="title" value="VCF Operations Can Now See My UniFi Network" required>
+<label for="date">Date</label>
+<input type="text" id="date" name="date" value="2026-08-01T14:39:00-05:00" placeholder="YYYY-MM-DD">
+<label for="categories">Categories (comma-separated)</label>
+<input type="text" id="categories" name="categories" value="Blog Posts, vcf operations, homelab">
+<label for="tags">Tags (comma-separated)</label>
+<input type="text" id="tags" name="tags" value="vcf-operations, management-pack, unifi, ubiquiti, networking, vcf-content-factory">
+<label for="summary">Summary / description</label>
+<input type="text" id="summary" name="summary" value="">
+<label for="url">URL (read-only, slug is pinned)</label>
+<input type="text" id="url" name="url" value="/2026/08/vcf-operations-can-now-see-my-unifi-network/" readonly>
+<label for="featureImage">Feature image</label>
+<select id="featureImage" name="featureImage"><option value="">none</option><option value="featured.png">featured.png</option><option value="image.png">image.png</option><option value="protect-camera-object.png">protect-camera-object.png</option></select>
+
+<div class="columns">
+<div>
+<label for="body">Body (markdown)</label>
+<textarea id="body" name="body">Every ESXi host in my lab is plugged into a UniFi switch somewhere, and until now VCF Operations had no idea. If a host had a flaky NIC, or a switch port started throwing errors, I&#x27;d find out from the UniFi controller, if I happened to be looking at it, and then have to go figure out which host was actually on the other end of that cable.
+
+I already had a management pack for Synology, so I built one for UniFi too.
+
+Like the [Synology adapter](https://cloudsandunicorns.com/2026/07/my-synology-nas-now-reports-to-vcf-operations/), it talks to the classic UniFi Network API plus UniFi Protect API. It discovers sites, gateways with their WAN interfaces, switches down to the individual port, access points, and Protect NVRs and cameras. Metrics include per-port PoE draw, per-radio channel utilization, and per-port link and error counters. All of it lands as real objects in VCF Operations.
+
+The feature I actually wanted was the switch-port-to-host stitch, and it turned out to be the more interesting technical problem of the two packs. The UniFi controller doesn&#x27;t expose the LLDP data you&#x27;d need to do this, so instead of giving up, [the content factory](https://cloudsandunicorns.com/2026/07/vcf-content-factory-builds-what-you-describe/) inverts the join and reads the same neighbor information from vCenter&#x27;s side. The hosts can read and capture the LLDP advertisement from the switches directly. Click an ESXi host in VCF Operations now and you see the actual physical switch port it&#x27;s plugged into, along with that port&#x27;s health, errors, and PoE draw. I checked it against all eight hosts in my lab and it matched every one.
+
+![The relationships!](/images/vcf-operations-can-now-see-my-unifi-network/image.png)
+
+That same Protect discovery picks up my front door camera as a native UniFi Camera object, right alongside the switches and access points, not bolted on as an afterthought.
+
+![The Front Door UniFi Camera object, discovered and monitored through the same UniFi Controller pack](/images/vcf-operations-can-now-see-my-unifi-network/protect-camera-object.png)
+
+There are a handful of gaps in v1: no per-SSID objects, no individual wireless client tracking, no event or alarm ingestion, and it targets one site per adapter instance, not true multi-site. It also leans on Ubiquiti&#x27;s classic API, which isn&#x27;t an officially documented or supported surface, so a controller update could break a field here or there without warning.
+
+This release replaces two earlier no-code packs I&#x27;d shipped for UniFi. Both are retired now in favor of the one adapter that actually goes deep enough to be useful. Grab it from [github.com/sentania-labs/vcf-content-factory-sdk-unifi](https://github.com/sentania-labs/vcf-content-factory-sdk-unifi), installed the normal way through VCF Operations, Administration &gt; Integrations.
+
+A community pack for UniFi already exists, so I won&#x27;t pretend this is the first one anywhere. What&#x27;s different here is the switch-port-to-host stitch and the fact that it ships out of the same versioned, CI-built pipeline as the rest of what I&#x27;m putting out.
+
+
+_Edited during the C5 live check (2026-09-17)._
+
+
+_ghostwriter added a follow-up note for the C5 live check._
+</textarea>
+</div>
+<div>
+<label>Live preview</label>
+<div id="preview-pane" class="card"></div>
+</div>
+</div>
+<button type="submit">Save</button>
+</form>
+<script src="/static/ui.js"></script>
+<h2>Images</h2>
+<table><tr><th>filename</th><th>role</th><th></th></tr><tr><td>featured.png</td><td>feature</td><td><form method="post" action="/content/drafts/b7f46468586341ec8fee70923abbafbe/images/00261f95b358a5d134c599c7d8b197b249a9b30b9e24e558bbb69068f02bd83b/detach"><button type="submit">Detach</button></form></td></tr><tr><td>image.png</td><td>inline</td><td><form method="post" action="/content/drafts/b7f46468586341ec8fee70923abbafbe/images/101d84627ad1703c0523d7b886c1c397e9d861b37eac2af88b4f913cecc2f94b/detach"><button type="submit">Detach</button></form></td></tr><tr><td>protect-camera-object.png</td><td>inline</td><td><form method="post" action="/content/drafts/b7f46468586341ec8fee70923abbafbe/images/e8757022fa0a670616df03fd3b1f04d976ea4e27684b668566bd51a2a9cb7516/detach"><button type="submit">Detach</button></form></td></tr></table>
+<form method="post" action="/content/drafts/b7f46468586341ec8fee70923abbafbe/images" enctype="multipart/form-data">
+<label for="file">Upload image</label>
+<input type="file" id="file" name="file" required>
+<label for="role">Role</label>
+<select id="role" name="role"><option value="inline">inline</option><option value="feature">feature</option></select>
+<button type="submit">Upload and attach</button>
+</form>
+<h2>Actions</h2>
+<div class="actions"><form method="post" action="/content/drafts/b7f46468586341ec8fee70923abbafbe/actions/submit"><button type="submit">submit</button></form><form method="post" action="/content/drafts/b7f46468586341ec8fee70923abbafbe/actions/preview"><button type="submit">preview</button></form></div>
+<h2>Version history</h2>
+<ul><li>v1 by scott at 2026-09-17T05:09:13+00:00 (<a href="/content/drafts/b7f46468586341ec8fee70923abbafbe/diff?from=0&to=1">diff vs previous</a>)</li><li>v2 by ghostwriter at 2026-09-17T05:10:44+00:00 &mdash; add ghostwriter follow-up note (<a href="/content/drafts/b7f46468586341ec8fee70923abbafbe/diff?from=1&to=2">diff vs previous</a>)</li></ul>
+<h2>Feedback</h2>
+<ul><li><strong>v1 request_revision</strong> by scott at 2026-09-17T05:10:29+00:00: Please add a screenshot of the UniFi dashboard before this goes further.</li></ul>
+
+</body></html>

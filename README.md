@@ -230,6 +230,10 @@ already put the whole thing behind their own auth proxy.
 No CDN and no network fetch at page load: `marked.min.js` and the
 hand-written `style.css`/`ui.js` are all served from this same process.
 
+The C5 live check's evidence (rendered HTML fragments; Playwright was
+unavailable that session, so these stand in for screenshots) is under
+[docs/screenshots/c5/](docs/screenshots/c5/).
+
 ## Tokens
 
 ```bash
