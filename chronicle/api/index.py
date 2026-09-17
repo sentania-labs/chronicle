@@ -190,10 +190,35 @@ class Index:
         ).fetchone()
         return row["image_id"] if row else None
 
-    def last_run_id(self, draft_id: str) -> str | None:
+    def last_run_id(self, draft_id: str, kind: str | None = None) -> str | None:
+        sql = "SELECT id FROM runs WHERE draft_id = ?"
+        params: tuple[Any, ...] = (draft_id,)
+        if kind is not None:
+            sql += " AND kind = ?"
+            params += (kind,)
+        sql += " ORDER BY created_at DESC, rowid DESC LIMIT 1"
+        row = self.conn.execute(sql, params).fetchone()
+        return row["id"] if row else None
+
+    def run_ids_with_status(self, status: str, kind: str | None = None) -> list[str]:
+        sql = "SELECT id FROM runs WHERE status = ?"
+        params: tuple[Any, ...] = (status,)
+        if kind is not None:
+            sql += " AND kind = ?"
+            params += (kind,)
+        sql += " ORDER BY created_at"
+        return [row["id"] for row in self.conn.execute(sql, params)]
+
+    def run_counts(self, kind: str) -> dict[str, int]:
+        rows = self.conn.execute(
+            "SELECT status, COUNT(*) AS total FROM runs WHERE kind = ? GROUP BY status", (kind,)
+        )
+        return {row["status"]: row["total"] for row in rows}
+
+    def last_run_id_of_kind(self, kind: str) -> str | None:
         row = self.conn.execute(
-            "SELECT id FROM runs WHERE draft_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
-            (draft_id,),
+            "SELECT id FROM runs WHERE kind = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (kind,),
         ).fetchone()
         return row["id"] if row else None
 

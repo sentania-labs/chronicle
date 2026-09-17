@@ -155,3 +155,28 @@ def test_oversized_claim_form_is_rejected(client: TestClient) -> None:
     huge_code = "x" * 20000
     response = client.post("/admin/claim", data={"code": huge_code, "password": ADMIN_PASSWORD})
     assert response.status_code == 413
+
+
+def test_status_page_shows_builder_section_with_no_heartbeat_yet(
+    admin_client: TestClient,
+) -> None:
+    response = admin_client.get("/admin")
+    assert response.status_code == 200
+    assert "Builder" in response.text
+    assert "no heartbeat yet" in response.text
+
+
+def test_status_page_shows_builder_heartbeat_once_written(
+    admin_client: TestClient, data_dir: Path
+) -> None:
+    heartbeat_path = data_dir / "state" / "builder" / "heartbeat.json"
+    heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat_path.write_text(
+        '{"builder_id": "chronicle-builder-1", "last_loop_at": "2026-09-16T09:00:00-05:00", '
+        '"hugo_version": "0.164.0", "queue_depth": 0}',
+        encoding="utf-8",
+    )
+    response = admin_client.get("/admin")
+    assert response.status_code == 200
+    assert "chronicle-builder-1" in response.text
+    assert "0.164.0" in response.text

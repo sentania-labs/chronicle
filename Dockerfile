@@ -61,15 +61,22 @@ RUN uv sync --frozen --no-dev \
 
 ENV CHRONICLE_BUILD_VERSION="${BUILD_VERSION}"
 
-# /data is created and handed to uid 1000 here so a fresh Docker named
-# volume (compose) inherits this ownership on first mount instead of the
-# root:root default Docker would otherwise create, which would fail
-# /readyz's writability check the moment the container starts. A Kubernetes
-# PVC gets the same result from the pod's fsGroup instead (see
-# examples/k8s/deployment.yaml).
+# /data, /data/preview, and /data/builder-work are created and handed to
+# uid 1000 here so a fresh Docker named volume (compose) inherits this
+# ownership on first mount instead of the root:root default Docker would
+# otherwise create. That default is what a `docker compose down -v` /
+# `up -d` cycle exposed: /data/preview is its own named volume (mounted
+# separately from /data in every container that touches it), so its
+# ownership at first mount comes from whatever exists at that path in the
+# image, not from /data's, and a directory that does not exist in the
+# image at all mounts in as root:root. /data/builder-work does not need
+# its own volume (it lives under /data), but is created here too so a
+# builder that starts before ever calling `mkdir` still finds the right
+# owner on a from-empty volume. A Kubernetes PVC gets the same result from
+# the pod's fsGroup instead (see examples/k8s/deployment.yaml).
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin chronicle \
-    && mkdir -p /data \
-    && chown chronicle:chronicle /data
+    && mkdir -p /data /data/preview /data/builder-work \
+    && chown -R chronicle:chronicle /data
 
 # -----------------------------------------------------------------------------
 FROM base AS api
@@ -118,10 +125,21 @@ RUN apt-get update \
 
 USER 1000
 
-# Placeholder in this round (chronicle/builder/main.py logs and exits); the
-# health check only confirms the interpreter runs.
+# The builder has no HTTP port to probe; liveness is the heartbeat file it
+# writes every poll tick (chronicle/builder/runner.py). A heartbeat older
+# than five poll intervals means the loop has stopped making progress, not
+# necessarily crashed, which is exactly what a liveness probe should catch
+# either way.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD ["python3", "-c", "pass"]
+    CMD ["python3", "-c", "\
+import json, os, sys; \
+from datetime import datetime; \
+path = os.path.join(os.environ.get('CHRONICLE_DATA_DIR', '/data'), 'state', 'builder', 'heartbeat.json'); \
+poll = float(os.environ.get('CHRONICLE_BUILDER_POLL_SECONDS', '5')); \
+data = json.load(open(path)); \
+last = datetime.fromisoformat(data['last_loop_at']); \
+age = datetime.now().astimezone() - last; \
+sys.exit(0 if age.total_seconds() < poll * 5 + 30 else 1)"]
 
 CMD ["python3", "-m", "chronicle.builder.main"]
 
@@ -134,10 +152,7 @@ LABEL org.opencontainers.image.title="chronicle-preview" \
 USER 1000
 EXPOSE 8090
 
-# A plain connect, not a GET: the root path answers 403 (listing disabled)
-# once no index.html exists yet, and urlopen would treat that as a failure
-# even though the server is healthy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD ["python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 8090), timeout=3).close()"]
+    CMD ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz')"]
 
 CMD ["python3", "-m", "chronicle.preview.main"]

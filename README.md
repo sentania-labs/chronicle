@@ -11,13 +11,57 @@ author or by Scott at a gate the service exposes. The full design is in
 
 C1 shipped the store and the public API: submissions, drafts with versions
 and conflict-detecting saves, feedback, images, runs, and events, all under
-`/v1` and all behind a consumer token. This round (C2) adds the admin front
-door (claim, sessions, tokens page, status page), a GitHub App connected
-through the manifest flow, and the digest of main that turns published posts
-into `Post` records and `from_post` imports. The preview build and the
-GitHub publish path itself (opening a PR, watching for a merge) arrive in
-C3 through C5; where an action would trigger one of those, it still records
-a queued run and stops.
+`/v1` and all behind a consumer token. C2 added the admin front door (claim,
+sessions, tokens page, status page), a GitHub App connected through the
+manifest flow, and the digest of main that turns published posts into
+`Post` records and `from_post` imports. This round (C3) makes preview real:
+the builder container watches the run queue, converts a draft to a Hugo
+post, and builds it; the preview container serves the result at
+`/preview/<slug>/...`. The GitHub publish path itself (opening a PR,
+watching for a merge) is still C4 and C5; `approve` and `unpublish` still
+only record a queued run and stop.
+
+## Preview
+
+`POST /v1/drafts/{id}/actions/preview` pins the draft's slug (if it has
+none yet) and queues a run of kind `preview`. The builder container polls
+`data/repo/runs/queue/` (default every 5 seconds, `CHRONICLE_BUILDER_POLL_SECONDS`),
+claims at most one run at a time with a lease under
+`data/state/builder/leases/<run_id>.json` (ADR 011 has the exact format and
+the crash-recovery argument), and for a claimed run:
+
+1. Copies `data/site/` (the C2 digest clone, submodules included) into a
+   scratch tree under `data/builder-work/scratch/<run_id>/`.
+2. Converts the draft to a post file with `chronicle/api/convert.py`
+   (frontmatter in ADR 007's allowlist order, `draft: false` forced, the
+   filename and `url` rules below), the same module publish will reuse in
+   C4, and copies its attached images into `static/images/<slug>/`.
+3. Runs `hugo --source <scratch> --destination data/preview/.builds/<run_id>
+   --baseURL <CHRONICLE_EXTERNAL_URL>/preview/<slug>/ --minify --gc`,
+   capturing output as the run's log.
+4. On success, atomically points the symlink `data/preview/<slug>` at the
+   build's output directory (a single rename, never a remove-then-rename
+   pair, so a request never sees a missing `<slug>/`; ADR 011)
+   (`GET /v1/drafts/{id}/status` and the narrower `GET /v1/drafts/{id}/preview`
+   then carry `preview_url`) and moves the draft to `previewed`. On
+   failure, the previous preview tree, if any, is left untouched, and the
+   draft's status does not change.
+
+**Filename and `url` rules**, checked against the real blog's 347 posts:
+a draft imported with `from_post` keeps the file and `url` it came from; a
+new draft gets `content/posts/<YYYY-MM-DD>-<slug>.md` and `url:
+/<YYYY>/<MM>/<slug>/`, the dominant pattern on main.
+
+The builder writes a heartbeat to `data/state/builder/heartbeat.json` every
+poll tick (builder id, last loop time, its own `hugo version`, and the
+preview queue depth); the admin status page shows it alongside toolchain
+drift (the builder's actual Hugo version against what the last digest found
+in the blog repo's own Pages workflow, per run and per heartbeat; drift
+never blocks a build).
+
+A full rebuild of the real blog (347 posts, two theme submodules) measured
+2.6 seconds wall time end to end in the C3 pull request's live check
+against a local clone; see that PR for the full run record and evidence.
 
 ## The API
 
@@ -72,7 +116,8 @@ data/
     feedback/<draft_id>.md       the same entries rendered for a human, never parsed back
     posts/<slug>.json
     runs/<id>.json
-    runs/queue/<run_id>.json     consumed by the builder in C3
+    runs/queue/<run_id>.json     consumed by the builder
+    runs/logs/<run_id>.log       captured build output, read by GET /v1/runs/{id}/log
     events/log.jsonl             append-only, one object per line, monotonic seq
     index/chronicle.db           derived SQLite, gitignored, rebuildable
   images/<sha[:2]>/<sha>.<ext>   content-addressed, sha256 is the image id
@@ -84,7 +129,13 @@ data/
     github-app.json                GitHub App record, secrets encrypted at rest (ADR 008)
     digest-status.json             last digest's counts and timestamps, not secret
     toolchain.json                 last digest's Hugo version and theme commits, 0644
+    builder/heartbeat.json         builder id, last loop time, hugo version, queue depth
+    builder/leases/<run_id>.json   one builder's claim on one run (ADR 011)
+  builder-work/                  the builder's scratch tree and Hugo caches, disposable
+    scratch/<run_id>/, cache/, resources/
   preview/                       built preview output, disposable
+    <slug>/                      symlink to the live build under .builds/
+    .builds/<run_id>/            one build's output, live once a symlink points at it
   site/                          clone of the blog repo main, disposable
 ```
 
@@ -109,12 +160,12 @@ One repository, one `Dockerfile`, three build targets, per spec section 14:
   index opens at the expected schema version, and the GitHub App is honestly
   reported "not configured" until C2 bootstraps it).
 - **builder**: Hugo extended (pinned by the `HUGO_VERSION` build arg,
-  default `0.164.0`), plus git for the blog repo clone. Round C0 ships a
-  placeholder entry point that logs its startup and exits; the run queue
-  watcher and Hugo build loop arrive with the preview builder.
-- **preview**: a static file server over the preview volume with directory
-  listing disabled. This one is real in round C0, not a placeholder; the
-  per-slug path prefix arrives with the preview builder.
+  default `0.164.0`), plus git for the blog repo clone. Polls the run
+  queue, builds `preview` runs, and writes a heartbeat (see "Preview"
+  above).
+- **preview**: a small Python static file server (ADR 010) over the
+  preview volume, serving `/preview/<slug>/...`, no directory listing, a
+  `GET /healthz`.
 
 ```bash
 docker build --target api .
@@ -124,8 +175,25 @@ docker build --target preview .
 
 All three run non-root (uid 1000) and are intended to run with a read-only
 root filesystem. `api` needs a writable volume at `CHRONICLE_DATA_DIR`;
-`builder` needs the same plus a writable Hugo cache under its home
-directory; `preview` needs a writable volume at `CHRONICLE_PREVIEW_DIR`.
+`builder` needs the same plus a writable home directory (Hugo's own cache
+lives under `data/builder-work/`, not the home directory, but `uv`'s
+installed packages still expect one); `preview` needs a writable volume at
+`CHRONICLE_PREVIEW_DIR`.
+
+## Local end to end: `make compose-up`
+
+```bash
+CHRONICLE_DIGEST_REPO_URL=/path/to/a/local/clone docker compose up -d --build
+```
+
+Then, against `localhost:8080` (api) and `localhost:8090` (preview): claim
+the instance, run the digest (button on `/admin`, or `POST /admin/digest`
+with the session cookie), `POST /v1/drafts` with `from_post` naming a slug
+the digest found, `POST /v1/drafts/{id}/actions/preview` with the `ui`
+token, poll `GET /v1/runs/{run_id}` until `succeeded`, then open
+`http://localhost:8090<preview_url>` in a browser. `docker-compose.yml` has
+the full comment on why `CHRONICLE_EXTERNAL_URL` there points at the
+preview port and not the api's.
 
 ## Run it locally
 

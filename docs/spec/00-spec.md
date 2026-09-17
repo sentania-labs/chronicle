@@ -48,6 +48,8 @@ exposes.
 
 - The blog repo `sentania/sentania.github.io` builds with Hugo extended
   0.164.0 and two theme submodules (blowfish, hugo-clarity) via `hugo.yml`.
+- 2026-09-16 (found by Adolin during the C2 live check): that blog repo is
+  private, not public.
 - `blog-dispatch.yml` in that repo does preview, publish, and unpublish on
   dispatch. It is retired by this service.
 - The dashboard's blog services (materialize, dispatch, draft store under

@@ -1,0 +1,10 @@
+# Used only by ci/compose-smoke.sh. Mounts the throwaway fixture git repo
+# the script builds under CHRONICLE_SMOKE_FIXTURE_DIR into the api
+# container, read-only, so `chronicle digest` has something to clone
+# without a GitHub App or network access.
+services:
+  api:
+    environment:
+      CHRONICLE_DIGEST_REPO_URL: /fixture
+    volumes:
+      - ${CHRONICLE_SMOKE_FIXTURE_DIR}:/fixture:ro

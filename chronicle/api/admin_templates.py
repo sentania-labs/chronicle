@@ -102,6 +102,23 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
         "".join(row(t["path"], t["commit"]) for t in status["toolchain"]["submodules"])
         or "<tr><td colspan=2>none</td></tr>"
     )
+    heartbeat = status["builder_heartbeat"]
+    builder_rows = (
+        row("builder id", heartbeat["builder_id"])
+        + row("last loop at", heartbeat["last_loop_at"])
+        + row("hugo version (builder)", heartbeat["hugo_version"])
+        + row("queue depth (preview)", heartbeat["queue_depth"])
+        + row(
+            "preview volume writable",
+            "yes" if heartbeat.get("preview_writable", True) else "no: see builder logs",
+        )
+        if heartbeat
+        else "<tr><td colspan=2>no heartbeat yet; the builder has not completed a poll"
+        " loop</td></tr>"
+    )
+    preview_run_rows = "".join(
+        row(name, count) for name, count in status["preview_runs_by_status"].items()
+    )
     body = f"""
 {nav()}
 <h2>GitHub App</h2>
@@ -123,6 +140,10 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
 </table>
 <h3>Theme submodules</h3>
 <table><tr><th>path</th><th>commit</th></tr>{theme_rows}</table>
+<h2>Builder</h2>
+<table>{builder_rows}</table>
+<h3>Preview runs by status</h3>
+<table>{preview_run_rows}</table>
 <h2>Submissions by status</h2>
 <table>{submission_rows or "<tr><td colspan=2>none</td></tr>"}</table>
 <h2>Drafts by status</h2>

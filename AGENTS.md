@@ -107,20 +107,69 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   input), so this costs nothing in practice and is what lets a theme
   submodule pointed at a local path clone in tests the same way a real one
   clones over https in production.
+- **`digest.py`'s `GIT_CONFIG_GLOBAL` points at a real config file, not
+  `/dev/null`.** Git's dubious-ownership check ignores `GIT_CONFIG_COUNT`
+  environment injection for `safe.directory` on purpose (letting an env var
+  waive that check would defeat it), so the per-invocation trick
+  `_auth_env` uses for an installation token cannot grant this exception;
+  only a real config file can. Found live in the C3 real-blog check, where
+  `CHRONICLE_DIGEST_REPO_URL` named a clone owned by a different uid than
+  the container's.
+- **A run's queue entry, lease, and status are three different things, and
+  only two of them are guaranteed to agree.** The queue entry
+  (`repo/runs/queue/<run_id>.json`) is a request; the lease
+  (`state/builder/leases/<run_id>.json`, ADR 011) is a claim; the run
+  record's `status` is the durable truth. A builder that crashes can leave
+  a run `building` with its lease already gone (its own `tick`'s `finally`
+  releases the lease on any exit, including an uncaught exception), not
+  just with an expired one, so `runner.recover_expired_leases` checks both:
+  every expired lease, and every `building` run with no live lease at all.
+- **The pre-swap Hugo output lives under `data/preview/.builds/<run_id>/`,
+  never under `data/builder-work/`.** `_atomic_swap`'s rename into
+  `data/preview/<slug>/` only stays atomic when the source and destination
+  share a filesystem, and `builder-work` is a deliberately separate mount
+  from `preview` in both `docker-compose.yml` and `examples/k8s/` (ADR
+  011's security-separation argument). Found live the same way: an
+  `os.replace` across that mount boundary raises `OSError`, not a silent
+  copy.
+- **`data/preview/<slug>` is a symlink into `.builds/<run_id>/`, never a
+  directory Hugo writes into directly.** `_atomic_swap` replaces it with a
+  single rename of a temp symlink, not a remove-then-rename pair, so a
+  request resolving `<slug>/` never sees it missing (ADR 011). The old
+  build directory a replaced symlink pointed at is removed right after the
+  swap; anything that writes under a mutable path in the scratch copy of
+  `data/site` (a converted post, an attached image) must `unlink` it first
+  because `_copy_site` hard-links wherever it can, and writing in place
+  would truncate the same inode `data/site` uses (found live: this is
+  exactly what silently corrupted the digest's clone before the round C3
+  review caught it).
 
-## Round C2 status
+## Round C3 status
 
-Admin, the GitHub App connection, and the digest of main are real: claim,
-signed-cookie sessions with secret rotation on re-claim and password change,
-a tokens page, a status page, the manifest flow through callback,
-installation and repo selection with live verification calls, `chronicle
-digest` (and an admin button that backgrounds it), and `from_post` imports
-with image pull. Every GitHub call goes through `chronicle/api/github_client.py`
-so a test can swap in a mock transport; nothing here has made a real network
-call outside the one-time manual verification in this round's pull request.
-Publish itself (opening a PR from an approved draft, watching for its merge)
-is still C3: `approve` and `unpublish` still only write a run record and a
-queue entry under `repo/runs/queue/`. No Hugo build, no reconciler yet.
+The preview build is real: `chronicle/builder/main.py` polls the run queue,
+claims one `preview` run at a time with a lease (`chronicle/builder/
+leases.py`, ADR 011), converts the draft with `chronicle/api/convert.py`
+(shared with the publish path C4 will add), builds it with Hugo, and
+atomically swaps the output into `data/preview/<slug>/`. `chronicle/
+preview/main.py` serves it at `/preview/<slug>/...` (ADR 010). Publish
+itself (opening a PR from an approved draft, watching for its merge) is
+still C4 and C5: `approve` and `unpublish` still only write a run record
+and a queue entry. No reconciler yet.
+
+A fresh named volume (or PVC) comes up owned by uid 1000 now: the
+Dockerfile creates and chowns `/data`, `/data/preview`, and
+`/data/builder-work` before `USER 1000` in every stage that mounts them,
+and the builder checks both paths are writable every tick rather than
+claiming and burning a run against a wrongly-owned mount (see
+`chronicle/builder/runner.py`'s `check_writable` and the `preview_writable`
+heartbeat field). `make compose-smoke` (`ci/compose-smoke.sh`) proves the
+whole path against fresh volumes end to end.
+
+### Not done, noticed
+
+`ci/compose-smoke.sh` is not wired into CI this round: the runners have no
+fixture blog repo or GitHub App to digest against, and building that out is
+its own piece of work for C6, not a fresh-volume fix.
 
 ## Maintaining this file
 

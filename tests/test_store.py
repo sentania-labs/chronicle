@@ -92,7 +92,11 @@ def test_run_queue_entry_is_written_for_a_preview(store: Store) -> None:
 
 
 def test_reindex_rebuilds_every_row_from_the_files(store: Store, data_dir: Path) -> None:
-    seed(store)
+    ids = seed(store)
+    store.start_run(ids["run"], "test-builder", "0.164.0", toolchain_drift=False)
+    store.finish_run(
+        ids["run"], "test-builder", succeeded=True, result={"preview_url": "/preview/drift/"}
+    )
     before = snapshot(store)
     store.close()
 

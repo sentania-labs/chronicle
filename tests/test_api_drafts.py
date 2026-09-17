@@ -297,7 +297,9 @@ def test_preview_queues_a_run_and_pins_a_slug(client: TestClient, agent_token: s
     assert log["log"] == ""
 
     status = client.get(f"/v1/drafts/{draft_id}/status", headers=auth(agent_token)).json()
-    assert status["status"] == "previewed"
+    # A draft only becomes `previewed` once its build succeeds (the builder's
+    # answer, not the enqueue-time api's); queuing alone leaves it as it was.
+    assert status["status"] == "drafting"
     assert status["last_run"]["id"] == run_id
     assert status["preview_url"] is None
     assert status["branch"] is None
@@ -384,3 +386,21 @@ def test_unknown_action_is_404(client: TestClient, agent_token: str) -> None:
     response = client.post(f"/v1/drafts/{draft_id}/actions/publish", headers=auth(agent_token))
     assert response.status_code == 404
     assert response.json()["error"] == "action_unknown"
+
+
+def test_run_log_endpoint_returns_the_builder_written_content(
+    client: TestClient, agent_token: str
+) -> None:
+    draft_id = new_draft(client, agent_token)
+    save(client, agent_token, draft_id, 0)
+    previewed = client.post(f"/v1/drafts/{draft_id}/actions/preview", headers=auth(agent_token))
+    run_id = previewed.json()["run_id"]
+
+    store = client.app.state.services.store  # type: ignore[attr-defined]
+    log_path = store.log_path_for(run_id)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("hugo build output here\n", encoding="utf-8")
+    store.start_run(run_id, "test-builder", "0.164.0", toolchain_drift=False)
+
+    log = client.get(f"/v1/runs/{run_id}/log", headers=auth(agent_token)).json()
+    assert log["log"] == "hugo build output here\n"

@@ -3,7 +3,7 @@
 SHELL := /bin/bash
 .PHONY: setup lint typecheck test prose-check check \
         build build-api build-builder build-preview \
-        compose-up compose-down
+        compose-up compose-down compose-smoke
 
 HUGO_VERSION ?= 0.164.0
 
@@ -45,3 +45,10 @@ compose-up:
 
 compose-down:
 	docker compose down
+
+# Fresh-volume smoke test: down -v, up -d --build, digest a tiny fixture
+# repo, import it, preview it, and confirm the built page answers through
+# the preview container. Not run in CI this round (the runners have no
+# fixture blog repo to digest against a real GitHub App); see AGENTS.md.
+compose-smoke:
+	bash ci/compose-smoke.sh

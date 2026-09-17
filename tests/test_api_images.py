@@ -115,6 +115,42 @@ def test_attach_and_detach_on_a_draft(client: TestClient, agent_token: str) -> N
     )
 
 
+def test_attaching_a_second_image_with_the_same_filename_is_409(
+    client: TestClient, agent_token: str
+) -> None:
+    first_id = upload(client, agent_token, png_bytes(), name="shot.png").json()["image_id"]
+    second_id = upload(
+        client, agent_token, png_bytes(color=(200, 100, 50)), name="shot.png"
+    ).json()["image_id"]
+    assert first_id != second_id
+    draft_id = client.post("/v1/drafts", json={}, headers=auth(agent_token)).json()["id"]
+
+    attached = client.put(
+        f"/v1/drafts/{draft_id}/images/{first_id}",
+        json={"role": "inline"},
+        headers=auth(agent_token),
+    )
+    assert attached.status_code == 200
+
+    conflict = client.put(
+        f"/v1/drafts/{draft_id}/images/{second_id}",
+        json={"role": "inline"},
+        headers=auth(agent_token),
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"] == "image_filename_conflict"
+    assert "shot.png" in conflict.json()["message"]
+
+    # Re-attaching the same image under its own filename is still fine: it
+    # is an update, not a second image trying to claim the same output path.
+    reattached = client.put(
+        f"/v1/drafts/{draft_id}/images/{first_id}",
+        json={"role": "feature"},
+        headers=auth(agent_token),
+    )
+    assert reattached.status_code == 200
+
+
 def test_images_are_not_tracked_by_git(client: TestClient, agent_token: str) -> None:
     upload(client, agent_token, png_bytes())
     store = client.app.state.services.store  # type: ignore[attr-defined]

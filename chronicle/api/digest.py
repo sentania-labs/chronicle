@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,8 +28,30 @@ import yaml
 
 POSTS_GLOB_DIRS = ("content/posts",)
 HUGO_WORKFLOW_PATH = ".github/workflows/hugo.yml"
+
+
+def _safe_directory_config() -> str:
+    """A real, minimal git config file granting `safe.directory = *`.
+
+    Git's dubious-ownership check deliberately ignores `GIT_CONFIG_COUNT`/
+    `_KEY_n`/`_VALUE_n` for `safe.directory` specifically, on purpose: letting
+    an environment variable waive that one check would defeat the point of
+    having it. A real config file is the only way to grant the exception, so
+    `GIT_CONFIG_GLOBAL` points here instead of `/dev/null`: still isolated
+    from whatever `~/.gitconfig` the host or image happens to have, but with
+    the one exception `CHRONICLE_DIGEST_REPO_URL` needs when it names a local
+    clone owned by a different uid than the container's (README's documented
+    way to test digest against a private repo without a token; found live
+    during the C3 preview round's real-blog check).
+    """
+    path = Path(tempfile.gettempdir()) / "chronicle-digest-git-config"
+    if not path.exists():
+        path.write_text("[safe]\n\tdirectory = *\n", encoding="utf-8")
+    return str(path)
+
+
 GIT_ENV = {
-    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_GLOBAL": _safe_directory_config(),
     "GIT_CONFIG_SYSTEM": "/dev/null",
     "GIT_TERMINAL_PROMPT": "0",
     # The repo URL is Chronicle's own configured source (the installation's

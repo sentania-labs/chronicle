@@ -1,15 +1,15 @@
 # Reference only, not the lab's deployment. See README.md in this directory.
 #
 # One Deployment, three containers in one pod (spec section 14): api,
-# builder, and preview share the data volume; builder and preview share the
-# preview/site volume. image and imagePullPolicy point at the registry and
-# tag the deployer chooses; nothing here pins a real one.
-#
-# Round C0's builder is a placeholder that logs and exits (see
-# chronicle/builder/main.py); under this Deployment's default restart policy
-# that means a permanent restart count until the real run-queue watcher
-# lands in a later round. Left in so the reference shows the intended
-# three-container pod shape rather than a two-container stand-in.
+# builder, and preview. `data` backs the durable record (api and builder
+# only: `preview` has no business reading it, tokens and the instance key
+# included). `preview-site` backs `site` and `preview`, shared by all three
+# so the api's digest, the builder's read of the same clone, and the
+# preview server's read of the builder's output are always the same
+# storage, never three independent copies of it (see the C3 pull request
+# for the bug this deployment shipped with when only api and builder
+# mounted the `site` subPath, and preview only ever saw its own copy of
+# `preview`).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -29,6 +29,7 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
+        runAsGroup: 1000
         fsGroup: 1000
       containers:
         - name: api
@@ -38,6 +39,8 @@ spec:
           env:
             - name: CHRONICLE_DATA_DIR
               value: /data
+            - name: CHRONICLE_EXTERNAL_URL
+              value: https://chronicle.REPLACE_ME.internal
           envFrom:
             - secretRef:
                 name: chronicle-instance-key
@@ -47,6 +50,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: preview-site
+              mountPath: /data/site
+              subPath: site
             - name: tmp
               mountPath: /tmp
           readinessProbe:
@@ -63,6 +69,8 @@ spec:
           env:
             - name: CHRONICLE_DATA_DIR
               value: /data
+            - name: CHRONICLE_EXTERNAL_URL
+              value: https://chronicle.REPLACE_ME.internal
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -77,11 +85,33 @@ spec:
               subPath: preview
             - name: tmp
               mountPath: /tmp
-            # Hugo's cache and uv's venv both expect a writable home
-            # directory; the image's /home/chronicle sits on the read-only
-            # root filesystem, so it needs its own writable mount here.
+            # Hugo's cache, its resource dir, and the scratch tree it builds
+            # from (chronicle/builder/settings.py's work_dir) all need to be
+            # writable; data/builder-work sits on the data volume above, so
+            # this mount is only for the image's own home directory, which
+            # the read-only root filesystem otherwise makes unwritable.
             - name: builder-home
               mountPath: /home/chronicle
+          # No HTTP port to probe: liveness is the heartbeat file
+          # chronicle/builder/runner.py writes every poll tick. A stale
+          # heartbeat means the loop stopped making progress, not
+          # necessarily that the process died, which is exactly what a
+          # liveness probe should still catch.
+          livenessProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - |
+                  import json, os, sys
+                  from datetime import datetime
+                  path = os.path.join(os.environ["CHRONICLE_DATA_DIR"], "state", "builder", "heartbeat.json")
+                  poll = float(os.environ.get("CHRONICLE_BUILDER_POLL_SECONDS", "5"))
+                  data = json.load(open(path))
+                  age = datetime.now().astimezone() - datetime.fromisoformat(data["last_loop_at"])
+                  sys.exit(0 if age.total_seconds() < poll * 5 + 30 else 1)
+            initialDelaySeconds: 20
+            periodSeconds: 30
 
         - name: preview
           image: REPLACE_ME/chronicle/preview:REPLACE_ME
@@ -100,10 +130,12 @@ spec:
             - name: tmp
               mountPath: /tmp
           readinessProbe:
-            tcpSocket:
+            httpGet:
+              path: /healthz
               port: 8090
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /healthz
               port: 8090
 
       volumes:

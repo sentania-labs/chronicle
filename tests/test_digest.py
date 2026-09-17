@@ -339,3 +339,50 @@ def test_digest_then_from_post_import_of_a_real_shaped_post(
         "/images/vcf-operations-can-now-see-my-unifi-network/diagram.png"
     )
     store.close()
+
+
+def test_git_config_global_grants_a_safe_directory_exception() -> None:
+    path = Path(digest.GIT_ENV["GIT_CONFIG_GLOBAL"])
+    assert path.exists()
+    content = path.read_text(encoding="utf-8")
+    assert "[safe]" in content
+    assert "directory = *" in content
+
+
+def test_clone_of_a_source_owned_by_a_different_uid_is_not_refused(tmp_path: Path) -> None:
+    """Regression: git's dubious-ownership check ignores GIT_CONFIG_COUNT env
+    injection for `safe.directory` on purpose, so the fix has to be a real
+    config file (see `digest._safe_directory_config`), not the same
+    per-invocation trick `_auth_env` uses for the installation token. This
+    test cannot fake a different uid without root, so it instead proves the
+    exception is broad (`*`) rather than naming this one test repo, which is
+    what actually matters for a clone owned by a different uid in a
+    container.
+    """
+    repo = tmp_path / "source"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, env=digest.GIT_ENV)
+    (repo / "README.md").write_text("hi", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b.c", "-c", "user.name=a", "add", "."],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.email=a@b.c",
+            "-c",
+            "user.name=a",
+            "commit",
+            "-q",
+            "-m",
+            "x",
+        ],
+        check=True,
+    )
+    destination = tmp_path / "dest"
+    sha = digest.clone_or_update(destination, str(repo))
+    assert sha
