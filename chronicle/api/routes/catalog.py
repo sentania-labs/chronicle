@@ -1,9 +1,4 @@
-"""Read paths over posts, runs, and the event log.
-
-Posts stay empty until the digest of main lands in C2, and a run has no log
-until the builder lands in C3; both read paths are real now so their
-consumers can be written against them.
-"""
+"""Read paths over posts, runs, and the event log."""
 
 from __future__ import annotations
 
@@ -34,7 +29,7 @@ def get_run(run_id: str, services: Services = Depends(get_services)) -> dict[str
 @router.get("/runs/{run_id}/log")
 def get_run_log(run_id: str, services: Services = Depends(get_services)) -> dict[str, Any]:
     run = services.store.get_run(run_id)
-    return {"run_id": run.id, "status": run.status, "log": ""}
+    return {"run_id": run.id, "status": run.status, "log": services.store.run_log(run_id)}
 
 
 @router.get("/events")
