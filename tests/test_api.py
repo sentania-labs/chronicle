@@ -21,6 +21,14 @@ def test_healthz_reports_up() -> None:
     body = response.json()
     assert body["service"] == "chronicle-api"
     assert body["status"] == "ok"
+    assert body["version"] == "dev"
+
+
+def test_healthz_reports_the_build_version_env(monkeypatch) -> None:
+    monkeypatch.setenv("CHRONICLE_BUILD_VERSION", "v1.2.3")
+    client = TestClient(create_app())
+    response = client.get("/healthz")
+    assert response.json()["version"] == "v1.2.3"
 
 
 def test_readyz_ok_when_data_dir_writable(tmp_path, monkeypatch) -> None:

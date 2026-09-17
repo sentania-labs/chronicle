@@ -131,6 +131,7 @@ async def _oversized_response(declared: int, max_bytes: int, send: Send) -> None
 class Health(BaseModel):
     service: str
     status: str = "ok"
+    version: str = "dev"
 
 
 class Check(BaseModel):
@@ -274,7 +275,11 @@ def create_app() -> FastAPI:
 
     @app.get("/healthz", response_model=Health, tags=["operations"])
     async def healthz() -> Health:
-        return Health(service=SERVICE)
+        # Set by the Dockerfile's BUILD_VERSION arg on a release build; "dev"
+        # locally and in every non-tag CI build, which is the honest answer
+        # when no release tag names this exact build.
+        version = os.environ.get("CHRONICLE_BUILD_VERSION", "dev")
+        return Health(service=SERVICE, version=version)
 
     @app.get("/readyz", tags=["operations"])
     async def readyz() -> JSONResponse:
