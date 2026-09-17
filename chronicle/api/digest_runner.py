@@ -76,6 +76,25 @@ def _installation_token(admin: AdminServices, installation_id: str) -> str:
     return token
 
 
+def refresh_from_target(store: Store, target: Any, actor: str) -> None:
+    """Fetch a repo target's default branch and apply the digest, no toolchain bookkeeping.
+
+    Shared by the watcher (a merge just landed) and reconciliation (spec
+    section 12): both already hold a `publisher.RepoTarget` from resolving
+    the same GitHub App or test-token configuration `run()` above resolves
+    on its own, so this skips `_clone_url` and takes the repo URL, default
+    branch, and token straight from it instead of re-deriving them.
+    """
+    token = target.token_provider() if target.token_provider else None
+    digest_mod.clone_or_update(store.site_dir, target.repo_url, target.default_branch, token=token)
+    discovered = digest_mod.discover_posts(store.site_dir)
+    posts = [
+        Post(slug=item.slug, path=item.path, title=item.title, date=item.date, sha=item.sha)
+        for item in discovered
+    ]
+    store.apply_digest(actor, posts)
+
+
 def run(store: Store, actor: str, admin: AdminServices | None = None) -> DigestSummary:
     started_at = now_stamp()
     repo_url, branch, token = _clone_url(admin)

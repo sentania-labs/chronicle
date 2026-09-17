@@ -73,6 +73,34 @@ RUN_OUTCOME_TRANSITIONS: dict[tuple[str, str], Transition] = {
     ("previewed", PREVIEW_SUCCEEDED): Transition("previewed"),
 }
 
+# What an observed PR outcome does to the draft that opened it (spec section
+# 9's merge watch and close-without-merge). Keyed by (from_status, event), not
+# by run kind: `approve` only ever opens a PR from `approved`, and `unpublish`
+# only ever opens one from `published`, so the two publish/unpublish cases
+# never collide on the same from_status even though both events are named
+# "merged". Same shape as RUN_OUTCOME_TRANSITIONS: no actor check (the
+# watcher is not a consumer token), and a status this table has no entry for
+# is left exactly as it is (a draft revised or rejected again while its PR
+# was still open must not be dragged back by a merge the watcher only now
+# noticed).
+WATCH_TRANSITIONS: dict[tuple[str, str], Transition] = {
+    ("approved", "merged"): Transition("published"),
+    ("published", "merged"): Transition("unpublished"),
+    ("approved", "closed"): Transition("in_review"),
+    ("published", "closed"): Transition("in_review"),
+}
+
+# A reconciliation resolution (spec section 12) is an explicit admin
+# override of a data-integrity mismatch, not a normal action gated by the
+# draft's current status, so it names the resulting status directly rather
+# than keying off (from_status, action) the way DRAFT_TRANSITIONS does.
+# `import_as_draft` and `ignore` are not status changes at all: the first
+# creates a new draft (Store.create_draft), the second touches nothing.
+RECONCILE_STATUS: dict[str, str] = {
+    "mark_published": "published",
+    "mark_unpublished": "unpublished",
+}
+
 SUBMISSION_TRANSITIONS: dict[tuple[str, str], Transition] = {
     ("new", "claim"): Transition("claimed"),
     ("new", "discard"): Transition("discarded"),
@@ -117,6 +145,11 @@ def resolve_submission(status: str, action: str) -> Transition:
 def resolve_run_outcome(status: str, outcome: str) -> Transition | None:
     """The status change a finished run implies, or None to leave it alone."""
     return RUN_OUTCOME_TRANSITIONS.get((status, outcome))
+
+
+def resolve_watch(status: str, event: str) -> Transition | None:
+    """The status change an observed PR outcome implies, or None to leave it alone."""
+    return WATCH_TRANSITIONS.get((status, event))
 
 
 def resolve_save(status: str) -> Transition | None:

@@ -1,0 +1,125 @@
+"""Merge watch: poll the PRs Chronicle opened, react to merge or close.
+
+Spec section 9. Runs in the api process alongside the publisher (ADR 013),
+polling `Store.list_watches()` (backed by `data/repo/watch/`, so a restart
+resumes from exactly what was open before it). No webhooks: the service has
+no public endpoint (spec section 9), so this is the only way it learns a PR
+it opened has moved.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import threading
+from typing import Any
+
+from .admin_deps import AdminServices
+from .digest_runner import refresh_from_target
+from .github_client import GitHubApiError
+from .models import WatchEntry, now_stamp
+from .publisher import RepoTarget, build_repo_target
+from .store import Store
+
+log = logging.getLogger("chronicle.api.watcher")
+
+WATCHER_ACTOR = "chronicle-watcher"
+HEARTBEAT_PATH = ("state", "watcher", "heartbeat.json")
+
+
+def _handle_merged(store: Store, target: RepoTarget, watch: WatchEntry) -> None:
+    target.ops.delete_ref(f"heads/{watch.branch}")
+    # Never deletes a Post record itself (digest's own no-delete rule,
+    # AGENTS.md); the unpublish case right below is not digest, and knows
+    # with certainty this specific removal is real.
+    refresh_from_target(store, target, WATCHER_ACTOR)
+    draft = store.get_draft(watch.draft_id)
+    if watch.kind == "unpublish" and draft.slug:
+        store.remove_post(draft.slug, WATCHER_ACTOR)
+    store.observe_pr_outcome(watch.draft_id, "merged", watch.pr_number, actor=WATCHER_ACTOR)
+    store.clear_watch(watch.draft_id, WATCHER_ACTOR, f"PR #{watch.pr_number} merged")
+
+
+def _handle_closed(store: Store, watch: WatchEntry) -> None:
+    store.observe_pr_outcome(watch.draft_id, "closed", watch.pr_number, actor=WATCHER_ACTOR)
+    store.clear_watch(
+        watch.draft_id, WATCHER_ACTOR, f"PR #{watch.pr_number} closed without merging"
+    )
+
+
+def check_one(store: Store, target: RepoTarget, watch: WatchEntry) -> str:
+    """Poll one watched PR; returns "merged", "closed", or "open"."""
+    pr = target.ops.get_pull(watch.pr_number)
+    if pr.get("merged"):
+        _handle_merged(store, target, watch)
+        return "merged"
+    if pr.get("state") == "closed":
+        _handle_closed(store, watch)
+        return "closed"
+    return "open"
+
+
+def tick(store: Store, admin: AdminServices, reconcile_after_merge: Any = None) -> int:
+    """Poll every watched PR once. Returns how many merged or closed this tick."""
+    watches = store.list_watches()
+    if not watches:
+        return 0
+    target = build_repo_target(admin)
+    if target is None:
+        return 0
+    settled = 0
+    for watch in watches:
+        try:
+            outcome = check_one(store, target, watch)
+        except GitHubApiError as exc:
+            log.warning(
+                "watch draft %s PR #%d: %s", watch.draft_id, watch.pr_number, exc.error_class
+            )
+            continue
+        if outcome != "open":
+            settled += 1
+            if outcome == "merged" and reconcile_after_merge is not None:
+                try:
+                    reconcile_after_merge()
+                except Exception:  # noqa: BLE001 - a failed post-merge reconcile must not break the watcher
+                    log.exception("reconciliation after merge failed")
+    return settled
+
+
+def write_heartbeat(store: Store, interval_seconds: float) -> None:
+    path = store.data_dir.joinpath(*HEARTBEAT_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "last_loop_at": now_stamp(),
+        "watching": len(store.list_watches()),
+        "poll_interval_seconds": interval_seconds,
+    }
+    temp = path.with_suffix(".json.tmp")
+    temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temp.replace(path)
+
+
+def run_loop(
+    store: Store,
+    admin: AdminServices,
+    base_interval: float,
+    max_interval: float,
+    stop_event: threading.Event,
+    reconcile_after_merge: Any = None,
+) -> None:
+    """Poll at `base_interval` while something is open, backing off toward
+    `max_interval` (doubling each empty tick) once nothing is (spec section
+    9: "poll ... at a modest interval, default 60s while a PR is open")."""
+    interval = base_interval
+    while not stop_event.is_set():
+        write_heartbeat(store, interval)
+        try:
+            watches = store.list_watches()
+            if watches:
+                tick(store, admin, reconcile_after_merge)
+                interval = base_interval
+            else:
+                interval = min(interval * 2, max_interval) if interval else base_interval
+        except Exception:  # noqa: BLE001 - a bad tick must not kill the watcher thread
+            log.exception("watcher tick failed")
+        stop_event.wait(interval)

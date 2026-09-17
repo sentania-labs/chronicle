@@ -143,6 +143,10 @@ class Index:
         )
         self.conn.commit()
 
+    def remove_post(self, slug: str) -> None:
+        self.conn.execute("DELETE FROM posts WHERE slug = ?", (slug,))
+        self.conn.commit()
+
     def upsert_image(self, record: Image) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO images (image_id, sha256, filename, bytes, mime)"
