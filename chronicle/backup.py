@@ -243,8 +243,14 @@ def restore_backup(data_dir: Path, bundle_path: Path) -> RestoreReport:
     write land on a tree that's about to be renamed out from under it.
     """
     stamp = _utc_stamp()
-    staging = data_dir.parent / f".restore-staging-{stamp}"
-    pre_restore = data_dir.parent / f".pre-restore-{stamp}"
+    # Under data_dir itself, not data_dir.parent: the data directory is the
+    # one path guaranteed to be a writable mounted volume (CHRONICLE_DATA_DIR)
+    # in every deployment shape (compose, k8s), while its parent is the
+    # container's root filesystem, frequently read-only and never uid 1000's
+    # to write into. Found live in the C6 backup/restore check: mkdir on
+    # data_dir.parent raised PermissionError against a real compose stack.
+    staging = data_dir / f".restore-staging-{stamp}"
+    pre_restore = data_dir / f".pre-restore-{stamp}"
 
     _extract_bundle(bundle_path, staging)
     manifest = _load_manifest(staging)

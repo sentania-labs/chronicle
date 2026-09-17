@@ -30,17 +30,23 @@ checked before extraction: no absolute path, no `..` segment, no
 symlink or hardlink, nothing outside the staging directory. This is
 independent of the checksum step and runs first, because a path-traversal
 member is a problem with the member itself, not with what it contains.
-Extraction happens into a staging directory beside the data directory
-(`<data_dir>/../.restore-staging-<stamp>`), never into the live tree.
-After extraction, the member set and every checksum are verified against
-the manifest; a missing member, an extra member the manifest never listed,
-or any checksum mismatch refuses the whole restore before the data
-directory is touched at all.
+Extraction happens into a staging directory under the data directory
+itself (`<data_dir>/.restore-staging-<stamp>`), never into the live tree
+and never under the data directory's parent: `CHRONICLE_DATA_DIR` is the
+one path a deployment guarantees is a writable mounted volume (compose, a
+PVC in the k8s reference); its parent is the container's root filesystem,
+frequently read-only and never owned by the uid the process runs as
+(found live in the C6 check: staging under the data directory's parent
+raised `PermissionError` against a real compose stack). After extraction,
+the member set and every checksum are verified against the manifest; a
+missing member, an extra member the manifest never listed, or any
+checksum mismatch refuses the whole restore before the data directory's
+own `repo/`, `images/`, or `state/` files are touched at all.
 
 **The swap keeps the old tree until reindex succeeds.** `repo/`, `images/`,
-and the four `state/` files are moved (not copied) from staging into the
-data directory one at a time, and whatever they displace goes to
-`<data_dir>/../.pre-restore-<stamp>/` rather than being deleted. Only after
+and the four `state/` files are moved (not copied) from staging into
+place one at a time, and whatever they displace goes to
+`<data_dir>/.pre-restore-<stamp>/` rather than being deleted. Only after
 `chronicle reindex` (called at the end of `restore_backup`) succeeds are
 the staging and pre-restore directories removed. A reindex failure raises
 before that cleanup, so the operator has both the new tree (already live)
