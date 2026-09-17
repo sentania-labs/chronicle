@@ -73,23 +73,41 @@ def _run(
     )
 
 
-def _auth_env(token: str | None) -> dict[str, str]:
-    """Per-invocation git auth via the environment, never argv or the origin URL.
+def _config_env(pairs: list[tuple[str, str]]) -> dict[str, str]:
+    """`GIT_CONFIG_COUNT`/`_KEY_n`/`_VALUE_n`, git's own way to pass config
+    through the environment for one process only, with nothing written to a
+    config file GIT_CONFIG_GLOBAL/SYSTEM already point at /dev/null."""
+    env = {"GIT_CONFIG_COUNT": str(len(pairs))}
+    for index, (key, value) in enumerate(pairs):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    return env
 
-    `GIT_CONFIG_COUNT`/`_KEY_0`/`_VALUE_0` inject `http.extraheader` for this
-    one process only, so an installation token never lands in `remote.origin.url`
-    (persisted in `.git/config`, reused by every later fetch after the token
-    expires) and never appears in `ps` output the way a `git -c ...` argument
-    would.
+
+def _auth_env(token: str | None) -> dict[str, str]:
+    """Per-invocation git config: always exempt the clone source from git's
+    ownership check, plus auth when a token is given.
+
+    `safe.directory=*` is needed even with no token: `CHRONICLE_DIGEST_REPO_URL`
+    can name a local clone (README's documented way to test against a private
+    repo without a token), and that clone is very often owned by a different
+    uid than the container's, which git otherwise refuses to read at all
+    ("detected dubious ownership") once GIT_CONFIG_GLOBAL/SYSTEM point at
+    /dev/null and there is nowhere else for such an exception to live. The
+    repo this exempts is always Chronicle's own configured source, never
+    attacker input, so this costs nothing new in practice, the same
+    reasoning GIT_ALLOW_PROTOCOL above already relies on.
+
+    An installation token, when given, is injected as `http.extraheader`
+    this same way so it never lands in `remote.origin.url` (persisted in
+    `.git/config`, reused by every later fetch after the token expires) and
+    never appears in `ps` output the way a `git -c ...` argument would.
     """
-    if not token:
-        return {}
-    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode("ascii")
-    return {
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": "http.extraheader",
-        "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
-    }
+    pairs = [("safe.directory", "*")]
+    if token:
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode("ascii")
+        pairs.append(("http.extraheader", f"AUTHORIZATION: basic {basic}"))
+    return _config_env(pairs)
 
 
 def clone_or_update(

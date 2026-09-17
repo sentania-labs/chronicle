@@ -339,3 +339,17 @@ def test_digest_then_from_post_import_of_a_real_shaped_post(
         "/images/vcf-operations-can-now-see-my-unifi-network/diagram.png"
     )
     store.close()
+
+
+def test_auth_env_always_exempts_the_clone_source_from_ownership_checks() -> None:
+    env = digest._auth_env(None)
+    assert env["GIT_CONFIG_COUNT"] == "1"
+    assert env["GIT_CONFIG_KEY_0"] == "safe.directory"
+    assert env["GIT_CONFIG_VALUE_0"] == "*"
+
+
+def test_auth_env_carries_both_safe_directory_and_auth_header_with_a_token() -> None:
+    env = digest._auth_env("a-token")
+    assert env["GIT_CONFIG_COUNT"] == "2"
+    keys = {env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_KEY_1"]}
+    assert keys == {"safe.directory", "http.extraheader"}
