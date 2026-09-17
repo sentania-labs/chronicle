@@ -14,18 +14,21 @@ Chronicle's copy of the content from silently going stale.
 
 from __future__ import annotations
 
+import json
 import logging
+import threading
 from dataclasses import dataclass
 
 from . import digest as digest_mod
 from .admin_deps import AdminServices
 from .digest_runner import refresh_from_target
-from .models import FRONTMATTER_ALLOWLIST, Draft
+from .models import FRONTMATTER_ALLOWLIST, Draft, now_stamp
 from .publisher import build_repo_target
 from .store import Store
 
 log = logging.getLogger("chronicle.api.reconcile")
 RECONCILE_ACTOR = "chronicle-reconcile"
+HEARTBEAT_PATH = ("state", "reconcile", "heartbeat.json")
 
 
 class ReconcileNotConfigured(Exception):
@@ -172,3 +175,50 @@ def _content_drift(
         actor=actor,
     )
     return 1
+
+
+def run_once_logged(store: Store, admin: AdminServices, actor: str = RECONCILE_ACTOR) -> None:
+    """`run`, but a `ReconcileNotConfigured` is logged and swallowed.
+
+    The one entry point every caller that isn't a direct test uses
+    (startup, the hourly loop, and the watcher's post-merge call): none of
+    them should crash the api, or the watcher's merge handling, just
+    because no GitHub App or test-token repo is configured yet.
+    """
+    try:
+        summary = run(store, admin, actor)
+        log.info(
+            "reconcile: %d flag(s) created, %d posts and %d drafts checked",
+            summary.flags_created,
+            summary.checked_posts,
+            summary.checked_drafts,
+        )
+    except ReconcileNotConfigured:
+        log.info("reconcile: skipped, no GitHub App or test-token repo configured yet")
+
+
+def _write_heartbeat(store: Store, interval_seconds: float) -> None:
+    path = store.data_dir.joinpath(*HEARTBEAT_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"last_run_at": now_stamp(), "interval_seconds": interval_seconds}
+    temp = path.with_suffix(".json.tmp")
+    temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temp.replace(path)
+
+
+def run_loop(
+    store: Store, admin: AdminServices, interval_seconds: float, stop_event: threading.Event
+) -> None:
+    """Startup, then every `interval_seconds` (spec section 12's "hourly").
+
+    The third trigger spec section 12 names, "after every observed merge",
+    is not this loop: it is a direct call from `watcher.tick` (ADR 013),
+    since it has to happen right after that specific merge, not on this
+    loop's own clock.
+    """
+    run_once_logged(store, admin)
+    while not stop_event.is_set():
+        _write_heartbeat(store, interval_seconds)
+        if stop_event.wait(interval_seconds):
+            break
+        run_once_logged(store, admin)

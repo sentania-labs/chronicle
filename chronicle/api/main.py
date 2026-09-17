@@ -13,12 +13,14 @@ at a time, or failing with the last error class.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
 import sqlite3
 import subprocess
 import tempfile
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,7 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from . import background
 from .admin_deps import AdminAuthRedirect, AdminServices, admin_redirect_handler
 from .deps import Services
 from .errors import ApiError, api_error_handler, http_error_handler, validation_error_handler
@@ -186,6 +189,7 @@ def _index_check(services: Services | None) -> Check:
 def _bootstrap(app: FastAPI) -> None:
     app.state.services = None
     app.state.admin_services = None
+    app.state.background = None
     path = os.environ.get(DATA_DIR_ENV)
     # Bootstrap never creates the data directory itself: an unmounted volume
     # must stay visibly unready rather than be papered over with an empty one.
@@ -208,10 +212,34 @@ def _bootstrap(app: FastAPI) -> None:
                 "admin: a claim code exists at %s; visit /admin to claim this instance",
                 admin_services.credentials.claim_code_path,
             )
+        # ADR 013: the publisher, watcher, and reconcile loops run inside this
+        # process, started once here so every caller of create_app (the real
+        # server and the test suite alike) exercises the same background
+        # behaviour rather than a test-only stand-in.
+        app.state.background = background.start(services, admin_services)
     except (OSError, sqlite3.Error, subprocess.CalledProcessError) as exc:
         # A read-only or missing mount is a real operational state, not a
         # crash: readyz reports it and the process stays up to say so.
         log.warning("data directory not usable, /v1 and /admin will report unready: %s", exc)
+
+
+def _shutdown(app: FastAPI) -> None:
+    if app.state.background is not None:
+        app.state.background.stop()
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Bootstrap already ran synchronously in create_app(), before this
+    # lifespan context ever starts: healthz and readyz have to answer
+    # correctly for a caller that only ever does `create_app()` without an
+    # ASGI server or TestClient's `with` block running the lifespan at all.
+    # This context exists only for its shutdown half, so the background
+    # threads (ADR 013) stop before the store they use is closed.
+    try:
+        yield
+    finally:
+        _shutdown(app)
 
 
 def create_app() -> FastAPI:
@@ -225,6 +253,7 @@ def create_app() -> FastAPI:
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=_lifespan,
     )
     app.add_exception_handler(ApiError, api_error_handler)
     app.add_exception_handler(RequestValidationError, validation_error_handler)

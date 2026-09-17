@@ -329,6 +329,23 @@ def _unpublish(
     }
 
 
+def recover_stuck_runs(store: Store) -> int:
+    """Put back on the queue any publish/unpublish run a crashed api left mid-flight.
+
+    No lease directory the way the builder has one (ADR 013): the
+    publisher is the only writer of `publish`/`unpublish` claim state,
+    since this round assumes a single api replica, so "was anyone
+    building this when the process died" reduces to "is it still marked
+    `building`" with no second signal to cross-check.
+    """
+    recovered = 0
+    for kind in ("publish", "unpublish"):
+        for run in store.runs_in_flight(kind):
+            store.requeue_run(run.id, PUBLISHER_ACTOR, "publisher restarted mid-run")
+            recovered += 1
+    return recovered
+
+
 def claim_next(store: Store) -> Run | None:
     for entry in store.queued_entries():
         if entry.get("kind") not in ("publish", "unpublish"):
