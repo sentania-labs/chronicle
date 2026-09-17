@@ -39,3 +39,13 @@ Files:
 Storage class, ingress class, registry, and resource sizing are cluster
 specifics the spec deliberately leaves undecided (section 18). Set them for
 your own cluster before applying anything here.
+
+`deployment.yaml`'s pod-level `securityContext.fsGroup: 1000` is required,
+not a hardening extra: a fresh PVC is provisioned with root ownership by
+most CSI drivers regardless of what the container image sets, unlike a
+Docker named volume, which inherits the image's ownership at the mount
+path (see the Dockerfile). `fsGroup` is what makes a fresh `chronicle-data`
+or `chronicle-preview-site` PVC group-writable by uid 1000 on first mount;
+without it, the api and builder containers get the same
+`mkdir: permission denied` a fresh Docker volume produces without the
+Dockerfile's `chown` (see the C3 fresh-volume fix in this repo's history).

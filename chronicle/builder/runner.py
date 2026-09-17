@@ -12,6 +12,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,7 @@ class Heartbeat:
     last_loop_at: str
     hugo_version: str
     queue_depth: int
+    preview_writable: bool
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -55,6 +57,7 @@ class Heartbeat:
             "last_loop_at": self.last_loop_at,
             "hugo_version": self.hugo_version,
             "queue_depth": self.queue_depth,
+            "preview_writable": self.preview_writable,
         }
 
 
@@ -68,12 +71,39 @@ def site_hugo_version(data_dir: Path) -> str:
     return str(version) if version else "unknown"
 
 
-def write_heartbeat(settings: BuilderSettings, store: Store, hugo_version: str) -> None:
+def check_writable(path: Path) -> bool:
+    """True if `path` exists (or can be created) and this process can write into it.
+
+    Never raises: a fresh named volume or PVC mounted root-owned (the
+    class of defect a compose `down -v` / `up -d` cycle surfaces, see
+    docs on the C3 fresh-volume fix) makes this False rather than
+    crashing the poll loop, so the builder keeps polling and recovers on
+    its own once the mount's ownership is fixed without a restart.
+    """
+    # A pid alone is not unique here: two builder replicas each see
+    # themselves as pid 1 in their own container namespace, so a shared
+    # volume needs a stronger disambiguator than the process id to keep one
+    # builder's unlink from racing the other's write.
+    probe = path / f".writable-check-{os.getpid()}-{uuid.uuid4().hex}"
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        log.error("path %s is not writable by uid %d: %s", path, os.getuid(), exc)
+        return False
+    return True
+
+
+def write_heartbeat(
+    settings: BuilderSettings, store: Store, hugo_version: str, preview_writable: bool
+) -> None:
     heartbeat = Heartbeat(
         builder_id=settings.builder_id,
         last_loop_at=now_stamp(),
         hugo_version=hugo_version,
         queue_depth=store.queue_depth("preview"),
+        preview_writable=preview_writable,
     )
     path = settings.heartbeat_path
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,12 +132,14 @@ class BuildKeepAlive:
         leases: LeaseDirectory,
         lease: Lease,
         hugo_version: str,
+        preview_writable: bool,
     ) -> None:
         self._store = store
         self._settings = settings
         self._leases = leases
         self._lease = lease
         self._hugo_version = hugo_version
+        self._preview_writable = preview_writable
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -116,7 +148,7 @@ class BuildKeepAlive:
 
     def _run(self) -> None:
         while not self._stop.wait(KEEPALIVE_SECONDS):
-            write_heartbeat(self._settings, self._store, self._hugo_version)
+            write_heartbeat(self._settings, self._store, self._hugo_version, self._preview_writable)
             self._lease = self._leases.renew(self._lease)
 
     def stop(self) -> Lease:
@@ -290,7 +322,9 @@ def build_one(
     drift = site_version != "unknown" and installed != "unknown" and site_version != installed
     store.start_run(run.id, settings.builder_id, installed, drift, built_version=draft.version_no)
 
-    keepalive = BuildKeepAlive(store, settings, leases, lease, installed)
+    keepalive = BuildKeepAlive(
+        store, settings, leases, lease, installed, check_writable(store.preview_dir)
+    )
     keepalive.start()
 
     started = time.monotonic()
@@ -398,7 +432,21 @@ def tick(store: Store, settings: BuilderSettings, leases: LeaseDirectory) -> boo
     """
     recover_expired_leases(store, leases, settings.builder_id)
     installed = hugo.installed_version(settings.hugo_bin)
-    write_heartbeat(settings, store, installed)
+    # Checked every tick, not only at startup, so a fresh-volume or PVC
+    # ownership defect fixed without restarting the builder is picked up on
+    # the next poll instead of requiring a restart to clear the flag. Both
+    # paths have to be writable for a build to succeed, so either one being
+    # wrong is reported the same way: `preview_writable` folds in the work
+    # dir check rather than adding a second heartbeat field for it.
+    preview_writable = check_writable(store.preview_dir) and check_writable(settings.work_dir)
+    write_heartbeat(settings, store, installed, preview_writable)
+    if not preview_writable:
+        # Leave every queued run queued rather than claiming and burning it:
+        # a claim here would finish the run `failed` with a misleading Hugo
+        # error instead of a mount-ownership one, and the caller would have
+        # to notice and re-trigger it once the mount is fixed. Not claiming
+        # means the queue just waits, exactly as it does for an idle tick.
+        return False
     claimed = claim_next(store, leases, settings.builder_id)
     if claimed is None:
         return False

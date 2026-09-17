@@ -108,6 +108,10 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
         + row("last loop at", heartbeat["last_loop_at"])
         + row("hugo version (builder)", heartbeat["hugo_version"])
         + row("queue depth (preview)", heartbeat["queue_depth"])
+        + row(
+            "preview volume writable",
+            "yes" if heartbeat.get("preview_writable", True) else "no: see builder logs",
+        )
         if heartbeat
         else "<tr><td colspan=2>no heartbeat yet; the builder has not completed a poll"
         " loop</td></tr>"

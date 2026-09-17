@@ -290,6 +290,52 @@ def test_heartbeat_written_with_builder_id_and_queue_depth(
     assert heartbeat["builder_id"] == "test-builder"
     assert "last_loop_at" in heartbeat
     assert heartbeat["hugo_version"] == "0.164.0"
+    assert heartbeat["preview_writable"] is True
+
+
+# --- fresh-volume writability: C3 compose fix ----------------------------
+
+
+def test_check_writable_true_for_a_dir_it_can_create(tmp_path: Path) -> None:
+    target = tmp_path / "not-yet-created"
+    assert runner.check_writable(target) is True
+    assert target.is_dir()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permission bits")
+def test_check_writable_false_for_a_read_only_dir(tmp_path: Path) -> None:
+    read_only = tmp_path / "read-only"
+    read_only.mkdir()
+    read_only.chmod(0o500)
+    try:
+        assert runner.check_writable(read_only) is False
+    finally:
+        read_only.chmod(stat.S_IRWXU)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permission bits")
+def test_heartbeat_flags_preview_not_writable_instead_of_crashing(
+    store: Store, builder_settings: BuilderSettings
+) -> None:
+    """The fresh-volume defect: a root-owned /data/preview must not crash-loop.
+
+    A tick with an unwritable preview dir still writes a heartbeat (with
+    `preview_writable: false`) and keeps polling rather than raising, so a
+    builder started against a fresh, wrongly-owned volume stays up and
+    recovers on its own once the mount's ownership is fixed.
+    """
+    _prep_site(store)
+    draft_id = _make_draft(store)
+    _queue_preview(store, draft_id)
+    leases = _leases(builder_settings)
+    store.preview_dir.mkdir(parents=True, exist_ok=True)
+    store.preview_dir.chmod(0o500)
+    try:
+        runner.tick(store, builder_settings, leases)
+    finally:
+        store.preview_dir.chmod(stat.S_IRWXU)
+    heartbeat = json.loads(builder_settings.heartbeat_path.read_text(encoding="utf-8"))
+    assert heartbeat["preview_writable"] is False
 
 
 def test_once_mode_runs_a_single_tick_and_returns(

@@ -61,15 +61,22 @@ RUN uv sync --frozen --no-dev \
 
 ENV CHRONICLE_BUILD_VERSION="${BUILD_VERSION}"
 
-# /data is created and handed to uid 1000 here so a fresh Docker named
-# volume (compose) inherits this ownership on first mount instead of the
-# root:root default Docker would otherwise create, which would fail
-# /readyz's writability check the moment the container starts. A Kubernetes
-# PVC gets the same result from the pod's fsGroup instead (see
-# examples/k8s/deployment.yaml).
+# /data, /data/preview, and /data/builder-work are created and handed to
+# uid 1000 here so a fresh Docker named volume (compose) inherits this
+# ownership on first mount instead of the root:root default Docker would
+# otherwise create. That default is what a `docker compose down -v` /
+# `up -d` cycle exposed: /data/preview is its own named volume (mounted
+# separately from /data in every container that touches it), so its
+# ownership at first mount comes from whatever exists at that path in the
+# image, not from /data's, and a directory that does not exist in the
+# image at all mounts in as root:root. /data/builder-work does not need
+# its own volume (it lives under /data), but is created here too so a
+# builder that starts before ever calling `mkdir` still finds the right
+# owner on a from-empty volume. A Kubernetes PVC gets the same result from
+# the pod's fsGroup instead (see examples/k8s/deployment.yaml).
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin chronicle \
-    && mkdir -p /data \
-    && chown chronicle:chronicle /data
+    && mkdir -p /data /data/preview /data/builder-work \
+    && chown -R chronicle:chronicle /data
 
 # -----------------------------------------------------------------------------
 FROM base AS api

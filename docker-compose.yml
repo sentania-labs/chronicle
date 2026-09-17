@@ -65,6 +65,12 @@ services:
 # that has no business opening them. `data` carries everything else,
 # including data/site, so the api's digest and the builder's own read of
 # the same clone are the same files, not two independent copies.
+# No `user:` override on any service: a fresh named volume is initialised
+# by Docker from the image's own content and ownership at the mount path,
+# so `data` and `preview` come up owned by uid 1000 because the Dockerfile
+# creates and chowns /data and /data/preview before USER 1000 in every
+# stage that mounts them. If a future stage adds a new mount point, that
+# ownership has to be set in the image the same way, not patched here.
 volumes:
   data:
   preview:
