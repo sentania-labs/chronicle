@@ -74,6 +74,28 @@ def test_from_post_drops_unknown_frontmatter_keys_with_a_warning(store: Store) -
     assert any("oldFieldFromTheDashboard" in w for w in warnings)
 
 
+def test_from_post_refuses_a_second_import_that_collides_on_image_dir(store: Store) -> None:
+    """A second draft importing the same post, or a different post that
+    resolves to the same url-derived directory, must not silently share
+    static/images/<dir>/ with a draft that already pins it (ADR 015)."""
+    from chronicle.api.errors import ApiError
+
+    _seed_post_on_site(
+        store,
+        "2026-08-01-vcf-operations-can-now-see-my-unifi-network",
+        extra_frontmatter="url: /2026/08/vcf-operations-can-now-see-my-unifi-network/\n",
+    )
+    store.create_draft(
+        "ghostwriter", from_post="2026-08-01-vcf-operations-can-now-see-my-unifi-network"
+    )
+    with pytest.raises(ApiError) as excinfo:
+        store.create_draft(
+            "ghostwriter", from_post="2026-08-01-vcf-operations-can-now-see-my-unifi-network"
+        )
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.code == "image_dir_collision"
+
+
 def test_from_post_of_an_unknown_slug_is_404(store: Store) -> None:
     from chronicle.api.errors import ApiError
 

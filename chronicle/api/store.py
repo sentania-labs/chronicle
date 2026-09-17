@@ -459,6 +459,22 @@ class Store:
         # import reproduces the real blog's static/images/<dir>/ byte for
         # byte even when the two differ.
         draft.image_dir = convert.image_dir_name(allowed.get("url"), slug)
+        # `_pin_slug`'s own image_dir_collision check never runs for an
+        # import (it only fires when `draft.slug is None`, and this method
+        # sets it directly), so a second import of the same post, or of a
+        # different post whose url happens to collide, would silently pin
+        # a second draft onto the same static/images/<dir>/ another draft
+        # already owns. The "already exists on main" half of that check
+        # would always fire for a legitimate import (the directory being
+        # imported from is exactly what's on main), so only the
+        # other-draft check applies here.
+        if draft.image_dir in self.index.pinned_image_dirs(exclude_draft_id=draft.id):
+            raise ApiError(
+                409,
+                "image_dir_collision",
+                f"static/images/{draft.image_dir}/ is already pinned by another draft",
+                image_dir=draft.image_dir,
+            )
 
         images, image_warnings = self._import_post_images(
             source_path,
