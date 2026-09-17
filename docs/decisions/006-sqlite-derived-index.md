@@ -50,7 +50,15 @@ stopped is a supported recovery step, not a data loss event.
   through the API. That is a real and accepted gap: the fix is `reindex`, and
   the same command is the answer to any suspicion about a list result.
 - Adding a query later means a schema change and a `SCHEMA_VERSION` bump,
-  with no migration to write: the rebuild is the migration.
+  with no migration to write: the rebuild is the migration. Opening a
+  database stamped with an older `schema_version` drops every table
+  before running the current `SCHEMA` script, rather than trying to alter
+  one column at a time; `reindex` (run automatically whenever the
+  freshly-opened version matches, `chronicle/api/main.py:_start_services`)
+  is what repopulates it. A database stamped with a *newer* version than
+  this build expects is left untouched, so `/readyz`'s mismatch report
+  reflects the real stored version instead of one this build silently
+  restamped.
 
 ## Alternatives considered
 
