@@ -85,14 +85,24 @@ def _installation_token(admin: AdminServices, installation_id: str) -> str:
     return token
 
 
-def refresh_from_target(store: Store, target: Any, actor: str) -> None:
-    """Fetch a repo target's default branch and apply the digest, no toolchain bookkeeping.
+def refresh_from_target(
+    store: Store, target: Any, actor: str, admin: AdminServices | None = None
+) -> None:
+    """Fetch a repo target's default branch and apply the digest.
 
     Shared by the watcher (a merge just landed) and reconciliation (spec
     section 12): both already hold a `publisher.RepoTarget` from resolving
     the same GitHub App or test-token configuration `run()` above resolves
     on its own, so this skips `_clone_url` and takes the repo URL, default
     branch, and token straight from it instead of re-deriving them.
+
+    `admin`, when given, also parses and writes toolchain state the same
+    way the manual digest path does (round C4 review, P2): scheduled and
+    post-merge reconciliation both call this with `admin` set, so a Hugo
+    version or theme submodule change on main is reflected without waiting
+    for someone to run a manual digest. The watcher's own call (right after
+    observing a merge, before reconciliation runs again) omits `admin`,
+    since the reconcile pass that follows the same merge covers it.
     """
     token = target.token_provider() if target.token_provider else None
     digest_mod.clone_or_update(store.site_dir, target.repo_url, target.default_branch, token=token)
@@ -102,6 +112,11 @@ def refresh_from_target(store: Store, target: Any, actor: str) -> None:
         for item in discovered
     ]
     store.apply_digest(actor, posts)
+    if admin is not None:
+        toolchain = digest_mod.parse_toolchain(store.site_dir)
+        admin.write_toolchain(
+            {"hugo_version": toolchain.hugo_version, "submodules": toolchain.submodules}
+        )
 
 
 def run(store: Store, actor: str, admin: AdminServices | None = None) -> DigestSummary:

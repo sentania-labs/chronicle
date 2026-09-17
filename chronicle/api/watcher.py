@@ -36,6 +36,23 @@ def _handle_merged(store: Store, target: RepoTarget, watch: WatchEntry) -> None:
     draft = store.get_draft(watch.draft_id)
     if watch.kind == "unpublish" and draft.slug:
         store.remove_post(draft.slug, WATCHER_ACTOR)
+    if (
+        watch.kind == "publish"
+        and watch.built_version is not None
+        and draft.version_no > watch.built_version
+    ):
+        # The draft was revised again while this publish PR was open: the
+        # merged content is only what the run actually converted at
+        # `built_version`, not the draft's current, newer version (round C4
+        # review, P1). Still flips to `published` below (the merge is real),
+        # but flagged so reconciliation surfaces the mismatch rather than
+        # silently reporting the newer content as live.
+        store.record_publish_behind_draft(
+            draft.id,
+            WATCHER_ACTOR,
+            built_version=watch.built_version,
+            current_version=draft.version_no,
+        )
     store.observe_pr_outcome(watch.draft_id, "merged", watch.pr_number, actor=WATCHER_ACTOR)
     store.clear_watch(watch.draft_id, WATCHER_ACTOR, f"PR #{watch.pr_number} merged")
 

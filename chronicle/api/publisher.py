@@ -165,6 +165,7 @@ def _open_or_update_pr(
     run_id: str,
     preview_url: str | None,
     images: list[dict[str, str]],
+    built_version: int | None,
 ) -> WatchEntry:
     """Idempotent: an already-open PR for this branch gets its body updated
     instead of a second PR being opened, whether or not this process still
@@ -184,6 +185,7 @@ def _open_or_update_pr(
         pr_number=int(pr["number"]),
         pr_url=str(pr["html_url"]),
         created_at=now_stamp(),
+        built_version=built_version,
     )
     store.record_watch(entry, PUBLISHER_ACTOR)
     return entry
@@ -243,6 +245,15 @@ def _publish(
         )
         images.append({"path": placement.site_path, "url": placement.url})
 
+    # A republish that detached an image since the last publish must delete
+    # its old blob from main, or `record_publish_result` below overwrites
+    # the saved image list and a later unpublish never learns the orphan
+    # needs removing (round C4 review, P2).
+    prior_paths = {image["path"] for image in (draft.published or {}).get("images", [])}
+    new_paths = {placement.site_path for placement in converted.images}
+    for stale_path in sorted(prior_paths - new_paths):
+        entries.append({"path": stale_path, "mode": "100644", "type": "blob", "sha": None})
+
     tree_sha = ops.create_tree(base_tree, entries)
     verb = "update" if draft.published else "publish"
     commit_sha = ops.create_commit(f"chronicle: {verb} {draft.slug}", tree_sha, [base_sha])
@@ -256,7 +267,16 @@ def _publish(
         preview_url = (preview_run.result or {}).get("preview_url")
 
     watch = _open_or_update_pr(
-        store, ops, default_branch, branch, draft, "publish", run.id, preview_url, images
+        store,
+        ops,
+        default_branch,
+        branch,
+        draft,
+        "publish",
+        run.id,
+        preview_url,
+        images,
+        run.built_version,
     )
 
     store.record_publish_result(
@@ -304,7 +324,7 @@ def _unpublish(
     _reset_branch(ops, default_branch, branch, commit_sha)
 
     watch = _open_or_update_pr(
-        store, ops, default_branch, branch, draft, "unpublish", run.id, None, []
+        store, ops, default_branch, branch, draft, "unpublish", run.id, None, [], None
     )
 
     store.record_publish_result(
@@ -358,7 +378,7 @@ def claim_next(store: Store) -> Run | None:
 
 def run_one(store: Store, target: RepoTarget, run: Run) -> Run:
     draft = store.get_draft(run.draft_id)
-    store.start_run(
+    run = store.start_run(
         run.id,
         PUBLISHER_ACTOR,
         hugo_version="",

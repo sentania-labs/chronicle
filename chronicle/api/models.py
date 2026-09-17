@@ -210,6 +210,12 @@ class WatchEntry(BaseModel):
     pr_url: str
     created_at: str
     poll_interval_seconds: float | None = None
+    # The draft's `version_no` this run actually converted (`Run.built_version`,
+    # stamped by `Store.start_run`). Checked against the draft's current
+    # version when the PR merges, so a save made while the PR was still open
+    # is not silently reported as published (round C4 review, P1). None for
+    # `unpublish`, which never needs it.
+    built_version: int | None = None
 
 
 RECONCILE_FLAG_TYPES = (
@@ -236,6 +242,11 @@ class ReconcileFlag(BaseModel):
     slug: str | None = None
     draft_id: str | None = None
     detail: str = ""
+    # The main blob sha a `content_drift` flag was raised against, so
+    # resolving it `ignore` can record exactly what was acknowledged
+    # (`Store.resolve_flag`) rather than re-deriving it from `detail` text.
+    # None for every other flag type.
+    main_sha: str | None = None
     resolved: bool = False
     resolution: str | None = None
     resolved_at: str | None = None

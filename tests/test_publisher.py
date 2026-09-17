@@ -6,6 +6,7 @@ import pytest
 
 from chronicle.api import publisher, watcher
 from chronicle.api.store import Store
+from tests.conftest import png_bytes
 from tests.fakes import FakeRepoOps
 
 
@@ -155,3 +156,116 @@ def test_unpublish_deletes_exactly_what_publish_wrote(
 
     run_record = store.get_run(unpublish_run.id)
     assert run_record.status == "succeeded"
+
+
+def test_failed_publish_returns_draft_to_in_review_with_chronicle_feedback(store: Store) -> None:
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    ops.fail_on = "create_blob"
+
+    publisher.run_one(store, target, run)
+
+    run_record = store.get_run(run.id)
+    assert run_record.status == "failed"
+    assert run_record.result is not None
+    assert run_record.result["error_class"] == "simulated_failure"
+
+    updated = store.get_draft(draft.id)
+    assert updated.status == "in_review"
+    feedback = store.list_feedback(draft.id)
+    assert any(
+        entry.author == "chronicle" and "simulated_failure" in entry.text for entry in feedback
+    )
+
+
+def test_reapprove_after_failed_publish_queues_a_new_run(store: Store) -> None:
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    ops.fail_on = "create_blob"
+    publisher.run_one(store, target, run)
+    assert store.get_draft(draft.id).status == "in_review"
+
+    draft2, run2 = store.act_on_draft(draft.id, "approve", "scott", True)
+    assert draft2.status == "approved"
+    assert run2 is not None and run2.kind == "publish"
+
+    ops.fail_on = None
+    publisher.run_one(store, target, run2)
+    assert store.get_run(run2.id).status == "succeeded"
+
+
+def test_reapprove_is_rejected_while_a_publish_pr_is_still_open(store: Store) -> None:
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    assert store.get_watch(draft.id) is not None
+
+    with pytest.raises(Exception) as excinfo:
+        store.act_on_draft(draft.id, "approve", "scott", True)
+    assert getattr(excinfo.value, "status_code", None) == 409
+
+
+def test_save_is_rejected_with_409_while_a_publish_pr_is_open(store: Store) -> None:
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+
+    with pytest.raises(Exception) as excinfo:
+        store.save_draft(
+            draft.id, "scott", store.get_draft(draft.id).version_no, {"title": "A Post"}, "x\n"
+        )
+    assert getattr(excinfo.value, "status_code", None) == 409
+    assert watch.pr_url in str(getattr(excinfo.value, "extra", {}).get("pr_url", ""))
+
+
+def test_republish_deletes_an_image_detached_since_the_last_publish(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(watcher, "refresh_from_target", lambda *a, **k: None)
+    draft, _ = store.create_draft("scott")
+    image, _ = store.put_image(png_bytes(), "cover.png")
+    store.attach_image(draft.id, image.image_id, "feature", "scott")
+    store.save_draft(
+        draft.id,
+        "scott",
+        store.get_draft(draft.id).version_no,
+        {"title": "Has An Image", "featureImage": "cover.png"},
+        "Body with an image.\n",
+    )
+    store.act_on_draft(draft.id, "submit", "scott", True)
+    draft, run = store.act_on_draft(draft.id, "approve", "scott", True)
+    assert run is not None
+
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    published = store.get_draft(draft.id).published
+    assert published is not None
+    image_paths = [img["path"] for img in published["images"]]
+    assert len(image_paths) == 1
+
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    ops.merge(watch.pr_number)
+    watcher.check_one(store, target, watch)
+
+    # Detach the image and republish.
+    store.detach_image(draft.id, image.image_id, "scott")
+    store.save_draft(
+        draft.id,
+        "scott",
+        store.get_draft(draft.id).version_no,
+        {"title": "Has An Image"},
+        "Body without the image now.\n",
+    )
+    store.act_on_draft(draft.id, "submit", "scott", True)
+    draft, run2 = store.act_on_draft(draft.id, "approve", "scott", True)
+    assert run2 is not None
+    publisher.run_one(store, target, run2)
+
+    branch_ref = ops.refs[f"heads/post/{draft.slug}"]
+    commit = ops.commits[branch_ref]
+    tree = ops.trees[commit["tree"]["sha"]]
+    deleted_paths = {entry["path"] for entry in tree if entry["sha"] is None}
+    assert image_paths[0] in deleted_paths

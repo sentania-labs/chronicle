@@ -45,6 +45,12 @@ DRAFT_TRANSITIONS: dict[tuple[str, str], Transition] = {
     ("in_review", "preview"): Transition("in_review", run_kind="preview"),
     ("previewed", "preview"): Transition("previewed", run_kind="preview"),
     ("in_review", "approve"): Transition("approved", actor=UI_ACTOR, run_kind="publish"),
+    # A re-approve: the previous publish run failed (see PUBLISH_RUN_FAILED
+    # below) or the draft is simply approved again with no publish PR open
+    # and no run in flight. `Store.act_on_draft` enforces the "no open PR,
+    # no run in flight" half of that (not expressible as a status-keyed
+    # table lookup), this table only says the status itself allows it.
+    ("approved", "approve"): Transition("approved", actor=UI_ACTOR, run_kind="publish"),
     ("in_review", "request_revision"): Transition(
         "revision_requested", actor=UI_ACTOR, feedback_required=True
     ),
@@ -66,11 +72,17 @@ DRAFT_TRANSITIONS: dict[tuple[str, str], Transition] = {
 # rejected, or saved back into `drafting`, while its build ran must not be
 # dragged into `previewed` by a build that finished afterwards.
 PREVIEW_SUCCEEDED = "preview_succeeded"
+# A publish run failed after `approve` already moved the draft to `approved`
+# (a transient GitHub error, a conversion failure): this is what makes the
+# draft retryable again, since `approved` otherwise has no outgoing action
+# left once its one publish run has failed (round C4 review, P1).
+PUBLISH_RUN_FAILED = "publish_failed"
 
 RUN_OUTCOME_TRANSITIONS: dict[tuple[str, str], Transition] = {
     ("drafting", PREVIEW_SUCCEEDED): Transition("previewed"),
     ("in_review", PREVIEW_SUCCEEDED): Transition("previewed"),
     ("previewed", PREVIEW_SUCCEEDED): Transition("previewed"),
+    ("approved", PUBLISH_RUN_FAILED): Transition("in_review"),
 }
 
 # What an observed PR outcome does to the draft that opened it (spec section

@@ -58,7 +58,9 @@ def _write_post(
     _git(site_dir, "commit", "-m", f"post: {path}")
 
 
-def _fake_refresh(store: Store, target: publisher.RepoTarget, actor: str) -> None:
+def _fake_refresh(
+    store: Store, target: publisher.RepoTarget, actor: str, admin: AdminServices | None = None
+) -> None:
     """`digest_runner.refresh_from_target` minus the clone/fetch: the test
     fixture already writes straight into `store.site_dir`'s own git repo,
     so there is no separate remote to pull from (`test_digest.py` is where
@@ -231,6 +233,68 @@ def test_resolving_an_already_resolved_flag_is_rejected(store: Store) -> None:
 
     with pytest.raises(ApiError):
         store.resolve_flag(flag.id, "ignore", "admin")
+
+
+def test_resolve_flag_rejects_a_resolution_not_applicable_to_the_flag_type(store: Store) -> None:
+    _init_site(store)
+    target, ops = _target()
+    draft = _approved_and_published(store, target, ops)
+    assert draft.published is not None
+    _write_post(
+        store.site_dir,
+        draft.published["post_path"],
+        slug=draft.slug,
+        title=draft.title,
+        body="Edited on GitHub.\n",
+    )
+    reconcile.run(store, _ADMIN)
+    flag = next(f for f in store.list_flags() if f.type == "content_drift")
+
+    with pytest.raises(ApiError) as excinfo:
+        store.resolve_flag(flag.id, "mark_unpublished", "admin")
+    assert excinfo.value.status_code == 422
+
+    fresh = store.get_flag(flag.id)
+    assert fresh.resolved is False
+    assert store.get_draft(draft.id).status == "published", "a rejected resolution must not act"
+
+
+def test_ignoring_content_drift_records_the_acknowledged_sha_and_stops_reflagging(
+    store: Store,
+) -> None:
+    _init_site(store)
+    target, ops = _target()
+    draft = _approved_and_published(store, target, ops)
+    assert draft.published is not None
+    post_path = draft.published["post_path"]
+    _write_post(
+        store.site_dir, post_path, slug=draft.slug, title=draft.title, body="Edited on GitHub.\n"
+    )
+
+    reconcile.run(store, _ADMIN)
+    flag = next(f for f in store.list_flags() if f.type == "content_drift")
+    assert flag.main_sha is not None
+    version_after_first_run = store.get_draft(draft.id).version_no
+
+    store.resolve_flag(flag.id, "ignore", "admin")
+    published = store.get_draft(draft.id).published
+    assert published is not None
+    assert published["acknowledged_blob_sha"] == flag.main_sha
+
+    # Rerun: same content on main, must not re-flag or write another version.
+    reconcile.run(store, _ADMIN)
+    open_flags = [f for f in store.list_flags(resolved=False) if f.type == "content_drift"]
+    assert open_flags == []
+    assert store.get_draft(draft.id).version_no == version_after_first_run
+
+    # Main changes again: a genuinely new sha must still flag.
+    _write_post(
+        store.site_dir, post_path, slug=draft.slug, title=draft.title, body="Edited again.\n"
+    )
+    reconcile.run(store, _ADMIN)
+    open_flags_again = [f for f in store.list_flags(resolved=False) if f.type == "content_drift"]
+    assert len(open_flags_again) == 1
+    assert store.get_draft(draft.id).version_no == version_after_first_run + 1
 
 
 def test_reconcile_does_not_duplicate_flags_across_runs(store: Store) -> None:

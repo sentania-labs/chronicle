@@ -136,6 +136,49 @@ def test_watch_persists_and_resumes_after_restart(data_dir: Path) -> None:
     reopened.close()
 
 
+def test_merge_after_a_revise_while_pr_open_flags_published_behind_draft(store: Store) -> None:
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    assert watch.built_version == store.get_draft(draft.id).version_no
+
+    # The draft's version moves on while the publish PR is still open (a
+    # `save` cannot do this any more now that it 409s against an open
+    # publish PR; `record_github_version` is the one write that still can,
+    # the same content-drift path reconciliation uses).
+    store.record_github_version(draft.id, {"title": "A Post"}, "Revised body.\n", "test drift")
+    assert store.get_draft(draft.id).version_no == watch.built_version + 1
+
+    ops.merge(watch.pr_number)
+    outcome = watcher.check_one(store, target, watch)
+
+    assert outcome == "merged"
+    assert store.get_draft(draft.id).status == "published"
+    flags = [f for f in store.list_flags() if f.type == "content_drift" and f.draft_id == draft.id]
+    assert len(flags) == 1
+    feedback = store.list_feedback(draft.id)
+    assert any(
+        entry.author == "chronicle" and entry.action == "published_behind_draft"
+        for entry in feedback
+    )
+
+
+def test_merge_with_no_revision_does_not_flag_published_behind_draft(store: Store) -> None:
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+
+    ops.merge(watch.pr_number)
+    watcher.check_one(store, target, watch)
+
+    flags = [f for f in store.list_flags() if f.type == "content_drift"]
+    assert flags == []
+
+
 def test_backoff_grows_when_nothing_is_open_and_caps_at_the_maximum(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -23,6 +23,15 @@ class FakeRepoOps:
         self.blobs: dict[str, str] = {}
         self.pulls: dict[int, dict[str, Any]] = {}
         self._next_pr = 1
+        # Test-only: name a call that should raise instead of succeeding,
+        # so a publish run failure can be simulated without a real network.
+        self.fail_on: str | None = None
+
+    def _maybe_fail(self, call: str) -> None:
+        if self.fail_on == call:
+            from chronicle.api.github_client import GitHubApiError
+
+            raise GitHubApiError("simulated_failure", f"simulated failure at {call}")
 
     def _sha(self, prefix: str) -> str:
         self._counter += 1
@@ -54,6 +63,7 @@ class FakeRepoOps:
         return None
 
     def create_blob(self, content_b64: str) -> str:
+        self._maybe_fail("create_blob")
         self.calls.append("create_blob")
         sha = self._sha("blob")
         self.blobs[sha] = content_b64

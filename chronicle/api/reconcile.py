@@ -80,7 +80,7 @@ def run(store: Store, admin: AdminServices, actor: str = RECONCILE_ACTOR) -> Rec
     if target is None:
         raise ReconcileNotConfigured("no GitHub App or test-token repo is configured yet")
 
-    refresh_from_target(store, target, actor)
+    refresh_from_target(store, target, actor, admin=admin)
     discovered = digest_mod.discover_posts(store.site_dir)
     discovered_by_slug = {item.slug: item for item in discovered}
 
@@ -165,6 +165,13 @@ def _content_drift(
     landed = discovered_by_slug.get(draft.slug)
     if not known_sha or landed is None or landed.sha == known_sha:
         return 0
+    acknowledged_sha = draft.published.get("acknowledged_blob_sha")
+    if landed.sha == acknowledged_sha:
+        # This exact main content was already flagged and resolved `ignore`
+        # (round C4 review, P2): re-flagging or re-versioning identical
+        # content on every run would grow duplicate versions forever. A
+        # genuinely new change on main has a different sha and still flags.
+        return 0
     if _already_flagged(store, "content_drift", draft.slug, draft.id):
         return 0
 
@@ -186,6 +193,7 @@ def _content_drift(
         detail=f"draft {draft.id}'s published content differs from main"
         f" (main blob {landed.sha}, last published {known_sha})",
         actor=actor,
+        main_sha=landed.sha,
     )
     return 1
 
