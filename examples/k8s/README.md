@@ -49,3 +49,37 @@ or `chronicle-preview-site` PVC group-writable by uid 1000 on first mount;
 without it, the api and builder containers get the same
 `mkdir: permission denied` a fresh Docker volume produces without the
 Dockerfile's `chown` (see the C3 fresh-volume fix in this repo's history).
+
+The builder's liveness probe runs `chronicle-builder --healthcheck`
+(chronicle/builder/main.py), the same heartbeat-staleness check the
+Dockerfile's own `HEALTHCHECK` runs, not an inline script duplicated a
+third time in this file.
+
+## Adapting this for a real instance (lab-deployment's job)
+
+This reference is not applied by anything in this repository. Standing up
+a real instance from it means, at minimum:
+
+- **Image tags.** `REPLACE_ME/chronicle/<api|builder|preview>:REPLACE_ME`
+  becomes `ghcr.io/sentania-labs/chronicle-<api|builder|preview>:vX.Y.Z`,
+  the tag a release actually published (CONTRIBUTING.md's release
+  procedure), never `main` or a branch build: ADR 016 and the release CI
+  only sign and SBOM a tagged build, so an untagged image has neither.
+- **Hostname.** `chronicle.REPLACE_ME.internal` in `deployment.yaml`
+  (`CHRONICLE_EXTERNAL_URL`) and both `ingress.yaml` rules must agree,
+  since a mismatch between what the api stamps into a preview URL and
+  what the Ingress actually routes breaks every preview link.
+- **Storage class.** Both PVCs leave `storageClassName` unset on purpose
+  (spec section 18 leaves this a cluster specific); set it to whatever
+  class backs durable and, ideally, fast local storage for `preview-site`.
+- **The Secret.** `secret-instance-key.yaml` ships a placeholder value.
+  Generate a real 32-byte key per instance (`openssl rand -base64 32` or
+  equivalent) and manage it the way the rest of the cluster's secrets are
+  managed, never by committing the real value anywhere this repository's
+  history can see it.
+- **The GitHub App bootstrap.** Nothing here creates the App: that is a
+  one-time admin flow (spec section 10) run against the live instance
+  after it starts, from `/admin/claim` through the manifest flow to
+  choosing the repo. `ingressClassName` needs to resolve before that flow
+  can complete, since the manifest flow's redirect comes back through the
+  Ingress.
