@@ -9,12 +9,13 @@
 # The character and its HTML entity forms are assembled from parts so this
 # file does not contain the thing it is looking for. uv.lock is skipped
 # because its content comes from package metadata upstream, not from
-# anyone here. docs/screenshots/*/*.html is skipped for the same reason:
-# those are byte-for-byte HTTP responses captured verbatim during a live
-# check, not authored prose, so a defect they document (like the C5
-# rendering bug this check now also catches, fixed on the branch that
-# captured them) stays legible as evidence instead of being edited after
-# the fact.
+# anyone here. Nothing else is skipped: a captured screenshot fragment
+# under docs/screenshots/ used to get a pass here on the theory that it was
+# a byte-for-byte HTTP response, not authored prose. That let a real
+# rendering defect (the C5 "last run" em-dash) sit undetected in a
+# committed file. Once a bug like that is fixed, the fragment documenting
+# it is edited to match, same as any other tracked file, so the exemption
+# bought nothing but a blind spot.
 set -euo pipefail
 
 amp='&'
@@ -31,7 +32,6 @@ failed=0
 while IFS= read -r -d '' file; do
     case "$file" in
         uv.lock) continue ;;
-        docs/screenshots/*/*.html) continue ;;
     esac
     [ -f "$file" ] || continue
     if grep -n -E -i -- "$pattern" "$file" 2>/dev/null; then
