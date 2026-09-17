@@ -6,10 +6,13 @@
 #   docker compose up -d
 #
 # To point the digest at a local clone instead of a real GitHub App (this is
-# how the C3 live check exercised the whole preview path), set
-# CHRONICLE_DIGEST_REPO_URL to a filesystem path before starting:
+# how the C3 live check exercised the whole preview path), copy the clone
+# into the api container and set CHRONICLE_DIGEST_REPO_URL to that
+# in-container path, since compose mounts no host bind that would make a
+# host path visible inside the container (see the README quickstart):
 #
-#   CHRONICLE_DIGEST_REPO_URL=/path/to/a/local/clone docker compose up -d
+#   docker compose cp /path/to/a/local/clone api:/tmp/blog
+#   docker compose exec -e CHRONICLE_DIGEST_REPO_URL=/tmp/blog api chronicle digest
 #
 # CHRONICLE_EXTERNAL_URL below points at the preview container's own port
 # (8090), not the api's (8080), so a preview_url the api returns is directly

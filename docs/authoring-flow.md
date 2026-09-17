@@ -138,6 +138,12 @@ are set, naming both in the error. The admin status page and `/readyz`
 both report `github_app: test token mode` so it is never mistaken for a
 verified App. `examples/k8s/` never mentions either variable.
 
+This mode acts on whatever repository `CHRONICLE_GITHUB_TEST_REPO` names;
+it is meant to point at a throwaway repository rather than a live blog, but
+nothing in the code special-cases or protects a real blog beyond that
+choice of target. Point it at a real blog's repository and it will act on
+that repository.
+
 ## The API
 
 Everything under `/v1` requires `Authorization: Bearer <token>`, reads
@@ -162,6 +168,13 @@ included. `/healthz` and `/readyz` are the only anonymous routes, forever.
 reserved for the `ui` token (spec section 11, ADR 004); any other token
 gets a 403 naming the action. `preview`, `approve`, and `unpublish` return
 a `run_id` for the build or GitHub operation behind the action.
+
+The editor labels each reserved action for the account that holds the `ui`
+token, because the UI always calls through that token and can therefore
+always reach the button; the label is not a permissions check on the click
+itself, nothing blocks a click on it. That label bakes a name into the
+rendered page rather than describing the token generically, which is
+tracked as issue #12; it has not changed in this docs round.
 
 ## The UI
 

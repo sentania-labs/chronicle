@@ -18,15 +18,15 @@ does not decide what merges. A watcher notices when the pull request
 merges or closes and updates the draft's status either way; if you unpublish
 later, that goes through the same pull request path in reverse.
 
-The API is the actual surface; the web UI is one consumer of it, not a
-special case. Anything a person can do by clicking through the UI, an agent
-can do the same way, with the same token, against the same endpoints: file
+The API is the actual surface. The web UI is one consumer of it, like any
+other. Anything a person can do by clicking through the UI, an agent can do
+the same way, with the same token, against the same endpoints: file
 a submission from raw material, draft it, read back the current content and
 its version history, see what changed between two versions and why, and push
 a revision. This is what makes "push in a bundle of ideas and sharpen them
-into content" reasonable to automate. An agent working through the API is
-not a separate integration bolted on afterward. It is the same lifecycle a
-person walks through the UI, exercised by a different caller.
+into content" reasonable to automate. An agent working through the API walks
+the same lifecycle a person walks through the UI, exercised by a different
+caller.
 
 ## Quickstart
 

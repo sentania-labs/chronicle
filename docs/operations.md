@@ -54,10 +54,10 @@ it would make `github-app.json`'s encryption pointless. See ADR 008 and
 "Backup and restore" below.
 
 Every write under `repo/` is one git commit authored by the acting token's
-name, or `scott` for the `ui` token (that mapping is the `Consumer` your own
-token resolves to, not something the store guesses). `chronicle reindex`
-rebuilds `index/chronicle.db` from the files; nothing is lost if it is
-deleted.
+name, except the `ui` token's writes, which are committed under a fixed
+author name the UI sets (that mapping is the `Consumer` your own token
+resolves to, not something the store guesses). `chronicle reindex` rebuilds
+`index/chronicle.db` from the files; nothing is lost if it is deleted.
 
 ## Tokens
 
