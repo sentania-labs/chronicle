@@ -626,8 +626,18 @@ async def backup_upload(
     return HTMLResponse(tpl.backup_confirm_page(token=token, manifest=manifest))
 
 
+def _is_upload_token(token: str) -> bool:
+    # Must match exactly what backup_upload mints (secrets.token_hex(16)):
+    # 32 lowercase hex characters, never a path segment taken from the form
+    # value as-is. `staged_path` below is built from this token, so an
+    # unvalidated value (a `..` segment, an absolute path) would let the
+    # confirm step read and then delete an arbitrary file on disk.
+    return len(token) == 32 and all(c in "0123456789abcdef" for c in token)
+
+
 @router.post("/backup/restore", response_class=HTMLResponse)
 def backup_restore(
+    request: Request,
     token: str = Form(...),
     confirm: str = Form(...),
     admin: AdminServices = Depends(require_admin_session_html),
@@ -636,6 +646,13 @@ def backup_restore(
         return HTMLResponse(
             tpl.backup_page(
                 last_backup=_read_last_backup(admin), notice='type "restore" to confirm'
+            ),
+            status_code=400,
+        )
+    if not _is_upload_token(token):
+        return HTMLResponse(
+            tpl.backup_page(
+                last_backup=_read_last_backup(admin), notice="upload expired, try again"
             ),
             status_code=400,
         )
@@ -655,6 +672,14 @@ def backup_restore(
         )
     finally:
         staged_path.unlink(missing_ok=True)
+
+    # The swap just replaced the data directory this process's Store,
+    # TokenStore, and background threads all still hold handles into.
+    # Deferred import: `main` imports this module at startup to mount the
+    # router, so importing it back at module scope here would be circular.
+    from .. import main as main_module
+
+    main_module.reload_after_restore(request.app)
 
     notice = f"restored: before={report.before} after={report.after}"
     if report.credentials_decryptable is False:

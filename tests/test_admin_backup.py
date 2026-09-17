@@ -78,3 +78,27 @@ def test_backup_upload_then_restore_round_trip(admin_client: TestClient, data_di
     )
     assert restore.status_code == 200
     assert "restored:" in restore.text
+
+    # The restore swap replaces the data directory underneath the running
+    # process; reload_after_restore must rebind Services so the very next
+    # request is served from the restored store, not a closed, stale one.
+    status = admin_client.get("/admin/backup")
+    assert status.status_code == 200
+
+
+def test_backup_restore_rejects_a_path_traversal_token(admin_client: TestClient) -> None:
+    response = admin_client.post(
+        "/admin/backup/restore",
+        data={"token": "../../../../etc/passwd", "confirm": "restore"},
+    )
+    assert response.status_code == 400
+    assert "expired" in response.text.lower()
+
+
+def test_backup_restore_rejects_a_malformed_token(admin_client: TestClient) -> None:
+    response = admin_client.post(
+        "/admin/backup/restore",
+        data={"token": "not-32-hex-chars", "confirm": "restore"},
+    )
+    assert response.status_code == 400
+    assert "expired" in response.text.lower()

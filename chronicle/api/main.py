@@ -224,6 +224,29 @@ def _index_check(services: Services | None) -> Check:
     return Check(name="index", ok=True, detail=f"schema version {found}")
 
 
+def _start_services(path: Path) -> tuple[Services, AdminServices, background.Background]:
+    services = Services(path)
+    # The index is derived and the backup bundle carries none (ADR 006), so
+    # a restored data directory would otherwise come up ready while serving
+    # empty lists and checking slug collisions against nothing.
+    if services.store.index.schema_version() == SCHEMA_VERSION:
+        services.store.reindex()
+    admin_services = AdminServices.build(path)
+    if admin_services.credentials.is_claimed():
+        log.info("admin: claimed, admin.json present")
+    else:
+        log.info(
+            "admin: a claim code exists at %s; visit /admin to claim this instance",
+            admin_services.credentials.claim_code_path,
+        )
+    # ADR 013: the publisher, watcher, and reconcile loops run inside this
+    # process, started once here so every caller of create_app (the real
+    # server and the test suite alike) exercises the same background
+    # behaviour rather than a test-only stand-in.
+    started_background = background.start(services, admin_services)
+    return services, admin_services, started_background
+
+
 def _bootstrap(app: FastAPI) -> None:
     app.state.services = None
     app.state.admin_services = None
@@ -234,31 +257,49 @@ def _bootstrap(app: FastAPI) -> None:
     if not path or not os.path.isdir(path):
         return
     try:
-        services = Services(Path(path))
-        # The index is derived and the backup bundle carries none (ADR 006), so
-        # a restored data directory would otherwise come up ready while serving
-        # empty lists and checking slug collisions against nothing.
-        if services.store.index.schema_version() == SCHEMA_VERSION:
-            services.store.reindex()
+        services, admin_services, started_background = _start_services(Path(path))
         app.state.services = services
-        admin_services = AdminServices.build(Path(path))
         app.state.admin_services = admin_services
-        if admin_services.credentials.is_claimed():
-            log.info("admin: claimed, admin.json present")
-        else:
-            log.info(
-                "admin: a claim code exists at %s; visit /admin to claim this instance",
-                admin_services.credentials.claim_code_path,
-            )
-        # ADR 013: the publisher, watcher, and reconcile loops run inside this
-        # process, started once here so every caller of create_app (the real
-        # server and the test suite alike) exercises the same background
-        # behaviour rather than a test-only stand-in.
-        app.state.background = background.start(services, admin_services)
+        app.state.background = started_background
     except (OSError, sqlite3.Error, subprocess.CalledProcessError) as exc:
         # A read-only or missing mount is a real operational state, not a
         # crash: readyz reports it and the process stays up to say so.
         log.warning("data directory not usable, /v1 and /admin will report unready: %s", exc)
+
+
+def reload_after_restore(app: FastAPI) -> None:
+    """Rebind every long-lived handle onto the data directory a restore just replaced.
+
+    `Services` opens one `Store` (one SQLite connection, one advisory file
+    lock) for the whole process lifetime, and `background.start` closes over
+    that same `store` for the publisher, watcher, and reconcile threads.
+    `/admin/backup/restore`'s tree swap (ADR 016) happens underneath all of
+    them without their knowledge, exactly the same failure the builder
+    container hits (a long-lived connection does not notice the file
+    beneath it was replaced), and it is running in this very process rather
+    than a separate one, so a manual restart is not an option here. Stop the
+    background threads, close the stale store (releasing its lock fd, since
+    a second `Store.open` in the same process would otherwise contend with
+    it), and start over exactly as `_bootstrap` does on a fresh process.
+    Reopening `Services` also re-runs `TokenStore.ensure_ui_token`, which
+    revokes a `ui` record the restored `tokens.json` no longer matches the
+    surviving local `ui_token.txt` and mints a fresh one, the same self-heal
+    a real process restart already gets for free.
+    """
+    if app.state.background is not None:
+        app.state.background.stop()
+    if app.state.services is not None:
+        app.state.services.close()
+    path = os.environ.get(DATA_DIR_ENV)
+    if not path or not os.path.isdir(path):
+        app.state.services = None
+        app.state.admin_services = None
+        app.state.background = None
+        return
+    services, admin_services, started_background = _start_services(Path(path))
+    app.state.services = services
+    app.state.admin_services = admin_services
+    app.state.background = started_background
 
 
 def _shutdown(app: FastAPI) -> None:
