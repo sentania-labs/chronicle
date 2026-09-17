@@ -76,9 +76,12 @@ image index digest. Read it from the package versions API rather than
 guessing:
 
 ```bash
-gh api orgs/sentania-labs/packages/container/chronicle-api/versions \
+gh api --paginate orgs/sentania-labs/packages/container/chronicle-api/versions \
   --jq '.[] | select(.metadata.container.tags[]? == "vX.Y.Z") | .name'
 ```
+
+This endpoint pages at 30 the same as the package listing below, so an
+older vX.Y.Z can come back empty without `--paginate`.
 
 `docker manifest inspect ghcr.io/sentania-labs/chronicle-api:vX.Y.Z` shows
 the index plus its children, including the `linux/amd64` child and an
