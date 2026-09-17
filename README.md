@@ -9,11 +9,15 @@ agent and holds no judgment; every decision that matters is made by an
 author or by Scott at a gate the service exposes. The full design is in
 [docs/spec/00-spec.md](docs/spec/00-spec.md).
 
-This round (C1) ships the store and the public API: submissions, drafts with
-versions and conflict-detecting saves, feedback, images, runs, and events,
-all under `/v1` and all behind a consumer token. The preview build, the
-GitHub publish path, and the admin UI arrive in C2 through C5; where an
-action would trigger one of those, it records a queued run and stops.
+C1 shipped the store and the public API: submissions, drafts with versions
+and conflict-detecting saves, feedback, images, runs, and events, all under
+`/v1` and all behind a consumer token. This round (C2) adds the admin front
+door (claim, sessions, tokens page, status page), a GitHub App connected
+through the manifest flow, and the digest of main that turns published posts
+into `Post` records and `from_post` imports. The preview build and the
+GitHub publish path itself (opening a PR, watching for a merge) arrive in
+C3 through C5; where an action would trigger one of those, it still records
+a queued run and stops.
 
 ## The API
 
@@ -24,7 +28,7 @@ included. `/healthz` and `/readyz` are the only anonymous routes, forever.
 | --- | --- |
 | `POST /v1/submissions`, `GET /v1/submissions?status=` | raw material in, triage out |
 | `POST /v1/submissions/{id}/claim`, `/discard` | submission lifecycle |
-| `POST /v1/drafts` (`blank`, `from_submission`) | new draft; `from_post` is 501 until C2 |
+| `POST /v1/drafts` (`blank`, `from_submission`, `from_post`) | new draft, including an import of a published post from main |
 | `GET /v1/drafts?status=`, `GET /v1/drafts/{id}` | content, version, images, status, claim |
 | `PUT /v1/drafts/{id}` | save; requires `base_version`, 409 with a diff if stale |
 | `POST /v1/drafts/{id}/claim`, `/release` | advisory claim, surfaced but never blocking |
@@ -72,10 +76,21 @@ data/
     events/log.jsonl             append-only, one object per line, monotonic seq
     index/chronicle.db           derived SQLite, gitignored, rebuildable
   images/<sha[:2]>/<sha>.<ext>   content-addressed, sha256 is the image id
-  state/                         0700: tokens.json and ui_token.txt, both 0600
+  state/                         0700, every file inside 0600 except toolchain.json
+    tokens.json, ui_token.txt      consumer tokens (ADR 007)
+    claim-code                     one-time admin claim code; deleted once claimed
+    admin.json                     argon2 password hash and session signing secret
+    instance.key                   32 random bytes; encrypts github-app.json; never backed up
+    github-app.json                GitHub App record, secrets encrypted at rest (ADR 008)
+    digest-status.json             last digest's counts and timestamps, not secret
+    toolchain.json                 last digest's Hugo version and theme commits, 0644
   preview/                       built preview output, disposable
   site/                          clone of the blog repo main, disposable
 ```
+
+`instance.key` is never included in a backup bundle (the bundle format
+itself arrives in a later round): a bundle that carried it would make
+`github-app.json`'s encryption pointless. See ADR 008.
 
 A queue entry is `{"run_id", "draft_id", "kind", "enqueued_at"}`, where
 `kind` is `preview`, `publish`, or `unpublish`.
@@ -134,6 +149,59 @@ curl -s localhost:8080/v1/drafts -H "Authorization: Bearer $TOKEN"
 `docker-compose.yml` is for local development only. It is not how Chronicle
 is deployed: reference deployment manifests are in [examples/k8s/](examples/k8s/),
 and lab-deployment owns the private instance for real.
+
+## Admin bootstrap
+
+`CHRONICLE_EXTERNAL_URL` has to be set before the first claim if you plan to
+connect a real GitHub App: it is the base URL GitHub redirects back to after
+the manifest flow (`{CHRONICLE_EXTERNAL_URL}/admin/github/callback`), and it
+cannot be guessed from an incoming request because the request that needs it
+(building the manifest) is not the request GitHub redirects to (ADR 009).
+It defaults to `http://localhost:8080`, which is fine for exercising
+everything except the two steps that happen in your own browser against
+real GitHub.
+
+The click-by-click order, once for a fresh instance:
+
+1. **Claim.** `GET /admin` shows the claim page until claimed. Read the
+   one-time code from `data/state/claim-code` (api logs only that a code
+   exists and where), pick a password of at least 12 characters, submit.
+   The code file is deleted the moment this succeeds.
+2. **Log in.** `GET /admin/login`, the password from step 1. Sets a signed,
+   `HttpOnly`, 12-hour session cookie.
+3. **Connect GitHub** (in your browser, on github.com). `/admin/github/connect`
+   renders a form carrying the App manifest; submitting it opens GitHub's own
+   "create a GitHub App" page, pre-filled, targeting either your personal
+   account or an organization. This is the first of the two steps that
+   happen on GitHub, not Chronicle: your browser talks to GitHub directly,
+   and GitHub redirects back to `/admin/github/callback` with a one-time
+   code once the App exists.
+4. **Install the App** (in your browser, on github.com). The callback page
+   links to `{app html_url}/installations/new`; installing there and picking
+   the blog repo is the second step that happens on GitHub. Come back to
+   `/admin/github/install` afterward.
+5. **Choose the installation.** `/admin/github/install` lists what the
+   App's own credentials can already see and lets you pick one, or paste an
+   installation id directly.
+6. **Choose the repo.** `/admin/github/repo` lists the repositories that
+   installation can reach; picking one makes a live call to verify contents
+   and pull-request access and records the result.
+7. **Digest.** The "Run digest now" button on `/admin` (or `chronicle
+   digest`) clones or fetches the chosen repo's default branch into
+   `data/site/` and writes post records. With no GitHub App configured yet,
+   setting `CHRONICLE_DIGEST_REPO_URL` to a public https URL runs the same
+   digest anonymously, which is how this round's real-world check and CI
+   both exercise it without credentials. `CHRONICLE_DIGEST_REPO_URL` also
+   accepts a local filesystem path or a `file://` URL to a clone you already
+   have on disk, which is the way to test digest against a private repo
+   without ever putting a GitHub token in Chronicle's environment.
+
+Only steps 3 and 4 happen on GitHub's own pages in your browser; every other
+step is a Chronicle admin page. `/admin/tokens` issues and revokes named
+consumer tokens at any point after claiming; `ui` is reserved. `/admin`
+itself is the status page: last digest, post count, toolchain drift, App and
+repo connection state, submissions and drafts by status, disk use, and git
+health.
 
 ## Where the spec lives
 

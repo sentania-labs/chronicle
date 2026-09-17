@@ -16,12 +16,14 @@ from __future__ import annotations
 import difflib
 import functools
 import json
+import re
 import threading
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
+from . import digest as digest_mod
 from . import gitrepo
 from .atomic import write_atomic
 from .errors import ApiError
@@ -40,6 +42,7 @@ from .models import (
     Run,
     Submission,
     Version,
+    is_valid_slug,
     now_stamp,
     render_content,
     slugify,
@@ -48,17 +51,27 @@ from .transitions import resolve_draft, resolve_save, resolve_submission
 
 IMAGE_ROLES = ("inline", "feature")
 
+# from_post image discovery: markdown `![alt](path)` and bare HTML `<img
+# src="...">`, the two ways a real post's body points at an image.
+_MARKDOWN_IMAGE_REF = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)")
+_HTML_IMG_REF = re.compile(r"""<img\b[^>]*\bsrc=["']([^"']+)["']""", re.IGNORECASE)
+
 # Keys whose value type the store depends on: a non-string slug reaches the
 # slug index and a non-list tags reaches Hugo, so both are rejected at the door
 # rather than persisted and discovered on the next read.
 FRONTMATTER_STRING_KEYS = (
     "title",
+    "author",
+    "type",
     "date",
     "lastmod",
-    "description",
-    "series",
+    "url",
     "slug",
+    "description",
+    "summary",
+    "series",
     "featureImage",
+    "shareImage",
 )
 FRONTMATTER_STRING_LIST_KEYS = ("tags", "categories")
 
@@ -257,12 +270,25 @@ class Store:
     # Drafts
 
     @locked
-    def create_draft(self, actor: str, from_submission: str | None = None) -> Draft:
+    def create_draft(
+        self,
+        actor: str,
+        from_submission: str | None = None,
+        from_post: str | None = None,
+    ) -> tuple[Draft, list[str]]:
+        if from_submission is not None and from_post is not None:
+            raise ApiError(
+                422,
+                "import_source_conflict",
+                "a draft can be created from_submission or from_post, not both",
+            )
+
         submission = None
         if from_submission is not None:
             submission = self.get_submission(from_submission)
             resolve_submission(submission.status, "draft")
 
+        warnings: list[str] = []
         stamp = now_stamp()
         draft = Draft(
             id=new_id(),
@@ -270,6 +296,10 @@ class Store:
             updated_at=stamp,
             source_submission=from_submission,
         )
+
+        if from_post is not None:
+            draft, warnings = self._fill_from_post(draft, from_post)
+
         self._write_json(self._draft_path(draft.id), draft.model_dump(mode="json"))
         self._append_event(
             type="draft.created", actor=actor, draft_id=draft.id, to_status=draft.status
@@ -293,11 +323,155 @@ class Store:
                 to_status=submission.status,
             )
 
-        self._commit(f"draft {draft.id}: created", actor)
+        message = f"draft {draft.id}: created"
+        if from_post is not None:
+            message += f" from post {from_post}"
+        self._commit(message, actor)
         self.index.upsert_draft(draft)
         if submission is not None:
             self.index.upsert_submission(submission)
-        return draft
+        return draft, warnings
+
+    def _fill_from_post(self, draft: Draft, slug: str) -> tuple[Draft, list[str]]:
+        """Populate a new draft from a published post record and its file on main.
+
+        The frontmatter allowlist is not enforced with a 422 here the way a
+        save is: an existing post on main may carry a field the allowlist
+        does not have (the site predates Chronicle), so unknown keys are
+        dropped and reported as warnings instead of rejecting the import.
+        """
+        post = self.get_post(slug)
+        source_path = self.site_dir / post.path
+        if not source_path.exists():
+            raise ApiError(
+                404,
+                "post_file_missing",
+                f"post {slug!r} has no file at {post.path} in the last digest;"
+                " run a digest before importing it",
+            )
+        frontmatter, body = digest_mod.parse_frontmatter(source_path.read_text(encoding="utf-8"))
+        warnings = []
+        allowed = {}
+        for key, value in frontmatter.items():
+            if key in FRONTMATTER_ALLOWLIST:
+                allowed[key] = value
+            else:
+                warnings.append(f"dropped unknown frontmatter key {key!r}")
+        allowed.setdefault("title", post.title)
+        allowed["slug"] = slug
+
+        draft.slug = slug
+        draft.title = str(allowed["title"])
+        draft.frontmatter = allowed
+        draft.body = body
+        draft.source_post = {"slug": post.slug, "path": post.path, "sha": post.sha}
+
+        images, image_warnings = self._import_post_images(
+            source_path, slug, body, allowed.get("featureImage"), allowed.get("shareImage")
+        )
+        draft.images = images
+        warnings.extend(image_warnings)
+        return draft, warnings
+
+    def _referenced_images(
+        self, body: str, feature_image: Any, share_image: Any
+    ) -> list[tuple[str, str]]:
+        """(reference, role) pairs in the order the post itself names them.
+
+        `featureImage` and `shareImage` are frontmatter values, not body
+        text, so they are listed first and separately from the body scan.
+        `shareImage` gets the feature role too when it names the same file
+        as `featureImage`; a real post's share image is otherwise just
+        another inline attachment.
+        """
+        refs: list[tuple[str, str]] = []
+        if feature_image:
+            refs.append((str(feature_image), "feature"))
+        if share_image and str(share_image) != str(feature_image):
+            refs.append((str(share_image), "inline"))
+        for match in _MARKDOWN_IMAGE_REF.finditer(body):
+            refs.append((match.group(1), "inline"))
+        for match in _HTML_IMG_REF.finditer(body):
+            refs.append((match.group(1), "inline"))
+        return refs
+
+    def _resolve_image_ref(self, ref: str, source_path: Path) -> Path | None:
+        """A root-relative ref resolves against `data/site/static/`; anything
+        else resolves against the post's own bundle directory, matching how
+        Hugo itself resolves the same two reference shapes."""
+        if ref.startswith(("http://", "https://", "//")):
+            return None
+        clean = ref.split("#", 1)[0].split("?", 1)[0]
+        if not clean:
+            return None
+        candidate = (
+            self.site_dir / "static" / clean.lstrip("/")
+            if clean.startswith("/")
+            else source_path.parent / clean
+        )
+        return candidate if candidate.is_file() else None
+
+    def _import_post_images(
+        self,
+        source_path: Path,
+        slug: str,
+        body: str,
+        feature_image: Any,
+        share_image: Any,
+    ) -> tuple[list[DraftImage], list[str]]:
+        images: list[DraftImage] = []
+        warnings: list[str] = []
+        seen_refs: set[str] = set()
+        imported_names: set[str] = set()
+
+        for ref, role in self._referenced_images(body, feature_image, share_image):
+            if ref in seen_refs:
+                continue
+            seen_refs.add(ref)
+            path = self._resolve_image_ref(ref, source_path)
+            if path is None:
+                warnings.append(f"could not find referenced image {ref!r}")
+                continue
+            try:
+                raw = path.read_bytes()
+                record, _created = self._put_image_unlocked(raw, path.name)
+            except ApiError as exc:
+                warnings.append(f"could not import image {path.name}: {exc.message}")
+                continue
+            images.append(
+                DraftImage(
+                    image_id=record.image_id, filename=record.filename, role=role, source_ref=ref
+                )
+            )
+            imported_names.add(path.name)
+
+        # Fallback sweep for the page-bundle and static/images/<slug>/ layouts
+        # (ADR 007 predates the real-post case): anything not already picked
+        # up by an explicit reference still gets attached, with no reference
+        # path to record.
+        candidates: list[Path] = []
+        if source_path.name == "index.md":
+            candidates.extend(
+                p for p in source_path.parent.iterdir() if p.is_file() and p != source_path
+            )
+        bundle_dir = self.site_dir / "static" / "images" / slug
+        if bundle_dir.is_dir():
+            candidates.extend(p for p in bundle_dir.iterdir() if p.is_file())
+
+        feature_name = Path(str(feature_image)).name if feature_image else None
+        for path in sorted(set(candidates)):
+            if path.name in imported_names:
+                continue
+            try:
+                raw = path.read_bytes()
+                record, _created = self._put_image_unlocked(raw, path.name)
+            except ApiError as exc:
+                warnings.append(f"could not import image {path.name}: {exc.message}")
+                continue
+            role = "feature" if feature_name and path.name == feature_name else "inline"
+            images.append(DraftImage(image_id=record.image_id, filename=record.filename, role=role))
+            imported_names.add(path.name)
+        return images, warnings
 
     def get_draft(self, draft_id: str) -> Draft:
         path = self._draft_path(draft_id)
@@ -419,6 +593,9 @@ class Store:
         draft = self.get_draft(draft_id)
         draft.claim = Claim(author=actor, since=now_stamp()) if held else None
         self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
+        self._append_event(
+            type="draft.claim" if held else "draft.release", actor=actor, draft_id=draft_id
+        )
         self._commit(f"draft {draft_id}: {'claim' if held else 'release'} by {actor}", actor)
         self.index.upsert_draft(draft)
         return draft
@@ -490,6 +667,13 @@ class Store:
                 422,
                 "slug_underivable",
                 f"draft {draft.id} has no title or slug to pin a slug from",
+            )
+        if not is_valid_slug(candidate):
+            raise ApiError(
+                422,
+                "slug_invalid",
+                f"slug {candidate!r} must be lowercase letters, digits, hyphens, or underscores",
+                slug=candidate,
             )
         if candidate in self.index.pinned_slugs(exclude_draft_id=draft.id):
             raise ApiError(
@@ -576,6 +760,9 @@ class Store:
 
     @locked
     def put_image(self, raw: bytes, filename: str) -> tuple[Image, bool]:
+        return self._put_image_unlocked(raw, filename)
+
+    def _put_image_unlocked(self, raw: bytes, filename: str) -> tuple[Image, bool]:
         normalised = normalise(raw)
         sidecar = self._image_sidecar_path(normalised.sha256)
         if sidecar.exists():
@@ -612,6 +799,7 @@ class Store:
         draft.images.append(DraftImage(image_id=image_id, filename=image.filename, role=role))
         draft.updated_at = now_stamp()
         self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
+        self._append_event(type="draft.image_attach", actor=actor, draft_id=draft_id)
         self._commit(f"draft {draft_id}: attach image {image_id} as {role}", actor)
         self.index.upsert_draft(draft)
         return draft
@@ -627,6 +815,7 @@ class Store:
         draft.images = remaining
         draft.updated_at = now_stamp()
         self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
+        self._append_event(type="draft.image_detach", actor=actor, draft_id=draft_id)
         self._commit(f"draft {draft_id}: detach image {image_id}", actor)
         self.index.upsert_draft(draft)
         return draft
@@ -634,6 +823,8 @@ class Store:
     # Posts and runs
 
     def get_post(self, slug: str) -> Post:
+        if not is_valid_slug(slug):
+            raise ApiError(404, "post_not_found", f"no post {slug}")
         path = self.posts_dir / f"{slug}.json"
         if not path.exists():
             raise ApiError(404, "post_not_found", f"no post {slug}")
@@ -651,6 +842,53 @@ class Store:
     def last_run(self, draft_id: str) -> Run | None:
         run_id = self.index.last_run_id(draft_id)
         return self.get_run(run_id) if run_id else None
+
+    @locked
+    def apply_digest(self, actor: str, discovered: list[Post]) -> dict[str, int]:
+        """Write post records for a digest of main, one commit for the whole run.
+
+        Idempotent by construction: a post record is only written when its
+        dump differs from what is already on disk, so a second digest of an
+        unchanged main writes nothing, appends no event, and makes no commit
+        (`_commit` itself is also a no-op when `git status` is clean, but
+        skipping the write and the event too is what makes "zero changes"
+        mean zero changes, not zero-byte changes).
+
+        A post that no longer exists on main is left alone: deciding that a
+        post was removed is reconciliation's job (ADR 005), not digest's;
+        digest only ever adds or updates what main currently has.
+        """
+        created = 0
+        updated = 0
+        unchanged = 0
+        for post in discovered:
+            if not is_valid_slug(post.slug):
+                # A slug this unsafe would land outside posts_dir/*.json if
+                # written; refuse the one record rather than the whole digest.
+                continue
+            path = self.posts_dir / f"{post.slug}.json"
+            payload = post.model_dump(mode="json")
+            if path.exists():
+                if self._read_json(path) == payload:
+                    unchanged += 1
+                    continue
+                updated += 1
+            else:
+                created += 1
+            self._write_json(path, payload)
+            self.index.upsert_post(post)
+
+        changed = created + updated
+        if changed:
+            self._append_event(
+                type="posts.digested",
+                actor=actor,
+                to_status=f"{created} created, {updated} updated",
+            )
+            self._commit(
+                f"digest: {created} created, {updated} updated, {unchanged} unchanged", actor
+            )
+        return {"created": created, "updated": updated, "unchanged": unchanged}
 
     # Index rebuild
 

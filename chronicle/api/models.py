@@ -14,18 +14,25 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# Spec section 4 says "Hugo allowlist"; which keys are in it is ADR 007.
+# Spec section 4 says "Hugo allowlist"; which keys are in it is ADR 007,
+# amended 2026-09-16 against the real blog's 347 posts and the dashboard
+# port's field set.
 FRONTMATTER_ALLOWLIST = (
     "title",
+    "author",
+    "type",
     "date",
     "lastmod",
     "draft",
-    "description",
-    "tags",
-    "categories",
-    "series",
+    "url",
     "slug",
+    "description",
+    "summary",
+    "categories",
+    "tags",
+    "series",
     "featureImage",
+    "shareImage",
 )
 
 SUBMISSION_STATUSES = ("new", "claimed", "drafted", "discarded")
@@ -49,6 +56,16 @@ def now_stamp() -> str:
 def slugify(title: str) -> str:
     kebab = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     return kebab
+
+
+# A slug becomes a filename component (`posts/{slug}.json`) in more than one
+# place (digest, draft slug pinning, from_post import): this is the one
+# pattern all of them check against, so `/` and `..` can never reach a path.
+SLUG_PATTERN = re.compile(r"^[a-z0-9_-]+$")
+
+
+def is_valid_slug(slug: str) -> bool:
+    return bool(slug) and bool(SLUG_PATTERN.fullmatch(slug))
 
 
 class Material(BaseModel):
@@ -75,6 +92,12 @@ class DraftImage(BaseModel):
     image_id: str
     filename: str
     role: str
+    # The path the post itself used to reach this image (a frontmatter value
+    # or a body reference), kept so publish (C4) can rewrite references
+    # against wherever the image ends up. None for images picked up only by
+    # the static/images/<slug>/ directory sweep, which has no reference to
+    # record.
+    source_ref: str | None = None
 
 
 class Claim(BaseModel):
@@ -93,7 +116,7 @@ class Draft(BaseModel):
     status: str = "drafting"
     version_no: int = 0
     source_submission: str | None = None
-    source_post: str | None = None
+    source_post: dict[str, str] | None = None
     images: list[DraftImage] = []
     claim: Claim | None = None
 

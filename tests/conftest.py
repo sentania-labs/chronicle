@@ -63,6 +63,27 @@ def auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+ADMIN_PASSWORD = "correct horse battery staple"
+
+
+def claim_code(data_dir: Path) -> str:
+    return (data_dir / "state" / "claim-code").read_text(encoding="utf-8").strip()
+
+
+def claim_and_login(client: TestClient, data_dir: Path, password: str = ADMIN_PASSWORD) -> None:
+    code = claim_code(data_dir)
+    response = client.post("/admin/claim", data={"code": code, "password": password})
+    assert response.status_code == 200
+    response = client.post("/admin/login", data={"password": password})
+    assert response.status_code == 200
+
+
+@pytest.fixture
+def admin_client(data_dir: Path, client: TestClient) -> TestClient:
+    claim_and_login(client, data_dir)
+    return client
+
+
 def png_bytes(color: tuple[int, int, int] = (10, 20, 30), size: int = 8) -> bytes:
     buffer = io.BytesIO()
     PillowImage.new("RGB", (size, size), color).save(buffer, format="PNG")

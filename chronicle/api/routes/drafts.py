@@ -50,13 +50,12 @@ def create_draft(
     consumer: Consumer = Depends(require_consumer),
     services: Services = Depends(get_services),
 ) -> dict[str, Any]:
-    if payload.from_post is not None:
-        raise ApiError(
-            501,
-            "import_not_implemented",
-            "importing a published post from main arrives in C2",
-        )
-    return _dump(services.store.create_draft(consumer.name, payload.from_submission))
+    draft, warnings = services.store.create_draft(
+        consumer.name, payload.from_submission, payload.from_post
+    )
+    body = _dump(draft)
+    body["warnings"] = warnings
+    return body
 
 
 @router.get("")

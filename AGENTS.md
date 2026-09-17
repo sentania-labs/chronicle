@@ -27,8 +27,12 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   layer, never anonymously.
 - **Admin is authenticated always.** Admin's password session is independent
   of the API's consumer tokens and independent of whether the UI ever grows
-  user login. Nothing shortcuts Admin's session for convenience. Admin does
-  not exist yet as of round C1; this is spec intent (section 10) for C2.
+  user login. Nothing shortcuts Admin's session for convenience. As of round
+  C2, `/admin` and `/admin/api` carry their own session dependency
+  (`chronicle/api/admin_deps.py`), mounted separately from `build_v1_router()`
+  and never imported by a content route; a session cookie authenticates
+  nothing under `/v1`, and a bearer token authenticates nothing under
+  `/admin`.
 - **Reconciliation produces flags only, never automatic correction.** A
   mismatch between main and Chronicle's records is surfaced on the admin
   status page for Scott to resolve; nothing in the reconciler deletes or
@@ -77,16 +81,46 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   cursors come from SQLite, a record's own content always comes from its
   file, and `chronicle reindex` rebuilds every row. See
   [docs/decisions/006-sqlite-derived-index.md](docs/decisions/006-sqlite-derived-index.md).
+- **`Store.create_draft` returns `(Draft, warnings)`, not a bare `Draft`.**
+  A `from_post` import can drop frontmatter keys the allowlist does not have
+  (an existing post on main may predate Chronicle) and can fail to import an
+  individual image; both are reported as warnings in the response, never a
+  422, because the import itself still succeeded. Every other caller
+  (`from_submission`, blank) gets an empty warnings list.
+- **`_put_image_unlocked` exists so `from_post` import can reuse image
+  ingestion from inside an already-`@locked` method.** `Store`'s lock
+  (`threading.Lock`) is not reentrant; calling the public, `@locked`
+  `put_image` from within `create_draft` would deadlock. Any future store
+  method that needs to call another mutating method internally needs the
+  same split, not a nested lock.
+- **The GitHub client takes an httpx transport, never the network, in a
+  test.** `GitHubClient.__init__`'s `transport` parameter exists solely so
+  `httpx.MockTransport` can stand in; every test of the GitHub path (spec's
+  requirement) sets it, and production code never does. `AdminServices` also
+  accepts a `github_client` override at `.build()` for the same reason.
+- **Digest never deletes a post record.** A post on main that a later digest
+  no longer finds is left alone; deciding it was actually removed is
+  reconciliation's job (ADR 005, arriving C4), not digest's. Digest only
+  ever creates or updates.
+- **`digest.py` widens `GIT_ALLOW_PROTOCOL` to include `file`.** The repo URL
+  digest clones is always Chronicle's own configured source (never attacker
+  input), so this costs nothing in practice and is what lets a theme
+  submodule pointed at a local path clone in tests the same way a real one
+  clones over https in production.
 
-## Round C1 status
+## Round C2 status
 
-The store and `/v1` are real: submissions, drafts with versions and
-conflict-detecting saves, feedback, images, runs, and events, every route
-behind a consumer token. Builder and preview are untouched C0 process shells.
-The actions that will one day build or publish (`preview`, `approve`,
-`unpublish`) only write a run record and a queue entry under
-`repo/runs/queue/`. No Hugo build, no GitHub call, no reconciler, no admin or
-UI HTML; those arrive in C2 through C5 per the spec.
+Admin, the GitHub App connection, and the digest of main are real: claim,
+signed-cookie sessions with secret rotation on re-claim and password change,
+a tokens page, a status page, the manifest flow through callback,
+installation and repo selection with live verification calls, `chronicle
+digest` (and an admin button that backgrounds it), and `from_post` imports
+with image pull. Every GitHub call goes through `chronicle/api/github_client.py`
+so a test can swap in a mock transport; nothing here has made a real network
+call outside the one-time manual verification in this round's pull request.
+Publish itself (opening a PR from an approved draft, watching for its merge)
+is still C3: `approve` and `unpublish` still only write a run record and a
+queue entry under `repo/runs/queue/`. No Hugo build, no reconciler yet.
 
 ## Maintaining this file
 

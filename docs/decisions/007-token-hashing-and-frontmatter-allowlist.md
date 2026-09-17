@@ -51,6 +51,29 @@ offending keys, never a silent drop.
   for the published file, so two versions of a post do not diff on field
   order alone.
 
+## Amendment, 2026-09-16: the allowlist against the real blog
+
+Adolin ran `from_post` against a read-only clone of the actual blog repo
+(347 posts). The allowlist above was written against the dashboard port's
+field list from memory, not against what the real posts contain, and it
+missed keys every real post carries: `author` (346 of 347), `type` (all
+347), and `url` (all 347). It also lacked `summary` and `shareImage`, both
+present in the dashboard port's own field set.
+
+Losing `url` on import is the one that matters operationally: `url` is the
+permalink Hugo has already been serving for that post, and it is not
+derived from anything else Chronicle stores (not `slug`, which can differ
+from the URL segment on an older post). A republish that dropped it would
+silently break every existing inbound link to that post, with no error at
+publish time to catch it.
+
+**The allowlist is now these keys, in this order:** `title`, `author`,
+`type`, `date`, `lastmod`, `draft`, `url`, `slug`, `description`, `summary`,
+`categories`, `tags`, `series`, `featureImage`, `shareImage`. `title`
+remains the only required key. `excerpt`, seen on 2 of the 347 posts, stays
+off the list: too rare to be a dashboard field, and `from_post` already
+reports a dropped key as a warning rather than failing the import.
+
 ## Alternatives considered
 
 **argon2id for tokens.** The default reflex, and wrong here for the reason
