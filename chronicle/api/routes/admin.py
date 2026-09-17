@@ -710,9 +710,7 @@ def backup_restore(
             status_code=400,
         )
     staged_path = _backup_tmp_dir(admin) / f"upload-{token}.tar.gz"
-    if not staged_path.exists() or (
-        time.time() - staged_path.stat().st_mtime > UPLOAD_TTL_SECONDS
-    ):
+    if not staged_path.exists() or (time.time() - staged_path.stat().st_mtime > UPLOAD_TTL_SECONDS):
         staged_path.unlink(missing_ok=True)
         return HTMLResponse(
             tpl.backup_page(
