@@ -151,17 +151,46 @@ def _is_safe_relative(path: str) -> bool:
     return bool(parts) and not path.startswith("/") and ".." not in parts
 
 
+def _disambiguated_filename(filename: str, image_id: str) -> str:
+    """`filename` with a short slice of `image_id` inserted before the suffix.
+
+    `image_id` is the image's own content sha256, so two images that reach
+    here with the same filename are guaranteed different content: this is
+    the only thing that can tell their output paths apart.
+    """
+    path = PurePosixPath(filename)
+    return f"{path.stem}-{image_id[:8]}{path.suffix}"
+
+
 def placements(draft: Draft, slug: str) -> list[ImagePlacement]:
-    return [
-        ImagePlacement(
-            image_id=image.image_id,
-            filename=PurePosixPath(image.filename).name,
-            role=image.role,
-            site_path=image_site_path(slug, image.filename),
-            url=image_url(slug, image.filename),
+    """Where each attached image lands, deduplicating a repeated filename.
+
+    `attach_image` (`chronicle/api/store.py`) already rejects attaching a
+    second image under a filename the draft already has, so this is a
+    defensive fallback, not the primary guard: a draft written before that
+    check existed, or by anything that writes `Draft.images` directly, could
+    still carry two entries with the same filename and different content. A
+    plain second occurrence would collide with the first at
+    `static/images/<slug>/<filename>` and silently overwrite it (round C3
+    review); a repeated name here gets its image id worked into the output
+    path instead.
+    """
+    seen: dict[str, int] = {}
+    placed: list[ImagePlacement] = []
+    for image in draft.images:
+        name = PurePosixPath(image.filename).name
+        seen[name] = seen.get(name, 0) + 1
+        output_name = name if seen[name] == 1 else _disambiguated_filename(name, image.image_id)
+        placed.append(
+            ImagePlacement(
+                image_id=image.image_id,
+                filename=name,
+                role=image.role,
+                site_path=image_site_path(slug, output_name),
+                url=image_url(slug, output_name),
+            )
         )
-        for image in draft.images
-    ]
+    return placed
 
 
 def _rewrite_map(

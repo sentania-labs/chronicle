@@ -16,6 +16,7 @@ import pytest
 
 from chronicle.api.store import Store
 from chronicle.builder import runner
+from chronicle.builder.leases import LeaseDirectory
 from chronicle.builder.settings import BuilderSettings
 from tests.conftest import png_bytes
 
@@ -65,7 +66,10 @@ def test_real_hugo_builds_two_posts_with_rewritten_images(store: Store) -> None:
     assert run is not None
 
     settings = _fixture_settings(store.data_dir, store.data_dir / "builder-work")
-    runner.build_one(store, settings, run)
+    leases = LeaseDirectory(settings.leases_dir, settings.lease_seconds)
+    lease = leases.claim(run.id, settings.builder_id)
+    assert lease is not None
+    runner.build_one(store, settings, run, leases, lease)
 
     finished = store.get_run(run.id)
     assert finished.status == "succeeded", store.run_log(run.id)

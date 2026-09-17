@@ -23,18 +23,32 @@ new volume is needed, and cleanup (`shutil.rmtree` after every run, success
 or failure) never touches anything the preview server serves.
 
 **One exception: the Hugo build output itself.** Hugo writes each run's
-build to `data/preview/.tmp/<run_id>`, not under `builder-work/`, found
+build to `data/preview/.builds/<run_id>`, not under `builder-work/`, found
 live in the C3 real-blog check: `Path.replace` (`os.replace`) only stays
 atomic when the source and destination share a filesystem, and
 `builder-work` is a deliberately separate mount from `preview` in both
 compose and the k8s reference. Putting the pre-swap output on the
-`builder-work` side made the final `_atomic_swap` into `data/preview/
-<slug>/` cross a mount boundary, which `os.replace` refuses outright
-("Invalid cross-device link") rather than silently falling back to a copy.
-`data/preview/.tmp/<run_id>` costs nothing extra in exposure: it is already
-the run's finished, public-bound output at the moment it lands there, the
-same content `<slug>/` is about to become, just not yet visible under a
-slug the api's status route would ever hand out.
+`builder-work` side made the final swap into `data/preview/<slug>/` cross a
+mount boundary, which `os.replace` refuses outright ("Invalid cross-device
+link") rather than silently falling back to a copy.
+`data/preview/.builds/<run_id>` costs nothing extra in exposure: it is
+already the run's finished, public-bound output at the moment it lands
+there, the same content `<slug>/` is about to become, just not yet visible
+under a slug the api's status route would ever hand out.
+
+**The swap itself is a symlink rename, not a directory rename.** `<slug>/`
+is a symlink into `.builds/<run_id>/`, and `_atomic_swap`
+(`chronicle/builder/runner.py`) replaces it by renaming a freshly created
+temp symlink onto it: one directory-entry update, so a request resolving
+`<slug>/` always sees either the old build or the new one, never neither.
+An earlier version renamed the live directory aside and the new one into
+place as two separate renames, which left a real window where `<slug>/`
+did not exist, and stranded the old tree if the second rename failed
+(round C3 review). The preview server already resolves symlinks before its
+containment check, so this needed no server-side change. The build
+directory a replaced symlink used to point at is removed right after the
+swap, so `.builds/` holds at most the live build and, briefly, the one
+replacing it.
 
 **Lease format.** `data/state/builder/leases/<run_id>.json`:
 

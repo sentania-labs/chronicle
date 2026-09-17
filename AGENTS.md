@@ -124,7 +124,7 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   releases the lease on any exit, including an uncaught exception), not
   just with an expired one, so `runner.recover_expired_leases` checks both:
   every expired lease, and every `building` run with no live lease at all.
-- **The pre-swap Hugo output lives under `data/preview/.tmp/<run_id>/`,
+- **The pre-swap Hugo output lives under `data/preview/.builds/<run_id>/`,
   never under `data/builder-work/`.** `_atomic_swap`'s rename into
   `data/preview/<slug>/` only stays atomic when the source and destination
   share a filesystem, and `builder-work` is a deliberately separate mount
@@ -132,6 +132,17 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   011's security-separation argument). Found live the same way: an
   `os.replace` across that mount boundary raises `OSError`, not a silent
   copy.
+- **`data/preview/<slug>` is a symlink into `.builds/<run_id>/`, never a
+  directory Hugo writes into directly.** `_atomic_swap` replaces it with a
+  single rename of a temp symlink, not a remove-then-rename pair, so a
+  request resolving `<slug>/` never sees it missing (ADR 011). The old
+  build directory a replaced symlink pointed at is removed right after the
+  swap; anything that writes under a mutable path in the scratch copy of
+  `data/site` (a converted post, an attached image) must `unlink` it first
+  because `_copy_site` hard-links wherever it can, and writing in place
+  would truncate the same inode `data/site` uses (found live: this is
+  exactly what silently corrupted the digest's clone before the round C3
+  review caught it).
 
 ## Round C3 status
 

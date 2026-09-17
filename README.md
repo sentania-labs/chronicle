@@ -36,10 +36,12 @@ the crash-recovery argument), and for a claimed run:
    (frontmatter in ADR 007's allowlist order, `draft: false` forced, the
    filename and `url` rules below), the same module publish will reuse in
    C4, and copies its attached images into `static/images/<slug>/`.
-3. Runs `hugo --source <scratch> --destination data/preview/.tmp/<run_id>
+3. Runs `hugo --source <scratch> --destination data/preview/.builds/<run_id>
    --baseURL <CHRONICLE_EXTERNAL_URL>/preview/<slug>/ --minify --gc`,
    capturing output as the run's log.
-4. On success, atomically renames the output into `data/preview/<slug>/`
+4. On success, atomically points the symlink `data/preview/<slug>` at the
+   build's output directory (a single rename, never a remove-then-rename
+   pair, so a request never sees a missing `<slug>/`; ADR 011)
    (`GET /v1/drafts/{id}/status` and the narrower `GET /v1/drafts/{id}/preview`
    then carry `preview_url`) and moves the draft to `previewed`. On
    failure, the previous preview tree, if any, is left untouched, and the
@@ -132,8 +134,8 @@ data/
   builder-work/                  the builder's scratch tree and Hugo caches, disposable
     scratch/<run_id>/, cache/, resources/
   preview/                       built preview output, disposable
-    <slug>/                      one build's live output
-    .tmp/<run_id>/               a build in progress, swapped over <slug>/ on success
+    <slug>/                      symlink to the live build under .builds/
+    .builds/<run_id>/            one build's output, live once a symlink points at it
   site/                          clone of the blog repo main, disposable
 ```
 

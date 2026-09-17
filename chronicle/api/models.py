@@ -180,6 +180,10 @@ class Run(BaseModel):
     builder_id: str | None = None
     hugo_version: str | None = None
     toolchain_drift: bool = False
+    # The draft's version_no at the moment this run's build actually read it,
+    # so a `preview_succeeded` transition can be skipped when the draft has
+    # since moved on to a newer version the build never saw (round C3 review).
+    built_version: int | None = None
 
 
 class Event(BaseModel):

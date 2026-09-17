@@ -167,7 +167,21 @@ class LeaseDirectory:
         os.replace(temp, path)
         return renewed
 
-    def release(self, run_id: str) -> None:
+    def release(self, run_id: str, builder_id: str | None = None) -> None:
+        """Drop the lease, unless `builder_id` names someone who no longer holds it.
+
+        `builder_id` is optional so `recover_expired_leases` can keep
+        releasing a lease it has already confirmed is expired without
+        knowing who took it over next. `tick`, releasing its own claim after
+        a build, always passes it: an expired lease this builder held can
+        already have been taken over by another builder by the time the
+        build finishes, and unconditionally unlinking the file would delete
+        that other builder's live claim out from under it (round C3 review).
+        """
+        if builder_id is not None:
+            current = self.read(run_id)
+            if current is None or current.builder_id != builder_id:
+                return
         self.path(run_id).unlink(missing_ok=True)
 
     def expired_leases(self) -> list[Lease]:

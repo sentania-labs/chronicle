@@ -157,3 +157,22 @@ def test_image_placements_point_at_static_images_slug() -> None:
     converted = convert.convert(draft)
     assert converted.images[0].site_path == "static/images/my-post/pic.png"
     assert converted.images[0].url == "/images/my-post/pic.png"
+
+
+def test_two_attached_images_with_the_same_filename_get_distinct_output_paths() -> None:
+    """Defensive fallback: the API rejects this at attach time, but a draft
+    written some other way could still carry two images under one filename,
+    and they must not collide at static/images/<slug>/<filename> (round C3
+    review)."""
+    draft = _draft(
+        images=[
+            DraftImage(image_id="aaaaaaaa1111", filename="pic.png", role="inline"),
+            DraftImage(image_id="bbbbbbbb2222", filename="pic.png", role="feature"),
+        ]
+    )
+    converted = convert.convert(draft)
+    first, second = converted.images
+    assert first.site_path == "static/images/my-post/pic.png"
+    assert second.site_path == "static/images/my-post/pic-bbbbbbbb.png"
+    assert first.site_path != second.site_path
+    assert len({placement.site_path for placement in converted.images}) == 2

@@ -878,6 +878,24 @@ class Store:
             )
         draft = self.get_draft(draft_id)
         image = self.get_image(image_id)
+        conflict = next(
+            (
+                item
+                for item in draft.images
+                if item.filename == image.filename and item.image_id != image_id
+            ),
+            None,
+        )
+        if conflict is not None:
+            # Two attached images with the same output filename but
+            # different content (different image_id) would collide once
+            # convert.py places them both at static/images/<slug>/<filename>,
+            # silently overwriting one with the other (round C3 review).
+            raise ApiError(
+                409,
+                "image_filename_conflict",
+                f"draft {draft_id} already has an attached image named {image.filename!r}",
+            )
         draft.images = [item for item in draft.images if item.image_id != image_id]
         draft.images.append(DraftImage(image_id=image_id, filename=image.filename, role=role))
         draft.updated_at = now_stamp()
@@ -976,8 +994,14 @@ class Store:
         builder_id: str,
         hugo_version: str,
         toolchain_drift: bool,
+        built_version: int | None = None,
     ) -> Run:
-        """Move a claimed run to `building` and stamp who is building it."""
+        """Move a claimed run to `building` and stamp who is building it.
+
+        `built_version` records the draft's `version_no` at the moment the
+        builder read it for this build, so `finish_run` can tell a build
+        that is still current from one the draft has since moved past.
+        """
         run = self.get_run(run_id)
         run.status = "building"
         run.started_at = now_stamp()
@@ -985,6 +1009,7 @@ class Store:
         run.builder_id = builder_id
         run.hugo_version = hugo_version
         run.toolchain_drift = toolchain_drift
+        run.built_version = built_version
         run.log_path = str(self.log_path_for(run_id).relative_to(self.data_dir))
         self._write_json(self._run_path(run_id), run.model_dump(mode="json"))
         self._append_event(
@@ -1010,32 +1035,52 @@ class Store:
         and a draft whose status has no entry for that outcome (it was
         rejected, or saved back to `drafting`, while the build ran) is left
         exactly as it is.
+
+        A build only transitions the draft when the version it actually
+        built (`run.built_version`, stamped by `start_run`) still matches the
+        draft's current version. A draft saved again while the build ran is
+        left alone, the run is recorded `succeeded` with `result["stale"]`
+        set, and a `draft.preview_stale` event says the draft moved on,
+        because the generated preview reflects a version that is no longer
+        current (round C3 review).
         """
         run = self.get_run(run_id)
         run.status = "succeeded" if succeeded else "failed"
         run.finished_at = now_stamp()
-        run.result = result
+
+        draft: Draft | None = None
+        stale = False
+        if succeeded and run.kind == "preview":
+            current = self.get_draft(run.draft_id)
+            if run.built_version is not None and current.version_no != run.built_version:
+                stale = True
+            else:
+                transition = resolve_run_outcome(current.status, PREVIEW_SUCCEEDED)
+                if transition is not None and transition.to_status != current.status:
+                    from_status = current.status
+                    current.status = transition.to_status
+                    current.updated_at = run.finished_at
+                    self._write_json(self._draft_path(current.id), current.model_dump(mode="json"))
+                    self._append_event(
+                        type=f"draft.{PREVIEW_SUCCEEDED}",
+                        actor=actor,
+                        draft_id=current.id,
+                        from_status=from_status,
+                        to_status=current.status,
+                    )
+                    self.index.upsert_draft(current)
+                    draft = current
+
+        run.result = {**result, "stale": True} if stale else result
         self._write_json(self._run_path(run_id), run.model_dump(mode="json"))
         self._queue_entry_path(run_id).unlink(missing_ok=True)
 
-        draft: Draft | None = None
-        if succeeded and run.kind == "preview":
-            draft = self.get_draft(run.draft_id)
-            transition = resolve_run_outcome(draft.status, PREVIEW_SUCCEEDED)
-            if transition is not None and transition.to_status != draft.status:
-                from_status = draft.status
-                draft.status = transition.to_status
-                draft.updated_at = run.finished_at
-                self._write_json(self._draft_path(draft.id), draft.model_dump(mode="json"))
-                self._append_event(
-                    type=f"draft.{PREVIEW_SUCCEEDED}",
-                    actor=actor,
-                    draft_id=draft.id,
-                    from_status=from_status,
-                    to_status=draft.status,
-                )
-                self.index.upsert_draft(draft)
-
+        if stale:
+            self._append_event(
+                type="draft.preview_stale",
+                actor=actor,
+                draft_id=run.draft_id,
+            )
         self._append_event(
             type=f"run.{run.status}", actor=actor, draft_id=run.draft_id, to_status=run.status
         )
@@ -1067,6 +1112,21 @@ class Store:
         self._commit(f"run {run_id}: requeued ({reason})", actor)
         self.index.upsert_run(run)
         return run
+
+    @locked
+    def lease_lost(self, run_id: str, actor: str, reason: str) -> None:
+        """A builder finished a build after its lease on this run was taken over.
+
+        The run keeps whatever state its new owner leaves it in; this only
+        records that the old builder noticed and discarded its own result
+        rather than swapping output or calling `finish_run` (round C3
+        review: two builders must never both finish the same run).
+        """
+        run = self.get_run(run_id)
+        self._append_event(
+            type="run.lease_lost", actor=actor, draft_id=run.draft_id, to_status=run.status
+        )
+        self._commit(f"run {run_id}: lease lost, build discarded ({reason})", actor)
 
     def runs_in_flight(self, kind: str | None = None) -> list[Run]:
         """Runs the index says are `building`, read back from their files."""
