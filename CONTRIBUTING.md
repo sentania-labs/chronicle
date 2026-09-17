@@ -68,9 +68,56 @@ cosign verify ghcr.io/sentania-labs/chronicle-api:vX.Y.Z \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-The repository is private, so `ghcr.io/sentania-labs/chronicle-*` packages
-inherit that visibility; nothing in this workflow makes them public. Scott
-flips a package's visibility by hand on GitHub when there is a reason to.
+Two traps make hand verification look broken when it is not:
+
+**Verify against the index digest, not a per-architecture child digest.**
+The digest a version tag points at, and the one cosign signed, is the OCI
+image index digest. Read it from the package versions API rather than
+guessing:
+
+```bash
+gh api --paginate orgs/sentania-labs/packages/container/chronicle-api/versions \
+  --jq '.[] | select(.metadata.container.tags[]? == "vX.Y.Z") | .name'
+```
+
+This endpoint pages at 30 the same as the package listing below, so an
+older vX.Y.Z can come back empty without `--paginate`.
+
+`docker manifest inspect ghcr.io/sentania-labs/chronicle-api:vX.Y.Z` shows
+the index plus its children, including the `linux/amd64` child and an
+`unknown/unknown` attestation entry. Verifying against a child digest
+instead of the index digest fails, and the failure reads like a missing or
+bad signature rather than like the wrong subject: the instinct is to go
+recheck the signing step, which is not where the problem is. The signed
+v0.1.0 index digests, as a worked example:
+
+- `chronicle-api` `sha256:3cf8e32ad11c4a56b4bc4bc2212383b49e75e4cdf347c33140b5af5338c1efcf`
+- `chronicle-builder` `sha256:f51d73a040583c5418e914014e0782cc421f1d410db705f3a7c18df25dc061ff`
+- `chronicle-preview` `sha256:337396db33a295fcf00cc6a9600225c8905f67bbf7125dfbd5b93533505f6172`
+
+**Listing the organisation's container packages needs `--paginate`.**
+
+```bash
+gh api --paginate "orgs/sentania-labs/packages?package_type=container" \
+  --jq '.[].name'
+```
+
+GitHub's default page size is 30; the organisation carries more container
+packages than that, and a call without `--paginate` silently truncates the
+list to the first page. A `chronicle-*` package missing from a truncated
+result reads as "the images were never published" when they were
+published and signed correctly. A newly published package can also take
+time to show up in this aggregate listing at all, paginated or not; when a
+package is missing here but the tag-and-digest lookup above resolves
+cleanly, trust the direct lookup over the listing.
+
+Package visibility on ghcr is independent of the repository's visibility.
+A `ghcr.io/sentania-labs/chronicle-*` package stays private until Scott
+flips it by hand on GitHub; nothing in the release workflow changes it.
+While a package is private, both `docker manifest inspect` and
+`cosign verify` need `docker login ghcr.io` first, with a token carrying
+`read:packages`. Once a package is public, neither call needs a login.
+Check the package's current visibility before assuming either way.
 
 ## House style
 
