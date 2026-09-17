@@ -171,10 +171,10 @@ a `run_id` for the build or GitHub operation behind the action.
 
 The editor labels each reserved action for the account that holds the `ui`
 token, because the UI always calls through that token and can therefore
-always reach the button; the label is not a permissions check on the click
-itself, nothing blocks a click on it. That label bakes a name into the
-rendered page rather than describing the token generically, which is
-tracked as issue #12; it has not changed in this docs round.
+always reach the button. The label is not a permissions check on the
+click itself: nothing blocks a click on it. That label bakes a name into
+the rendered page rather than describing the token generically, which is
+tracked as issue #12.
 
 ## The UI
 
