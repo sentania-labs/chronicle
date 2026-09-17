@@ -39,6 +39,7 @@ from .errors import ApiError, api_error_handler, http_error_handler, validation_
 from .index import SCHEMA_VERSION
 from .routes import build_v1_router
 from .routes.admin import api_router as admin_api_router
+from .routes.admin import cleanup_stale_backup_uploads
 from .routes.admin import router as admin_router
 from .routes.ui import router as ui_router
 
@@ -249,6 +250,11 @@ def _start_services(path: Path) -> tuple[Services, AdminServices, background.Bac
     if services.store.index.schema_version() == SCHEMA_VERSION:
         services.store.reindex()
     admin_services = AdminServices.build(path)
+    # A staged restore upload nobody confirmed (Cancel, a closed tab, a
+    # lost session) has no other expiry; sweep it here so a restart bounds
+    # however many have piled up under state/backup-tmp/, on top of the
+    # sweep backup_page and backup_upload each run on every visit.
+    cleanup_stale_backup_uploads(admin_services)
     if admin_services.credentials.is_claimed():
         log.info("admin: claimed, admin.json present")
     else:

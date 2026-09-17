@@ -13,6 +13,7 @@ import json
 import secrets
 import tarfile
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -538,6 +539,12 @@ def tokens_reenable_ui(
 LAST_BACKUP_FILE_NAME = "last_backup.json"
 BACKUP_TMP_DIR_NAME = "backup-tmp"
 UPLOAD_CHUNK_BYTES = 1 << 20
+# Long enough to fill in the confirm-page form, short enough that an upload
+# abandoned by a Cancel, a closed tab, or a lost session does not sit under
+# state/backup-tmp/ forever. A file older than this is stale by definition:
+# nothing in this flow re-uses a token past the confirm step that follows
+# the upload directly.
+UPLOAD_TTL_SECONDS = 3600
 
 
 def _data_dir(admin: AdminServices) -> Path:
@@ -548,6 +555,23 @@ def _backup_tmp_dir(admin: AdminServices) -> Path:
     tmp_dir = admin.state_dir / BACKUP_TMP_DIR_NAME
     tmp_dir.mkdir(parents=True, exist_ok=True)
     return tmp_dir
+
+
+def cleanup_stale_backup_uploads(admin: AdminServices, now: float | None = None) -> None:
+    """Remove every staged upload older than UPLOAD_TTL_SECONDS.
+
+    Called at api startup (main.py:_start_services) so a restart bounds
+    however much an operator's abandoned uploads have piled up, and again
+    on every visit to the backup page and every new upload, so the sweep
+    also runs without a restart in between.
+    """
+    cutoff = (now if now is not None else time.time()) - UPLOAD_TTL_SECONDS
+    for path in _backup_tmp_dir(admin).glob("upload-*.tar.gz"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+        except OSError:
+            continue
 
 
 def _read_last_backup(admin: AdminServices) -> str | None:
@@ -568,6 +592,7 @@ def _record_last_backup(admin: AdminServices) -> None:
 
 @router.get("/backup", response_class=HTMLResponse)
 def backup_page(admin: AdminServices = Depends(require_admin_session_html)) -> HTMLResponse:
+    cleanup_stale_backup_uploads(admin)
     return HTMLResponse(tpl.backup_page(last_backup=_read_last_backup(admin)))
 
 
@@ -610,6 +635,7 @@ async def backup_upload(
     # backup_restore below.
     from .. import main as main_module
 
+    cleanup_stale_backup_uploads(admin)
     token = secrets.token_hex(16)
     staged_path = _backup_tmp_dir(admin) / f"upload-{token}.tar.gz"
     total = 0
@@ -684,7 +710,10 @@ def backup_restore(
             status_code=400,
         )
     staged_path = _backup_tmp_dir(admin) / f"upload-{token}.tar.gz"
-    if not staged_path.exists():
+    if not staged_path.exists() or (
+        time.time() - staged_path.stat().st_mtime > UPLOAD_TTL_SECONDS
+    ):
+        staged_path.unlink(missing_ok=True)
         return HTMLResponse(
             tpl.backup_page(
                 last_backup=_read_last_backup(admin), notice="upload expired, try again"

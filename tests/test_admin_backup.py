@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ from fastapi.testclient import TestClient
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from chronicle import backup as backup_mod
+from chronicle.api.routes import admin as admin_routes
 from chronicle.api.store import Store
 
 from .conftest import png_bytes
@@ -136,3 +139,46 @@ def test_backup_restore_rejects_a_malformed_token(admin_client: TestClient) -> N
     )
     assert response.status_code == 400
     assert "expired" in response.text.lower()
+
+
+def _age_file(path: Path, seconds_old: float) -> None:
+    stamp = time.time() - seconds_old
+    os.utime(path, (stamp, stamp))
+
+
+def test_backup_page_sweeps_a_stale_upload(admin_client: TestClient, data_dir: Path) -> None:
+    """An upload nobody ever confirmed (Cancel, a closed tab, a lost
+    session) has no other trigger to remove it; visiting the backup page
+    must sweep anything past UPLOAD_TTL_SECONDS so repeated cancellations
+    cannot exhaust the data volume."""
+    tmp_dir = data_dir / "state" / "backup-tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    stale = tmp_dir / "upload-deadbeefdeadbeefdeadbeefdeadbeef.tar.gz"
+    stale.write_bytes(b"stale bundle bytes")
+    _age_file(stale, admin_routes.UPLOAD_TTL_SECONDS + 60)
+
+    fresh = tmp_dir / "upload-00000000000000000000000000000000.tar.gz"
+    fresh.write_bytes(b"fresh bundle bytes")
+
+    response = admin_client.get("/admin/backup")
+    assert response.status_code == 200
+    assert not stale.exists()
+    assert fresh.exists()
+
+
+def test_backup_restore_refuses_an_expired_token_and_removes_the_file(
+    admin_client: TestClient, data_dir: Path
+) -> None:
+    tmp_dir = data_dir / "state" / "backup-tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    token = "deadbeefdeadbeefdeadbeefdeadbeef"
+    staged = tmp_dir / f"upload-{token}.tar.gz"
+    staged.write_bytes(b"stale bundle bytes")
+    _age_file(staged, admin_routes.UPLOAD_TTL_SECONDS + 60)
+
+    response = admin_client.post(
+        "/admin/backup/restore", data={"token": token, "confirm": "restore"}
+    )
+    assert response.status_code == 400
+    assert "expired" in response.text.lower()
+    assert not staged.exists()
