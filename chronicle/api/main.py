@@ -56,10 +56,12 @@ DATA_DIR_ENV = "CHRONICLE_DATA_DIR"
 MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024
 # A restore bundle carries repo/ (with .git history) and every image, easily
 # past the 8 MiB default; /admin/backup/upload is the one route that needs
-# a much larger ceiling. Still bounded, not exempted: the route reads the
-# whole upload into memory (chronicle/api/routes/admin.py:backup_upload), so
-# an unbounded cap would trade the 413 for a memory-exhaustion path even
-# though this route already sits behind an authenticated admin session.
+# a much larger ceiling. Still bounded, not exempted: even though the route
+# now copies the upload to disk in bounded chunks
+# (chronicle/api/routes/admin.py:backup_upload) rather than reading it whole
+# into memory, an unbounded cap would let a single upload exhaust the data
+# volume even though this route already sits behind an authenticated admin
+# session.
 MAX_BACKUP_UPLOAD_BYTES = 512 * 1024 * 1024
 BACKUP_UPLOAD_PATH = "/admin/backup/upload"
 

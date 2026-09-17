@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from fastapi import UploadFile
 from fastapi.testclient import TestClient
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from chronicle import backup as backup_mod
 from chronicle.api.store import Store
@@ -54,6 +57,37 @@ def test_backup_upload_previews_manifest_counts_without_restoring(
     assert "drafts" in response.text
     assert 'name="token"' in response.text
     assert 'name="confirm"' in response.text
+
+
+def test_backup_upload_reads_the_body_in_bounded_chunks(
+    admin_client: TestClient, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`await file.read()` with no size argument materialises the whole
+    upload as one bytes object; the reference deployment's 512 MiB memory
+    limit (examples/k8s/deployment.yaml) makes that an OOM risk for a
+    near-ceiling upload. Every read the route makes must ask for a bounded
+    chunk, never the whole body at once."""
+    _seed_draft(data_dir)
+    bundle = backup_mod.create_backup(data_dir, data_dir.parent / "chunked.tar.gz")
+
+    requested_sizes: list[int] = []
+    original_read = StarletteUploadFile.read
+
+    async def spying_read(self: UploadFile, size: int = -1) -> bytes:
+        requested_sizes.append(size)
+        return await original_read(self, size)
+
+    monkeypatch.setattr(StarletteUploadFile, "read", spying_read)
+
+    with bundle.open("rb") as handle:
+        response = admin_client.post(
+            "/admin/backup/upload", files={"file": ("bundle.tar.gz", handle, "application/gzip")}
+        )
+    assert response.status_code == 200
+    assert requested_sizes, "backup_upload never called file.read"
+    assert all(size > 0 for size in requested_sizes), (
+        f"backup_upload requested an unbounded read: {requested_sizes}"
+    )
 
 
 def test_backup_restore_without_typing_restore_is_refused(admin_client: TestClient) -> None:

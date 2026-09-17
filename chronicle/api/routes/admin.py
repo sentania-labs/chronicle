@@ -537,6 +537,7 @@ def tokens_reenable_ui(
 
 LAST_BACKUP_FILE_NAME = "last_backup.json"
 BACKUP_TMP_DIR_NAME = "backup-tmp"
+UPLOAD_CHUNK_BYTES = 1 << 20
 
 
 def _data_dir(admin: AdminServices) -> Path:
@@ -605,10 +606,36 @@ async def backup_upload(
     """Save the upload and show its manifest counts, without restoring
     anything yet: `backup_restore` below re-validates checksums and member
     safety from scratch, so this preview only ever reads `manifest.json`."""
+    # Deferred import: see the same note on the circular import in
+    # backup_restore below.
+    from .. import main as main_module
+
     token = secrets.token_hex(16)
     staged_path = _backup_tmp_dir(admin) / f"upload-{token}.tar.gz"
-    raw = await file.read()
-    staged_path.write_bytes(raw)
+    total = 0
+    # Copied in bounded chunks, never `await file.read()`: reading the
+    # whole upload into one `bytes` object risks OOMing the api process,
+    # which the reference deployment caps at 512 MiB of memory
+    # (examples/k8s/deployment.yaml) while this route allows uploads
+    # nearly that large. BodySizeLimitMiddleware already rejects an
+    # oversized request before it reaches this route; this loop enforces
+    # the same ceiling again on what actually gets written to disk.
+    with staged_path.open("wb") as out:
+        while True:
+            chunk = await file.read(UPLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > main_module.MAX_BACKUP_UPLOAD_BYTES:
+                out.close()
+                staged_path.unlink(missing_ok=True)
+                return HTMLResponse(
+                    tpl.backup_page(
+                        last_backup=_read_last_backup(admin), notice="upload too large"
+                    ),
+                    status_code=413,
+                )
+            out.write(chunk)
     try:
         with tarfile.open(staged_path, "r:gz") as tar:
             manifest_bytes = tar.extractfile(tar.getmember(backup_mod.MANIFEST_NAME))
