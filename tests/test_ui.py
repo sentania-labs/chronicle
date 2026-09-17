@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from PIL import Image as PillowImage
 
 from chronicle.api.deps import Services
-from chronicle.api.models import DRAFT_STATUSES
+from chronicle.api.models import DRAFT_STATUSES, Post
 
 from .conftest import auth, png_bytes
 
@@ -559,3 +559,116 @@ def test_ui_token_never_appears_in_any_rendered_page(
     for path in pages:
         response = client.get(path)
         assert_no_token_leak(response, ui_token, agent_token)
+
+
+# --- Featured image and pinned url hardening --------------------------
+
+
+def test_imported_feature_image_path_survives_an_unchanged_save(
+    client: TestClient, services: Services
+) -> None:
+    """An imported post's featureImage is a root-relative path recorded as
+    the attached image's source_ref (the C2 source_ref shape), not the
+    image's bare filename. A round C5+ review found the editor's select
+    could only match a bare filename, so it never selected that option, an
+    unchanged submit posted an empty value, and the save route dropped
+    featureImage entirely."""
+    store = services.store
+    slug = "2026-08-01-vcf-operations-can-now-see-my-unifi-network"
+    post_dir = store.site_dir / "content" / "posts"
+    post_dir.mkdir(parents=True, exist_ok=True)
+    (post_dir / f"{slug}.md").write_text(
+        "---\n"
+        "title: VCF Operations Can Now See My Unifi Network\n"
+        "url: /vcf-operations-can-now-see-my-unifi-network/\n"
+        "type: post\n"
+        "date: 2026-08-01\n"
+        "featureImage: /images/vcf-operations-can-now-see-my-unifi-network/featured.png\n"
+        "---\n"
+        "body text\n",
+        encoding="utf-8",
+    )
+    image_dir = store.site_dir / "static" / "images" / "vcf-operations-can-now-see-my-unifi-network"
+    image_dir.mkdir(parents=True)
+    (image_dir / "featured.png").write_bytes(png_bytes())
+
+    post = Post(
+        slug=slug,
+        path=f"content/posts/{slug}.md",
+        title="VCF Operations Can Now See My Unifi Network",
+        date="2026-08-01",
+        sha="realsha",
+    )
+    store.posts_dir.mkdir(parents=True, exist_ok=True)
+    store._write_json(store.posts_dir / f"{slug}.json", post.model_dump(mode="json"))
+    store.index.upsert_post(post)
+
+    draft, warnings = store.create_draft("ghostwriter", from_post=slug)
+    assert warnings == []
+    stored_feature_image = draft.frontmatter["featureImage"]
+    assert stored_feature_image == (
+        "/images/vcf-operations-can-now-see-my-unifi-network/featured.png"
+    )
+
+    editor = client.get(f"/content/drafts/{draft.id}")
+    assert editor.status_code == 200
+    # Selected by the actual attached image record (source_ref match), not
+    # by the no-match fallback option: the fallback also emits
+    # `value="<path>" selected` on its own, so pin the assertion to the
+    # matched option's display text (the real image's filename) to prove
+    # the select actually recognised the attached image.
+    assert f'<option value="{stored_feature_image}" selected>featured.png</option>' in editor.text
+    assert editor.text.count(" selected") == 1
+
+    form = {
+        "base_version": str(draft.version_no),
+        "title": draft.frontmatter["title"],
+        "date": draft.frontmatter["date"],
+        "categories": "",
+        "tags": "",
+        "summary": "",
+        "url": draft.frontmatter["url"],
+        "featureImage": stored_feature_image,
+        "body": draft.body,
+    }
+    response = client.post(f"/content/drafts/{draft.id}/save", data=form)
+    assert response.status_code == 200
+
+    updated = store.get_draft(draft.id)
+    assert updated.frontmatter["featureImage"] == stored_feature_image
+
+
+def test_feature_image_select_prefers_exact_match_over_basename_collision(
+    client: TestClient, services: Services
+) -> None:
+    """Two attached images can share a basename (one image's filename
+    equals another image's source_ref basename). Only the exact match may
+    ever render `selected`, so the ambiguous option keeps its own filename
+    as its value and stays choosable."""
+    store = services.store
+    draft, _warnings = store.create_draft("scott")
+    store.save_draft(
+        draft.id,
+        "scott",
+        draft.version_no,
+        {"title": "Collision", "featureImage": "featured.png"},
+        "body",
+    )
+    image_a, _ = store.put_image(png_bytes((1, 2, 3)), "featured.png")
+    store.attach_image(draft.id, image_a.image_id, "feature", "scott")
+    image_b, _ = store.put_image(png_bytes((4, 5, 6)), "hero.png")
+    store.attach_image(draft.id, image_b.image_id, "inline", "scott")
+    draft = store.get_draft(draft.id)
+    # Force a source_ref collision: image_b's recorded reference basename
+    # matches image_a's filename, without touching either's own filename.
+    for img in draft.images:
+        if img.image_id == image_b.image_id:
+            img.source_ref = "/images/elsewhere/featured.png"
+    store._write_json(store._draft_path(draft.id), draft.model_dump(mode="json"))
+    store.index.upsert_draft(draft)
+
+    editor = client.get(f"/content/drafts/{draft.id}")
+    assert editor.status_code == 200
+    assert '<option value="featured.png" selected>featured.png</option>' in editor.text
+    assert '<option value="hero.png">hero.png</option>' in editor.text
+    assert editor.text.count(" selected") == 1

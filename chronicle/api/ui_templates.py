@@ -12,6 +12,7 @@ the visitor's own browser, not from anything the server renders).
 from __future__ import annotations
 
 from html import escape
+from posixpath import basename
 from typing import Any
 
 from .transitions import DRAFT_TRANSITIONS, RESERVED_ACTIONS
@@ -264,12 +265,55 @@ def _frontmatter_fields(
         if slug
         else f'<input type="text" id="url" name="url" value="{val("url")}">'
     )
+    stored_feature = frontmatter.get("featureImage")
+    stored_feature = stored_feature if isinstance(stored_feature, str) else ""
+
+    def _feature_rank(img: dict[str, Any]) -> int | None:
+        # An imported post's featureImage is a root-relative path recorded
+        # as the image's source_ref (the C2 source_ref shape), not the bare
+        # filename, so a bare-filename match alone would never select it.
+        # Ranked so an exact match (filename or source_ref) always wins over
+        # a basename-only match: two images can share a basename (a
+        # dedup-kept filename versus another image's source_ref), and only
+        # one option may ever come back `selected`.
+        if not stored_feature:
+            return None
+        if stored_feature == img["filename"]:
+            return 0
+        source_ref = img.get("source_ref")
+        if not source_ref:
+            return None
+        if stored_feature == source_ref:
+            return 0
+        if basename(stored_feature) == basename(source_ref):
+            return 1
+        return None
+
+    ranked = [(img, r) for img in images for r in [_feature_rank(img)] if r is not None]
+    matched: set[str] = set()
+    if ranked:
+        best_rank = min(r for _, r in ranked)
+        # Still ambiguous at the best rank (e.g. two images sharing a
+        # filename): keep only the first, so at most one option ever
+        # renders `selected`.
+        best_img = next(img for img, r in ranked if r == best_rank)
+        matched = {best_img["image_id"]}
     feature_options = "".join(
-        f'<option value="{escape(img["filename"])}"'
-        + (" selected" if frontmatter.get("featureImage") == img["filename"] else "")
+        # A matched option's value is the draft's own stored string, not the
+        # bare filename, so resubmitting the form unchanged round-trips the
+        # original path byte for byte instead of collapsing it to a filename.
+        f'<option value="{escape(stored_feature if img["image_id"] in matched else img["filename"])}"'
+        + (" selected" if img["image_id"] in matched else "")
         + f">{escape(img['filename'])}</option>"
         for img in images
     )
+    if stored_feature and not matched:
+        # No attached image represents this value (e.g. detached since
+        # import): keep it selectable and preserved rather than silently
+        # falling back to "none" and losing it on the next save.
+        feature_options += (
+            f'<option value="{escape(stored_feature)}" selected>{escape(stored_feature)}</option>'
+        )
     return f"""
 <label for="title">Title</label>
 <input type="text" id="title" name="title" value="{val("title")}" required>
