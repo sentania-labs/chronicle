@@ -157,6 +157,21 @@ def test_restore_removes_a_state_file_the_bundle_omits(tmp_path: Path) -> None:
     assert not (fresh_dir / "state" / "admin.json").exists()
 
 
+def test_restore_refuses_a_manifest_symlink(tmp_path: Path) -> None:
+    """manifest.json must go through the same symlink/hardlink refusal as
+    every other member; the early return for the root entries ("" and ".")
+    must never also cover it."""
+    data_dir = tmp_path / "data"
+    _seed(data_dir).close()
+    bundle = backup.create_backup(data_dir, tmp_path / "out")
+
+    tampered = tmp_path / "manifest-symlink.tar.gz"
+    _make_manifest_a_symlink(bundle, tampered, "state/tokens.json")
+
+    with pytest.raises(backup.BackupError, match="symlink"):
+        backup.restore_backup(tmp_path / "fresh7", tampered)
+
+
 def test_restore_initialises_git_when_bundle_repo_has_none(tmp_path: Path) -> None:
     """The hand-built import bundle case (docs/backup.md): a bundle may
     arrive with no .git at all, and restore gives it one commit authored
@@ -213,6 +228,18 @@ def _rewrite_manifest_schema_version(src: Path, dest: Path, version: int) -> Non
                 info = tarfile.TarInfo(name="manifest.json")
                 info.size = len(content)
                 tar_out.addfile(info, __import__("io").BytesIO(content))
+            else:
+                tar_out.addfile(member, tar_in.extractfile(member))
+
+
+def _make_manifest_a_symlink(src: Path, dest: Path, target: str) -> None:
+    with tarfile.open(src, "r:gz") as tar_in, tarfile.open(dest, "w:gz") as tar_out:
+        for member in tar_in.getmembers():
+            if member.name == "manifest.json":
+                info = tarfile.TarInfo(name="manifest.json")
+                info.type = tarfile.SYMTYPE
+                info.linkname = target
+                tar_out.addfile(info)
             else:
                 tar_out.addfile(member, tar_in.extractfile(member))
 

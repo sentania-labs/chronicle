@@ -186,10 +186,13 @@ def _safe_member(member: tarfile.TarInfo, staging: Path) -> Path:
     A round C6 review target on its own: an absolute path, a `..` segment,
     or a symlink/hardlink member in a bundle from an untrusted or corrupted
     source must never be extracted, because tarfile's own `extractall`
-    follows exactly none of these checks by default.
+    follows exactly none of these checks by default. `manifest.json` is not
+    exempt from any of this: a bundle naming it as a symlink or hardlink
+    must be refused exactly like any other member, so only the root entry
+    names ("" and ".") skip straight to a path.
     """
     name = member.name
-    if name in ("", ".", MANIFEST_NAME):
+    if name in ("", "."):
         return staging / name
     if os.path.isabs(name) or ".." in Path(name).parts:
         raise BackupError(f"refusing unsafe bundle member path {name!r}")
