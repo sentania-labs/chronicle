@@ -1,0 +1,159 @@
+"""convert.py: frontmatter order, filename/url rules, image reference rewriting."""
+
+from __future__ import annotations
+
+import pytest
+
+from chronicle.api import convert
+from chronicle.api.models import Draft, DraftImage, now_stamp
+
+
+def _draft(**overrides: object) -> Draft:
+    defaults: dict[str, object] = {
+        "id": "d1",
+        "created_at": now_stamp(),
+        "updated_at": now_stamp(),
+        "slug": "my-post",
+        "title": "My Post",
+        "frontmatter": {"title": "My Post", "date": "2026-08-01T09:00:00-05:00"},
+        "body": "hello",
+        "images": [],
+        "source_post": None,
+    }
+    defaults.update(overrides)
+    return Draft.model_validate(defaults)
+
+
+def test_frontmatter_is_rendered_in_allowlist_order_with_draft_forced_false() -> None:
+    draft = _draft(frontmatter={"tags": ["a"], "title": "My Post", "date": "2026-08-01"})
+    converted = convert.convert(draft)
+    lines = [line for line in converted.text.splitlines() if ":" in line]
+    keys = [line.split(":", 1)[0] for line in lines]
+    assert keys.index("title") < keys.index("date") < keys.index("tags")
+    assert "draft: false" in converted.text
+
+
+def test_new_draft_gets_dated_filename_and_dated_url() -> None:
+    draft = _draft()
+    converted = convert.convert(draft)
+    assert converted.post_path == "content/posts/2026-08-01-my-post.md"
+    assert converted.url == "/2026/08/my-post/"
+
+
+def test_new_draft_with_no_date_uses_today() -> None:
+    draft = _draft(frontmatter={"title": "My Post"})
+    converted = convert.convert(draft)
+    assert converted.post_path.startswith("content/posts/")
+    assert converted.post_path.endswith("-my-post.md")
+
+
+def test_imported_draft_keeps_its_original_path_and_url() -> None:
+    draft = _draft(
+        frontmatter={"title": "My Post", "date": "2024-03-03", "url": "/2024/03/03/my-post/"},
+        source_post={"slug": "my-post", "path": "content/posts/my-post.md", "sha": "abc"},
+    )
+    converted = convert.convert(draft)
+    assert converted.post_path == "content/posts/my-post.md"
+    assert converted.url == "/2024/03/03/my-post/"
+
+
+def test_imported_draft_path_outside_posts_dir_is_not_trusted() -> None:
+    draft = _draft(
+        frontmatter={"title": "My Post", "date": "2024-03-03"},
+        source_post={"slug": "x", "path": "../../etc/passwd", "sha": "abc"},
+    )
+    converted = convert.convert(draft)
+    assert converted.post_path == "content/posts/2024-03-03-my-post.md"
+
+
+def test_missing_slug_raises() -> None:
+    draft = _draft(slug=None)
+    with pytest.raises(convert.ConversionError):
+        convert.convert(draft)
+
+
+def test_missing_title_raises() -> None:
+    draft = _draft(frontmatter={"date": "2026-08-01"})
+    with pytest.raises(convert.ConversionError):
+        convert.convert(draft)
+
+
+def test_markdown_image_reference_rewritten_by_source_ref() -> None:
+    draft = _draft(
+        body="see ![alt](content/posts/images/featured.png) here",
+        images=[
+            DraftImage(
+                image_id="img1",
+                filename="featured.png",
+                role="feature",
+                source_ref="content/posts/images/featured.png",
+            )
+        ],
+    )
+    converted = convert.convert(draft)
+    assert "/images/my-post/featured.png" in converted.text
+    assert "content/posts/images/featured.png" not in converted.text
+
+
+def test_html_img_tag_reference_rewritten() -> None:
+    draft = _draft(
+        body='<img src="images/inline.png" alt="x">',
+        images=[
+            DraftImage(
+                image_id="img2",
+                filename="inline.png",
+                role="inline",
+                source_ref="images/inline.png",
+            )
+        ],
+    )
+    converted = convert.convert(draft)
+    assert "/images/my-post/inline.png" in converted.text
+
+
+def test_frontmatter_image_field_is_rewritten() -> None:
+    draft = _draft(
+        frontmatter={
+            "title": "My Post",
+            "date": "2026-08-01",
+            "featureImage": "content/posts/images/featured.png",
+        },
+        images=[
+            DraftImage(
+                image_id="img1",
+                filename="featured.png",
+                role="feature",
+                source_ref="content/posts/images/featured.png",
+            )
+        ],
+    )
+    converted = convert.convert(draft)
+    assert "featureImage: /images/my-post/featured.png" in converted.text
+
+
+def test_freshly_uploaded_image_with_no_source_ref_matches_by_filename() -> None:
+    draft = _draft(
+        body="![alt](fresh.png)",
+        images=[DraftImage(image_id="img3", filename="fresh.png", role="inline", source_ref=None)],
+    )
+    converted = convert.convert(draft)
+    assert "/images/my-post/fresh.png" in converted.text
+
+
+def test_absolute_and_data_uri_references_are_left_alone() -> None:
+    draft = _draft(
+        body="![a](https://example.com/x.png) ![b](data:image/png;base64,abc)",
+        images=[],
+    )
+    converted = convert.convert(draft)
+    assert "https://example.com/x.png" in converted.text
+    assert "data:image/png;base64,abc" in converted.text
+
+
+def test_image_placements_point_at_static_images_slug() -> None:
+    draft = _draft(
+        images=[DraftImage(image_id="img4", filename="pic.png", role="inline", source_ref=None)]
+    )
+    converted = convert.convert(draft)
+    assert converted.images[0].site_path == "static/images/my-post/pic.png"
+    assert converted.images[0].url == "/images/my-post/pic.png"

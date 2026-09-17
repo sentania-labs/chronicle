@@ -30,7 +30,12 @@ DEFAULT_POLL_SECONDS = 5.0
 DEFAULT_LEASE_SECONDS = 900.0
 DEFAULT_BUILD_TIMEOUT_SECONDS = 600.0
 DEFAULT_HUGO_BIN = "hugo"
-WORK_DIR_NAME = ".work"
+# Under `data/`, not `data/preview/`: the preview container mounts only the
+# preview volume, and a scratch tree holding a full site clone plus Hugo's
+# resource cache has no business being reachable through it even by
+# accident (ADR 011). It shares the data volume the builder already has
+# write access to, so no new volume is needed.
+WORK_DIR_NAME = "builder-work"
 
 
 def _float_env(name: str, default: float) -> float:
@@ -71,9 +76,7 @@ class BuilderSettings:
         if not raw_data_dir:
             raise SystemExit(f"{DATA_DIR_ENV} is not set")
         data_dir = Path(raw_data_dir)
-        work_dir = Path(
-            os.environ.get(WORK_DIR_ENV, "").strip() or data_dir / "preview" / WORK_DIR_NAME
-        )
+        work_dir = Path(os.environ.get(WORK_DIR_ENV, "").strip() or data_dir / WORK_DIR_NAME)
         return cls(
             data_dir=data_dir,
             external_url=os.environ.get(EXTERNAL_URL_ENV, DEFAULT_EXTERNAL_URL).rstrip("/"),
