@@ -52,16 +52,25 @@ def _clone_url(admin: AdminServices | None) -> tuple[str, str | None, str | None
     `_auth_env`) rather than embedding it in the URL, which is what git
     would otherwise persist into `remote.origin.url`.
     """
+    settings_url: str | None = None
+    fallback_token: str | None = None
     if admin is not None:
         record = admin.github_store.load()
         if record is not None and record.owner_repo and record.installation_id:
             token = _installation_token(admin, record.installation_id)
             return f"https://github.com/{record.owner_repo}.git", record.default_branch, token
         settings_url = admin.settings.digest_repo_url
-    else:
-        settings_url = None
+        # Test-token mode (ADR 012) has no GitHub App record to mint an
+        # installation token from, but CHRONICLE_DIGEST_REPO_URL can still
+        # name the same private repo the test token acts against (the C4
+        # live check's own shape: chronicle-target is private); passing the
+        # test token here is what makes that clone succeed instead of
+        # falling back to an anonymous fetch that a private repo refuses.
+        fallback_token = (
+            admin.settings.github_test_token if admin.settings.test_token_mode else None
+        )
     if settings_url:
-        return settings_url, None, None
+        return settings_url, None, fallback_token
     raise DigestNotConfigured(
         "no GitHub App repository is configured and CHRONICLE_DIGEST_REPO_URL is not set"
     )
@@ -74,6 +83,40 @@ def _installation_token(admin: AdminServices, installation_id: str) -> str:
     minted = admin.github_client.mint_installation_token(app_jwt, installation_id)
     token: str = minted["token"]
     return token
+
+
+def refresh_from_target(
+    store: Store, target: Any, actor: str, admin: AdminServices | None = None
+) -> None:
+    """Fetch a repo target's default branch and apply the digest.
+
+    Shared by the watcher (a merge just landed) and reconciliation (spec
+    section 12): both already hold a `publisher.RepoTarget` from resolving
+    the same GitHub App or test-token configuration `run()` above resolves
+    on its own, so this skips `_clone_url` and takes the repo URL, default
+    branch, and token straight from it instead of re-deriving them.
+
+    `admin`, when given, also parses and writes toolchain state the same
+    way the manual digest path does (round C4 review, P2): scheduled and
+    post-merge reconciliation both call this with `admin` set, so a Hugo
+    version or theme submodule change on main is reflected without waiting
+    for someone to run a manual digest. The watcher's own call (right after
+    observing a merge, before reconciliation runs again) omits `admin`,
+    since the reconcile pass that follows the same merge covers it.
+    """
+    token = target.token_provider() if target.token_provider else None
+    digest_mod.clone_or_update(store.site_dir, target.repo_url, target.default_branch, token=token)
+    discovered = digest_mod.discover_posts(store.site_dir)
+    posts = [
+        Post(slug=item.slug, path=item.path, title=item.title, date=item.date, sha=item.sha)
+        for item in discovered
+    ]
+    store.apply_digest(actor, posts)
+    if admin is not None:
+        toolchain = digest_mod.parse_toolchain(store.site_dir)
+        admin.write_toolchain(
+            {"hugo_version": toolchain.hugo_version, "submodules": toolchain.submodules}
+        )
 
 
 def run(store: Store, actor: str, admin: AdminServices | None = None) -> DigestSummary:

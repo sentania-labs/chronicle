@@ -12,8 +12,12 @@ from .deps import Services
 from .github_app import readiness_state
 from .index import SCHEMA_VERSION
 from .models import DRAFT_STATUSES, RUN_STATUSES, SUBMISSION_STATUSES
+from .reconcile import APPLICABLE_RESOLUTIONS
 
 BUILDER_HEARTBEAT_PATH = ("state", "builder", "heartbeat.json")
+PUBLISHER_HEARTBEAT_PATH = ("state", "publisher", "heartbeat.json")
+WATCHER_HEARTBEAT_PATH = ("state", "watcher", "heartbeat.json")
+RECONCILE_HEARTBEAT_PATH = ("state", "reconcile", "heartbeat.json")
 
 
 def _dir_size(path: Path) -> int:
@@ -47,9 +51,21 @@ def git_health(repo_dir: Path) -> str:
     return "clean, HEAD resolves"
 
 
-def toolchain_summary(admin: AdminServices) -> dict[str, Any]:
+def toolchain_summary(admin: AdminServices, heartbeat: dict[str, Any] | None) -> dict[str, Any]:
+    """The builder's actual Hugo version, from its heartbeat when one exists.
+
+    C3 noticed this compared the site's toolchain against
+    `CHRONICLE_BUILDER_HUGO_VERSION`, a value set once at deploy time, not
+    against what the builder container actually reports it is running;
+    the heartbeat is what `runner.write_heartbeat` stamps from
+    `hugo.installed_version` every poll tick, so it reflects a rebuilt
+    image immediately. The env var is now only a fallback for a builder
+    that has never completed a single poll loop.
+    """
     stored = admin.read_toolchain() or {"hugo_version": "unknown", "submodules": []}
-    builder_version = admin.settings.builder_hugo_version
+    builder_version = (
+        heartbeat.get("hugo_version") if heartbeat else None
+    ) or admin.settings.builder_hugo_version
     site_version = stored.get("hugo_version", "unknown")
     match = builder_version != "unknown" and builder_version == site_version
     return {
@@ -60,13 +76,41 @@ def toolchain_summary(admin: AdminServices) -> dict[str, Any]:
     }
 
 
-def builder_heartbeat(data_dir: Path) -> dict[str, Any] | None:
-    path = data_dir.joinpath(*BUILDER_HEARTBEAT_PATH)
+def _read_heartbeat(data_dir: Path, path_parts: tuple[str, ...]) -> dict[str, Any] | None:
+    path = data_dir.joinpath(*path_parts)
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     return dict(loaded)
+
+
+def builder_heartbeat(data_dir: Path) -> dict[str, Any] | None:
+    return _read_heartbeat(data_dir, BUILDER_HEARTBEAT_PATH)
+
+
+def publisher_heartbeat(data_dir: Path) -> dict[str, Any] | None:
+    return _read_heartbeat(data_dir, PUBLISHER_HEARTBEAT_PATH)
+
+
+def watcher_heartbeat(data_dir: Path) -> dict[str, Any] | None:
+    return _read_heartbeat(data_dir, WATCHER_HEARTBEAT_PATH)
+
+
+def reconcile_heartbeat(data_dir: Path) -> dict[str, Any] | None:
+    return _read_heartbeat(data_dir, RECONCILE_HEARTBEAT_PATH)
+
+
+def github_app_state(admin: AdminServices) -> str:
+    """`readiness_state`, unless test-token mode is active (ADR 012).
+
+    Test-token mode never touches `github-app.json`, so `readiness_state`
+    would otherwise honestly (and misleadingly) say "not configured" while
+    publish, watch, and reconcile are all working against a real repo.
+    """
+    if admin.settings.test_token_mode:
+        return "test token mode"
+    return readiness_state(admin.github_store.load())
 
 
 def preview_run_counts(services: Services) -> dict[str, int]:
@@ -78,6 +122,7 @@ def build_status(admin: AdminServices, services: Services) -> dict[str, Any]:
     store = services.store
     app_record = admin.github_store.load()
     digest_status = admin.read_digest_status()
+    builder_hb = builder_heartbeat(store.data_dir)
 
     submissions_by_status = {
         status: len(store.list_submissions(status)) for status in SUBMISSION_STATUSES
@@ -92,19 +137,29 @@ def build_status(admin: AdminServices, services: Services) -> dict[str, Any]:
         "site": _human(_dir_size(store.site_dir)),
     }
 
+    open_flags = []
+    for flag in store.list_flags(resolved=False):
+        row = flag.model_dump(mode="json")
+        row["applicable_resolutions"] = list(APPLICABLE_RESOLUTIONS.get(flag.type, ("ignore",)))
+        open_flags.append(row)
+
     return {
-        "github_app_state": readiness_state(app_record),
-        "github_repo": app_record.owner_repo if app_record else None,
+        "github_app_state": github_app_state(admin),
+        "github_repo": app_record.owner_repo if app_record else admin.settings.github_test_repo,
         "github_default_branch": app_record.default_branch if app_record else None,
         "last_digest_at": digest_status.get("finished_at") if digest_status else None,
         "post_count": len(store.list_posts()),
-        "toolchain": toolchain_summary(admin),
+        "toolchain": toolchain_summary(admin, builder_hb),
         "submissions_by_status": submissions_by_status,
         "drafts_by_status": drafts_by_status,
         "disk_use": disk_use,
         "git_health": git_health(store.repo_dir),
         "index_schema_version": SCHEMA_VERSION,
         "digest_running": admin.digest_running,
-        "builder_heartbeat": builder_heartbeat(store.data_dir),
+        "builder_heartbeat": builder_hb,
+        "publisher_heartbeat": publisher_heartbeat(store.data_dir),
+        "watcher_heartbeat": watcher_heartbeat(store.data_dir),
+        "reconcile_heartbeat": reconcile_heartbeat(store.data_dir),
         "preview_runs_by_status": preview_run_counts(services),
+        "reconcile_flags": open_flags,
     }

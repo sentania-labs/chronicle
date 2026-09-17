@@ -45,6 +45,12 @@ DRAFT_TRANSITIONS: dict[tuple[str, str], Transition] = {
     ("in_review", "preview"): Transition("in_review", run_kind="preview"),
     ("previewed", "preview"): Transition("previewed", run_kind="preview"),
     ("in_review", "approve"): Transition("approved", actor=UI_ACTOR, run_kind="publish"),
+    # A re-approve: the previous publish run failed (see PUBLISH_RUN_FAILED
+    # below) or the draft is simply approved again with no publish PR open
+    # and no run in flight. `Store.act_on_draft` enforces the "no open PR,
+    # no run in flight" half of that (not expressible as a status-keyed
+    # table lookup), this table only says the status itself allows it.
+    ("approved", "approve"): Transition("approved", actor=UI_ACTOR, run_kind="publish"),
     ("in_review", "request_revision"): Transition(
         "revision_requested", actor=UI_ACTOR, feedback_required=True
     ),
@@ -66,11 +72,45 @@ DRAFT_TRANSITIONS: dict[tuple[str, str], Transition] = {
 # rejected, or saved back into `drafting`, while its build ran must not be
 # dragged into `previewed` by a build that finished afterwards.
 PREVIEW_SUCCEEDED = "preview_succeeded"
+# A publish run failed after `approve` already moved the draft to `approved`
+# (a transient GitHub error, a conversion failure): this is what makes the
+# draft retryable again, since `approved` otherwise has no outgoing action
+# left once its one publish run has failed (round C4 review, P1).
+PUBLISH_RUN_FAILED = "publish_failed"
 
 RUN_OUTCOME_TRANSITIONS: dict[tuple[str, str], Transition] = {
     ("drafting", PREVIEW_SUCCEEDED): Transition("previewed"),
     ("in_review", PREVIEW_SUCCEEDED): Transition("previewed"),
     ("previewed", PREVIEW_SUCCEEDED): Transition("previewed"),
+    ("approved", PUBLISH_RUN_FAILED): Transition("in_review"),
+}
+
+# What an observed PR outcome does to the draft that opened it (spec section
+# 9's merge watch and close-without-merge). Keyed by (from_status, event), not
+# by run kind: `approve` only ever opens a PR from `approved`, and `unpublish`
+# only ever opens one from `published`, so the two publish/unpublish cases
+# never collide on the same from_status even though both events are named
+# "merged". Same shape as RUN_OUTCOME_TRANSITIONS: no actor check (the
+# watcher is not a consumer token), and a status this table has no entry for
+# is left exactly as it is (a draft revised or rejected again while its PR
+# was still open must not be dragged back by a merge the watcher only now
+# noticed).
+WATCH_TRANSITIONS: dict[tuple[str, str], Transition] = {
+    ("approved", "merged"): Transition("published"),
+    ("published", "merged"): Transition("unpublished"),
+    ("approved", "closed"): Transition("in_review"),
+    ("published", "closed"): Transition("in_review"),
+}
+
+# A reconciliation resolution (spec section 12) is an explicit admin
+# override of a data-integrity mismatch, not a normal action gated by the
+# draft's current status, so it names the resulting status directly rather
+# than keying off (from_status, action) the way DRAFT_TRANSITIONS does.
+# `import_as_draft` and `ignore` are not status changes at all: the first
+# creates a new draft (Store.create_draft), the second touches nothing.
+RECONCILE_STATUS: dict[str, str] = {
+    "mark_published": "published",
+    "mark_unpublished": "unpublished",
 }
 
 SUBMISSION_TRANSITIONS: dict[tuple[str, str], Transition] = {
@@ -117,6 +157,11 @@ def resolve_submission(status: str, action: str) -> Transition:
 def resolve_run_outcome(status: str, outcome: str) -> Transition | None:
     """The status change a finished run implies, or None to leave it alone."""
     return RUN_OUTCOME_TRANSITIONS.get((status, outcome))
+
+
+def resolve_watch(status: str, event: str) -> Transition | None:
+    """The status change an observed PR outcome implies, or None to leave it alone."""
+    return WATCH_TRANSITIONS.get((status, event))
 
 
 def resolve_save(status: str) -> Transition | None:

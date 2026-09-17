@@ -143,33 +143,87 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   would truncate the same inode `data/site` uses (found live: this is
   exactly what silently corrupted the digest's clone before the round C3
   review caught it).
+- **`store.remove_post` is not digest with a delete bolted on.** Digest
+  never removes a `Post` record (spec's own rule, enforced in
+  `apply_digest`); `remove_post` exists solely for the one caller that
+  isn't heuristic, the watcher's confirmed `unpublish` merge, where
+  Chronicle caused the removal itself and knows so with certainty.
+  Reconciliation's `post_removed_without_unpublish` flag is the heuristic
+  version of the same fact for everything else, and it never deletes
+  anything; the two must never call each other.
+- **A `github`-authored write never implies a status change.**
+  `Store.record_github_version` (content drift) and the feedback entry
+  `observe_pr_outcome` writes on a closed-without-merge PR both attribute
+  to `"github"` regardless of which process actor (the watcher, the
+  reconcile loop) observed the fact, and neither touches `draft.status`
+  outside what `transitions.WATCH_TRANSITIONS` already decides. Confusing
+  the acting process with the record's author would misattribute a change
+  Scott made directly on GitHub to a robot.
+- **`GitHubRepoOps.get_commit` is not on the spec's literal call list.**
+  Resolving `create_tree`'s `base_tree` needs the base commit's tree sha,
+  and `get_ref` alone returns only the commit sha; `get_commit` is the one
+  call every publish and reconcile run makes to bridge that gap (ADR 012).
 
-## Round C3 status
+## Round C4 status
 
-The preview build is real: `chronicle/builder/main.py` polls the run queue,
-claims one `preview` run at a time with a lease (`chronicle/builder/
-leases.py`, ADR 011), converts the draft with `chronicle/api/convert.py`
-(shared with the publish path C4 will add), builds it with Hugo, and
-atomically swaps the output into `data/preview/<slug>/`. `chronicle/
-preview/main.py` serves it at `/preview/<slug>/...` (ADR 010). Publish
-itself (opening a PR from an approved draft, watching for its merge) is
-still C4 and C5: `approve` and `unpublish` still only write a run record
-and a queue entry. No reconciler yet.
+Publish, unpublish, merge watch, and reconciliation are all real. A
+publisher thread and a watcher thread run inside the api process alongside
+the request handlers (ADR 013, `chronicle/api/background.py`); neither
+needs the builder's Hugo toolchain, so neither lives in the builder
+container.
 
-A fresh named volume (or PVC) comes up owned by uid 1000 now: the
-Dockerfile creates and chowns `/data`, `/data/preview`, and
-`/data/builder-work` before `USER 1000` in every stage that mounts them,
-and the builder checks both paths are writable every tick rather than
-claiming and burning a run against a wrongly-owned mount (see
-`chronicle/builder/runner.py`'s `check_writable` and the `preview_writable`
-heartbeat field). `make compose-smoke` (`ci/compose-smoke.sh`) proves the
-whole path against fresh volumes end to end.
+- **Publish/unpublish** (`chronicle/api/publisher.py`): claims `publish`
+  and `unpublish` queue entries the builder's own claim never looks at,
+  builds one commit through the git data API (blob, tree, commit, ref),
+  and opens or updates a PR. `GitHubRepoOps` (`chronicle/api/
+  github_client.py`) is the narrow interface this and the watcher use;
+  `AppRepoOps` is production, `TestRepoOps` is test-only (ADR 012). What a
+  successful run wrote lands on `Draft.published` (branch, PR number and
+  URL, commit sha, post path, url, date, the image list, and the post
+  file's own blob sha), which unpublish and reconciliation's
+  `content_drift` check both read back rather than recomputing.
+- **Merge watch** (`chronicle/api/watcher.py`): polls `data/repo/watch/`
+  (one file per draft with an open Chronicle PR, so a restart resumes),
+  backing off from `CHRONICLE_WATCH_POLL_SECONDS` toward
+  `CHRONICLE_WATCH_POLL_MAX_SECONDS` while nothing is open. A merge deletes
+  the branch, refreshes `data/site/` and post records (`digest_runner.
+  refresh_from_target`), and moves the draft to `published` or
+  `unpublished` through `transitions.WATCH_TRANSITIONS`; a close without a
+  merge moves it to `in_review` with a `github`-authored feedback entry.
+- **Reconciliation** (`chronicle/api/reconcile.py`): runs at startup,
+  hourly, and right after an observed merge. Computes the five flags in
+  spec section 12 and persists them under `data/repo/reconcile/`, never
+  correcting anything on its own conclusion (ADR 005); `content_drift` is
+  the one exception that writes without an admin's say-so, and it only
+  ever adds a `github`-authored version, never changes a status. The admin
+  status page lists open flags with the resolutions that apply to each
+  type (`reconcile.APPLICABLE_RESOLUTIONS`).
+- **Test-token mode** (ADR 012): `CHRONICLE_GITHUB_TEST_TOKEN` plus
+  `CHRONICLE_ALLOW_TEST_TOKEN=1` runs the whole publish/watch/reconcile
+  path against a real repository named by `CHRONICLE_GITHUB_TEST_REPO`
+  with a bearer token instead of a GitHub App installation. Test only:
+  never mentioned in `examples/k8s/`. The standing target for this and
+  future live checks is the private throwaway repo
+  `sentania-labs/chronicle-target` (seeded by Adolin, two fixture posts,
+  Hugo 0.164.0, no theme), not the real blog.
+
+The preview build (C3) is unchanged: `chronicle/builder/main.py` still
+polls the queue for `preview` runs only.
 
 ### Not done, noticed
 
-`ci/compose-smoke.sh` is not wired into CI this round: the runners have no
-fixture blog repo or GitHub App to digest against, and building that out is
-its own piece of work for C6, not a fresh-volume fix.
+- `ci/compose-smoke.sh` is not wired into CI: the runners have no fixture
+  blog repo or GitHub App to digest against (carried over from C3; still
+  C6's problem, not a C4 fix).
+- This round assumes a single api replica (ADR 013): the publisher has no
+  lease the way the builder does, because nothing today runs more than one
+  api process against the same data directory. A second replica needs that
+  discipline added, not a redesign.
+- Reconciliation's `slug_drift` and `content_drift` flags offer only
+  `ignore` as a resolution; nothing here rewrites a draft's pinned slug or
+  reconverts it to match what landed on main by hand. That is a deliberate
+  scope cut (spec section 12 does not ask for an automated fix, only a
+  flag), not an oversight.
 
 ## Maintaining this file
 

@@ -124,6 +124,14 @@ class Draft(BaseModel):
     source_post: dict[str, str] | None = None
     images: list[DraftImage] = []
     claim: Claim | None = None
+    # What the last successful publish or unpublish run actually wrote
+    # (branch, PR number and URL, the commit sha, the post's path and url,
+    # the stamped date, the exact image site-paths placed, and the post
+    # file's own blob sha). Unpublish needs this to know precisely what to
+    # delete without recomputing it from the draft's current state,
+    # reconciliation's content_drift check compares against post_blob_sha,
+    # and republish reads date from here to keep it stable (spec section 9).
+    published: dict[str, Any] | None = None
 
 
 class Version(BaseModel):
@@ -184,6 +192,65 @@ class Run(BaseModel):
     # so a `preview_succeeded` transition can be skipped when the draft has
     # since moved on to a newer version the build never saw (round C3 review).
     built_version: int | None = None
+
+
+class WatchEntry(BaseModel):
+    """One open Chronicle-opened PR the watcher is polling (ADR 013).
+
+    Persisted at `data/repo/watch/<draft_id>.json`, one per draft: an
+    idempotent re-run of `approve` or `unpublish` resets the same branch and
+    updates the same PR rather than opening a second, so a draft never has
+    more than one Chronicle PR open at a time.
+    """
+
+    draft_id: str
+    kind: str  # "publish" | "unpublish"
+    branch: str
+    pr_number: int
+    pr_url: str
+    created_at: str
+    poll_interval_seconds: float | None = None
+    # The draft's `version_no` this run actually converted (`Run.built_version`,
+    # stamped by `Store.start_run`). Checked against the draft's current
+    # version when the PR merges, so a save made while the PR was still open
+    # is not silently reported as published (round C4 review, P1). None for
+    # `unpublish`, which never needs it.
+    built_version: int | None = None
+
+
+RECONCILE_FLAG_TYPES = (
+    "draft_published_missing_on_main",
+    "post_on_main_without_published_draft",
+    "post_removed_without_unpublish",
+    "slug_drift",
+    "content_drift",
+)
+RECONCILE_RESOLUTIONS = ("mark_published", "mark_unpublished", "import_as_draft", "ignore")
+
+
+class ReconcileFlag(BaseModel):
+    """A mismatch between main and Chronicle's records (spec section 12, ADR 005).
+
+    Flags only, never a correction: nothing here changes a draft or a post
+    record on its own; `Store.resolve_flag` only acts once an admin picks a
+    resolution.
+    """
+
+    id: str
+    type: str
+    created_at: str
+    slug: str | None = None
+    draft_id: str | None = None
+    detail: str = ""
+    # The main blob sha a `content_drift` flag was raised against, so
+    # resolving it `ignore` can record exactly what was acknowledged
+    # (`Store.resolve_flag`) rather than re-deriving it from `detail` text.
+    # None for every other flag type.
+    main_sha: str | None = None
+    resolved: bool = False
+    resolution: str | None = None
+    resolved_at: str | None = None
+    resolved_by: str | None = None
 
 
 class Event(BaseModel):

@@ -147,6 +147,33 @@ def test_digest_without_any_source_configured_fails_honestly(
         run_digest(store, "chronicle", admin)
 
 
+def test_digest_repo_url_carries_the_test_token_in_test_token_mode(
+    tmp_path: Path, blog_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR 012: CHRONICLE_DIGEST_REPO_URL alone clones anonymously, which a
+    private repo (chronicle-target) refuses; test-token mode must carry its
+    token into the same clone, not just into GitHubRepoOps calls."""
+    monkeypatch.setenv("CHRONICLE_DIGEST_REPO_URL", str(blog_repo))
+    monkeypatch.setenv("CHRONICLE_ALLOW_TEST_TOKEN", "1")
+    monkeypatch.setenv("CHRONICLE_GITHUB_TEST_TOKEN", "fake-test-token")
+    store = Store.open(tmp_path / "data")
+    admin = AdminServices.build(tmp_path / "data")
+
+    captured: dict[str, str | None] = {}
+    original = digest.clone_or_update
+
+    def spy(
+        site_dir: Path, repo_url: str, branch: str | None = None, token: str | None = None
+    ) -> str:
+        captured["token"] = token
+        return original(site_dir, repo_url, branch, token=token)
+
+    monkeypatch.setattr(digest, "clone_or_update", spy)
+    run_digest(store, "test", admin)
+
+    assert captured["token"] == "fake-test-token"
+
+
 def test_digest_run_creates_posts_and_a_second_run_is_a_no_op(
     tmp_path: Path, blog_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -189,6 +216,46 @@ def test_digest_run_creates_posts_and_a_second_run_is_a_no_op(
     assert toolchain is not None
     assert toolchain["hugo_version"] == "0.164.0"
     assert toolchain["submodules"][0]["path"] == "themes/stub-theme"
+
+    store.close()
+
+
+def test_reconcile_refreshes_toolchain_state_the_same_way_a_manual_digest_does(
+    tmp_path: Path, blog_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round C4 review, P2: scheduled and post-merge reconciliation share
+    `digest_runner.refresh_from_target`, which used to skip
+    `parse_toolchain`/`write_toolchain` entirely, so a Hugo version bump on
+    main never reached the admin status page until someone ran a manual
+    digest."""
+    from types import SimpleNamespace
+
+    from chronicle.api import reconcile
+
+    store, admin = _build(tmp_path / "data", blog_repo, monkeypatch)
+    run_digest(store, "chronicle", admin)
+    before = admin.read_toolchain()
+    assert before is not None
+    assert before["hugo_version"] == "0.164.0"
+
+    workflow_path = blog_repo / ".github" / "workflows" / "hugo.yml"
+    workflow_path.write_text(
+        workflow_path.read_text(encoding="utf-8").replace("0.164.0", "0.165.0"),
+        encoding="utf-8",
+    )
+    _git(blog_repo, "add", "-A")
+    _git(blog_repo, "commit", "-m", "bump hugo")
+
+    fake_target = SimpleNamespace(
+        repo_url=str(blog_repo), default_branch="main", token_provider=lambda: None
+    )
+    monkeypatch.setattr(reconcile, "build_repo_target", lambda admin: fake_target)
+
+    reconcile.run(store, admin)
+
+    after = admin.read_toolchain()
+    assert after is not None
+    assert after["hugo_version"] == "0.165.0"
 
     store.close()
 

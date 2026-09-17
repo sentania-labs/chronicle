@@ -41,9 +41,11 @@ from .models import (
     Image,
     Material,
     Post,
+    ReconcileFlag,
     Run,
     Submission,
     Version,
+    WatchEntry,
     is_valid_slug,
     now_stamp,
     render_content,
@@ -51,10 +53,13 @@ from .models import (
 )
 from .transitions import (
     PREVIEW_SUCCEEDED,
+    PUBLISH_RUN_FAILED,
+    RECONCILE_STATUS,
     resolve_draft,
     resolve_run_outcome,
     resolve_save,
     resolve_submission,
+    resolve_watch,
 )
 
 IMAGE_ROLES = ("inline", "feature")
@@ -168,6 +173,8 @@ class Store:
         self.posts_dir = self.repo_dir / "posts"
         self.runs_dir = self.repo_dir / "runs"
         self.queue_dir = self.runs_dir / "queue"
+        self.watch_dir = self.repo_dir / "watch"
+        self.reconcile_dir = self.repo_dir / "reconcile"
         self.events_file = self.repo_dir / "events" / "log.jsonl"
         self.images_dir = data_dir / "images"
         self.state_dir = data_dir / "state"
@@ -198,6 +205,8 @@ class Store:
             store.feedback_dir,
             store.posts_dir,
             store.queue_dir,
+            store.watch_dir,
+            store.reconcile_dir,
             store.events_file.parent,
         ):
             path.mkdir(parents=True, exist_ok=True)
@@ -345,6 +354,17 @@ class Store:
         from_submission: str | None = None,
         from_post: str | None = None,
     ) -> tuple[Draft, list[str]]:
+        return self._create_draft_unlocked(actor, from_submission, from_post)
+
+    def _create_draft_unlocked(
+        self,
+        actor: str,
+        from_submission: str | None = None,
+        from_post: str | None = None,
+    ) -> tuple[Draft, list[str]]:
+        """Split out so `resolve_flag`'s `import_as_draft` (already `@locked`)
+        can create a draft without deadlocking on the store's non-reentrant
+        lock, the same reason `_put_image_unlocked` exists."""
         if from_submission is not None and from_post is not None:
             raise ApiError(
                 422,
@@ -596,6 +616,16 @@ class Store:
         message: str = "",
     ) -> Draft:
         draft = self.get_draft(draft_id)
+        watch = self.get_watch(draft_id)
+        if watch is not None and watch.kind == "publish":
+            raise ApiError(
+                409,
+                "publish_pr_open",
+                f"draft {draft_id} has an open publish PR ({watch.pr_url}); "
+                "wait for it to merge or close before saving",
+                pr_url=watch.pr_url,
+                pr_number=watch.pr_number,
+            )
         check_frontmatter(frontmatter)
 
         if base_version != draft.version_no:
@@ -778,6 +808,27 @@ class Store:
     ) -> tuple[Draft, Run | None]:
         draft = self.get_draft(draft_id)
         transition = resolve_draft(draft.status, action, actor_is_ui)
+        if action == "approve" and draft.status == "approved":
+            # A re-approve after a failed publish run, or simply approving
+            # again: only safe when there is nothing already in flight for
+            # this draft, or a second PR/run would race the first.
+            watch = self.get_watch(draft_id)
+            if watch is not None:
+                raise ApiError(
+                    409,
+                    "publish_pr_open",
+                    f"draft {draft_id} already has an open publish PR ({watch.pr_url})",
+                    pr_url=watch.pr_url,
+                    pr_number=watch.pr_number,
+                )
+            running = self.last_run(draft_id, kind="publish")
+            if running is not None and running.status in ("queued", "building"):
+                raise ApiError(
+                    409,
+                    "publish_run_in_progress",
+                    f"draft {draft_id} already has a publish run {running.status}",
+                    run_id=running.id,
+                )
         # A whitespace-only string is truthy, so the required check tests the
         # stripped text; the feedback entry itself still stores what was sent.
         if transition.feedback_required and not (feedback and feedback.strip()):
@@ -1050,6 +1101,34 @@ class Store:
 
         draft: Draft | None = None
         stale = False
+        if not succeeded and run.kind == "publish":
+            current = self.get_draft(run.draft_id)
+            transition = resolve_run_outcome(current.status, PUBLISH_RUN_FAILED)
+            if transition is not None:
+                from_status = current.status
+                current.status = transition.to_status
+                current.updated_at = run.finished_at
+                self._write_json(self._draft_path(current.id), current.model_dump(mode="json"))
+                self._append_event(
+                    type="draft.publish_failed",
+                    actor=actor,
+                    draft_id=current.id,
+                    from_status=from_status,
+                    to_status=current.status,
+                )
+                self.index.upsert_draft(current)
+                draft = current
+                error_class = str(result.get("error_class", "unknown"))
+                self._append_feedback(
+                    FeedbackEntry(
+                        draft_id=current.id,
+                        author="chronicle",
+                        created_at=run.finished_at,
+                        action="publish_failed",
+                        version_no=current.version_no,
+                        text=f"Publish failed ({error_class}); re-approve to retry.",
+                    )
+                )
         if succeeded and run.kind == "preview":
             current = self.get_draft(run.draft_id)
             if run.built_version is not None and current.version_no != run.built_version:
@@ -1181,6 +1260,389 @@ class Store:
                 f"digest: {created} created, {updated} updated, {unchanged} unchanged", actor
             )
         return {"created": created, "updated": updated, "unchanged": unchanged}
+
+    # Publish and unpublish (spec section 9)
+
+    @locked
+    def record_publish_result(
+        self,
+        draft_id: str,
+        actor: str,
+        *,
+        kind: str,
+        branch: str,
+        pr_number: int,
+        pr_url: str,
+        commit_sha: str,
+        post_path: str,
+        url: str,
+        date: str,
+        images: list[dict[str, str]],
+        post_blob_sha: str,
+    ) -> Draft:
+        """What a successful publish or unpublish run actually wrote, on the draft.
+
+        Not a save: this never bumps `version_no` or creates a `Version`
+        (nothing here is authored content), and it never changes
+        `draft.status` (the transition table decides that on the merge
+        the watcher later observes, not on the run that opened the PR).
+        First publish also stamps `frontmatter["date"]` when the draft had
+        none, so a republish and reconciliation's content_drift check both
+        have a stable date to work from without recomputing it.
+        """
+        draft = self.get_draft(draft_id)
+        if not draft.frontmatter.get("date"):
+            draft.frontmatter = {**draft.frontmatter, "date": date}
+        draft.published = {
+            "kind": kind,
+            "branch": branch,
+            "pr_number": pr_number,
+            "pr_url": pr_url,
+            "commit_sha": commit_sha,
+            "post_path": post_path,
+            "url": url,
+            "date": date,
+            "images": images,
+            "post_blob_sha": post_blob_sha,
+        }
+        draft.updated_at = now_stamp()
+        self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
+        self._append_event(
+            type=f"draft.{kind}_recorded",
+            actor=actor,
+            draft_id=draft_id,
+            to_status=draft.status,
+        )
+        self._commit(f"draft {draft_id}: recorded {kind} PR #{pr_number}", actor)
+        self.index.upsert_draft(draft)
+        return draft
+
+    @locked
+    def record_github_version(
+        self, draft_id: str, frontmatter: dict[str, Any], body: str, message: str
+    ) -> Draft:
+        """A new version authored `github`: main moved under a published draft.
+
+        Reconciliation's content_drift check (spec section 12), never a
+        route a consumer token can reach. Deliberately not `save_draft`:
+        this never implies the `revise` transition (a published draft whose
+        content Scott edited directly on GitHub is still published; nothing
+        here decides otherwise), it is not gated by `base_version` (there is
+        no conflict to detect against an edit that already landed on main),
+        and it does not run `check_frontmatter`'s allowlist rejection,
+        because the frontmatter came from `digest.parse_frontmatter` filtered
+        to the allowlist already, the same way `_fill_from_post` handles an
+        import.
+        """
+        draft = self.get_draft(draft_id)
+        version = Version(
+            draft_id=draft_id,
+            version_no=draft.version_no + 1,
+            author="github",
+            created_at=now_stamp(),
+            base_version=draft.version_no,
+            message=message,
+            frontmatter=frontmatter,
+            body=body,
+        )
+        self._write_json(
+            self._version_path(draft_id, version.version_no), version.model_dump(mode="json")
+        )
+        draft.frontmatter = frontmatter
+        draft.title = str(frontmatter.get("title") or draft.title)
+        draft.body = body
+        draft.version_no = version.version_no
+        draft.updated_at = version.created_at
+        self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
+        self._append_event(
+            type="draft.github_version",
+            actor="github",
+            draft_id=draft_id,
+            from_status=draft.status,
+            to_status=draft.status,
+        )
+        self._commit(
+            f"draft {draft_id}: version {version.version_no} from main (content drift)", "github"
+        )
+        self.index.upsert_draft(draft)
+        self.index.upsert_version(version)
+        return draft
+
+    @locked
+    def observe_pr_outcome(
+        self, draft_id: str, event: str, pr_number: int, actor: str = "github"
+    ) -> Draft:
+        """A Chronicle-opened PR merged or closed (spec section 9's merge watch).
+
+        `event` is `"merged"` or `"closed"`; `resolve_watch` decides the
+        status change from the draft's current status, and a status this
+        table has no entry for (a draft revised again while its PR was
+        still open) is left exactly as it is. A close without a merge also
+        gets a `github`-authored feedback entry, the same record shape a
+        `request_revision` or `reject` writes, so it shows up in the
+        draft's history the same way.
+        """
+        draft = self.get_draft(draft_id)
+        transition = resolve_watch(draft.status, event)
+        from_status = draft.status
+        if transition is not None:
+            draft.status = transition.to_status
+            draft.updated_at = now_stamp()
+            self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
+        if event == "closed":
+            # Spec section 9: the feedback entry is authored `github`, not
+            # whatever process actor observed it (the watcher), the same
+            # way a `github`-authored version (`record_github_version`) is
+            # attributed to where the change actually came from.
+            self._append_feedback(
+                FeedbackEntry(
+                    draft_id=draft_id,
+                    author="github",
+                    created_at=now_stamp(),
+                    action="pr_closed",
+                    version_no=draft.version_no,
+                    text=f"PR #{pr_number} was closed on GitHub without merging.",
+                )
+            )
+        self._append_event(
+            type=f"draft.pr_{event}",
+            actor=actor,
+            draft_id=draft_id,
+            from_status=from_status,
+            to_status=draft.status,
+        )
+        self._commit(f"draft {draft_id}: PR #{pr_number} {event}", actor)
+        self.index.upsert_draft(draft)
+        return draft
+
+    @locked
+    def remove_post(self, slug: str, actor: str) -> None:
+        """Drop a post record once the watcher has directly confirmed it is gone.
+
+        Digest never deletes a post record (AGENTS.md): a post missing from
+        a digest might just be a transient clone problem, and deciding it
+        was really removed is reconciliation's job. This method exists for
+        the one case that is not a heuristic: the watcher observing its own
+        `unpublish` PR merge, where Chronicle itself caused the file's
+        removal and knows so with certainty. Reconciliation's own
+        `post_removed_without_unpublish` flag is exactly the heuristic case
+        this bypasses; the two never call each other.
+        """
+        path = self.posts_dir / f"{slug}.json"
+        if not path.exists():
+            return
+        path.unlink()
+        self._append_event(type="posts.removed", actor=actor, to_status=slug)
+        self._commit(f"posts: removed {slug} (unpublish merged)", actor)
+        self.index.remove_post(slug)
+
+    # Watch (spec section 9's merge watch, ADR 013)
+
+    def _watch_path(self, draft_id: str) -> Path:
+        return self.watch_dir / f"{draft_id}.json"
+
+    @locked
+    def record_watch(self, entry: WatchEntry, actor: str) -> None:
+        self._write_json(self._watch_path(entry.draft_id), entry.model_dump(mode="json"))
+        self._commit(f"watch: draft {entry.draft_id} PR #{entry.pr_number} ({entry.kind})", actor)
+
+    def get_watch(self, draft_id: str) -> WatchEntry | None:
+        path = self._watch_path(draft_id)
+        if not path.exists():
+            return None
+        return WatchEntry.model_validate(self._read_json(path))
+
+    def list_watches(self) -> list[WatchEntry]:
+        if not self.watch_dir.exists():
+            return []
+        return [
+            WatchEntry.model_validate(self._read_json(path))
+            for path in sorted(self.watch_dir.glob("*.json"))
+        ]
+
+    @locked
+    def clear_watch(self, draft_id: str, actor: str, reason: str) -> None:
+        path = self._watch_path(draft_id)
+        if not path.exists():
+            return
+        path.unlink()
+        self._commit(f"watch: draft {draft_id} cleared ({reason})", actor)
+
+    # Reconciliation (spec section 12, ADR 005: flags only, never a correction)
+
+    def _flag_path(self, flag_id: str) -> Path:
+        return self.reconcile_dir / f"{flag_id}.json"
+
+    def _create_flag_unlocked(
+        self,
+        flag_type: str,
+        *,
+        slug: str | None,
+        draft_id: str | None,
+        detail: str,
+        actor: str,
+        main_sha: str | None = None,
+    ) -> ReconcileFlag:
+        """Split out so `record_publish_behind_draft` (already `@locked`) can
+        reuse it, the same reason `_put_image_unlocked` exists."""
+        flag = ReconcileFlag(
+            id=new_id(),
+            type=flag_type,
+            created_at=now_stamp(),
+            slug=slug,
+            draft_id=draft_id,
+            detail=detail,
+            main_sha=main_sha,
+        )
+        self._write_json(self._flag_path(flag.id), flag.model_dump(mode="json"))
+        self._append_event(
+            type="reconcile.flagged", actor=actor, draft_id=draft_id, to_status=flag_type
+        )
+        self._commit(f"reconcile: flagged {flag_type} ({slug or draft_id})", actor)
+        return flag
+
+    @locked
+    def create_flag(
+        self,
+        flag_type: str,
+        *,
+        slug: str | None,
+        draft_id: str | None,
+        detail: str,
+        actor: str,
+        main_sha: str | None = None,
+    ) -> ReconcileFlag:
+        return self._create_flag_unlocked(
+            flag_type, slug=slug, draft_id=draft_id, detail=detail, actor=actor, main_sha=main_sha
+        )
+
+    @locked
+    def record_publish_behind_draft(
+        self, draft_id: str, actor: str, *, built_version: int, current_version: int
+    ) -> None:
+        """A publish PR merged after the draft was revised again while it was
+        open (round C4 review, P1): the merged content is what the run
+        actually converted at `built_version`, not the draft's current,
+        newer version, so this is surfaced as a `content_drift`-shaped flag
+        (reused rather than a new flag type, per the review's own
+        suggestion) plus a `chronicle`-authored feedback entry, without
+        touching `draft.status` (the watcher's own WATCH_TRANSITIONS call
+        still decides that).
+        """
+        detail = (
+            f"draft {draft_id} was revised to version {current_version} while its publish PR"
+            f" was open; the PR that merged only carried version {built_version}"
+        )
+        self._create_flag_unlocked(
+            "content_drift", slug=None, draft_id=draft_id, detail=detail, actor=actor
+        )
+        self._append_feedback(
+            FeedbackEntry(
+                draft_id=draft_id,
+                author="chronicle",
+                created_at=now_stamp(),
+                action="published_behind_draft",
+                version_no=current_version,
+                text=(
+                    f"Published PR merged with version {built_version}, but the draft had"
+                    f" already moved on to version {current_version} before it merged."
+                ),
+            )
+        )
+
+    def get_flag(self, flag_id: str) -> ReconcileFlag:
+        path = self._flag_path(flag_id)
+        if not path.exists():
+            raise ApiError(404, "flag_not_found", f"no reconciliation flag {flag_id}")
+        return ReconcileFlag.model_validate(self._read_json(path))
+
+    def list_flags(self, resolved: bool | None = None) -> list[ReconcileFlag]:
+        if not self.reconcile_dir.exists():
+            return []
+        flags = [
+            ReconcileFlag.model_validate(self._read_json(path))
+            for path in sorted(self.reconcile_dir.glob("*.json"))
+        ]
+        if resolved is not None:
+            flags = [flag for flag in flags if flag.resolved == resolved]
+        return flags
+
+    @locked
+    def resolve_flag(self, flag_id: str, resolution: str, actor: str) -> ReconcileFlag:
+        flag = self.get_flag(flag_id)
+        if flag.resolved:
+            raise ApiError(409, "flag_already_resolved", f"flag {flag_id} is already resolved")
+
+        # Deferred import: `reconcile.py` imports `Store` at module level, so
+        # a module-level import here would be circular; `APPLICABLE_RESOLUTIONS`
+        # itself never changes at runtime, so resolving it lazily costs nothing.
+        from .reconcile import APPLICABLE_RESOLUTIONS
+
+        applicable = APPLICABLE_RESOLUTIONS.get(flag.type, ("ignore",))
+        if resolution not in applicable:
+            raise ApiError(
+                422,
+                "resolution_not_applicable",
+                f"resolution {resolution!r} is not applicable to flag type {flag.type!r}"
+                f" (applicable: {', '.join(applicable)})",
+                flag_type=flag.type,
+                resolution=resolution,
+            )
+
+        if flag.type == "content_drift" and resolution == "ignore" and flag.draft_id:
+            # The next reconcile run must not re-flag or re-version the exact
+            # content just acknowledged; a genuinely new change on main still
+            # differs from this sha and flags again (round C4 review, P2).
+            draft = self.get_draft(flag.draft_id)
+            published = dict(draft.published or {})
+            published["acknowledged_blob_sha"] = flag.main_sha
+            draft.published = published
+            draft.updated_at = now_stamp()
+            self._write_json(self._draft_path(draft.id), draft.model_dump(mode="json"))
+            self.index.upsert_draft(draft)
+
+        new_status = RECONCILE_STATUS.get(resolution)
+        if new_status is not None:
+            if flag.draft_id is None:
+                raise ApiError(
+                    422,
+                    "resolution_not_applicable",
+                    f"flag {flag_id} has no draft to set to {new_status!r}",
+                )
+            draft = self.get_draft(flag.draft_id)
+            from_status = draft.status
+            draft.status = new_status
+            draft.updated_at = now_stamp()
+            self._write_json(self._draft_path(draft.id), draft.model_dump(mode="json"))
+            self._append_event(
+                type="draft.reconcile_resolved",
+                actor=actor,
+                draft_id=draft.id,
+                from_status=from_status,
+                to_status=new_status,
+            )
+            self.index.upsert_draft(draft)
+        elif resolution == "import_as_draft":
+            if not flag.slug:
+                raise ApiError(
+                    422, "resolution_not_applicable", f"flag {flag_id} has no post slug to import"
+                )
+            self._create_draft_unlocked(actor, from_post=flag.slug)
+        elif resolution == "ignore":
+            pass
+        else:
+            raise ApiError(422, "resolution_unknown", f"{resolution!r} is not a known resolution")
+
+        flag.resolved = True
+        flag.resolution = resolution
+        flag.resolved_at = now_stamp()
+        flag.resolved_by = actor
+        self._write_json(self._flag_path(flag.id), flag.model_dump(mode="json"))
+        self._append_event(
+            type="reconcile.resolved", actor=actor, draft_id=flag.draft_id, to_status=resolution
+        )
+        self._commit(f"reconcile: resolved flag {flag.id} ({resolution})", actor)
+        return flag
 
     # Index rebuild
 
