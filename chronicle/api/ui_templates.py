@@ -26,7 +26,7 @@ NAV_LINKS = (
     ("/content/submissions", "Submissions"),
     ("/content/drafts", "Drafts"),
     ("/content/import", "Import"),
-    ("/preview", "Preview"),
+    ("/content/previews", "Preview"),
 )
 
 BANNER_TEXT = (
@@ -348,7 +348,11 @@ def _image_list(draft_id: str, images: list[dict[str, Any]]) -> str:
 
 
 def _action_buttons(
-    draft_id: str, status: str, published: dict[str, Any] | None, publish_pr_open: bool
+    draft_id: str,
+    status: str,
+    published: dict[str, Any] | None,
+    publish_pr_open: bool,
+    publish_run_active: bool = False,
 ) -> str:
     buttons = []
     for (from_status, action), transition in DRAFT_TRANSITIONS.items():
@@ -359,6 +363,12 @@ def _action_buttons(
             # publish PR is already open (409 publish_pr_open); the table
             # alone can't see that, so a round C5 review found this button
             # rendering and then 409ing on every click until the PR closes.
+            continue
+        if action == "approve" and status == "approved" and publish_run_active:
+            # The narrower window before that PR exists: a publish run
+            # already `queued` or `building` for this draft (409
+            # publish_run_in_progress). A round C5 review found the button
+            # still rendered and 409ed on every click through this gap.
             continue
         label = action.replace("_", " ")
         if action == "approve" and published:
@@ -423,6 +433,7 @@ def editor_page(
     *,
     banner: bool,
     publish_pr_open: bool = False,
+    publish_run_active: bool = False,
     notice: str | None = None,
     notice_kind: str = "error",
 ) -> str:
@@ -481,7 +492,7 @@ def editor_page(
 <button type="submit">Upload and attach</button>
 </form>
 <h2>Actions</h2>
-<div class="actions">{_action_buttons(draft["id"], draft["status"], draft.get("published"), publish_pr_open)}</div>
+<div class="actions">{_action_buttons(draft["id"], draft["status"], draft.get("published"), publish_pr_open, publish_run_active)}</div>
 <h2>Version history</h2>
 {_version_history(draft["id"], versions)}
 <h2>Feedback</h2>
@@ -584,7 +595,7 @@ def preview_list_page(rows: list[dict[str, Any]], *, banner: bool) -> str:
             f"<td>{escape(r['built_at'] or '-')}</td>"
             f"<td>{escape(str(r['wall_seconds']) if r['wall_seconds'] is not None else '-')}</td>"
             f"<td>{'drift' if r['toolchain_drift'] else 'match'}</td>"
-            f'<td><form method="post" action="/preview/{escape(r["draft_id"])}/rebuild">'
+            f'<td><form method="post" action="/content/previews/{escape(r["draft_id"])}/rebuild">'
             '<button type="submit">Rebuild</button></form></td>'
             "</tr>"
             for r in rows

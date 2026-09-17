@@ -223,9 +223,14 @@ already put the whole thing behind their own auth proxy.
   version reloaded into the save form (ready to reapply on top of), and the
   visitor's own attempted title and body in a second, read-only pane to
   copy from by hand.
-- **Preview** (`/preview`): every draft with a built preview, its build
-  time, wall seconds, and toolchain-drift flag, plus a rebuild button; a
-  run log page (`/runs/{run_id}`) for any run.
+- **Preview** (`/content/previews`): every draft with a built preview, its
+  build time, wall seconds, and toolchain-drift flag, plus a rebuild button;
+  a run log page (`/runs/{run_id}`) for any run. Deliberately not `/preview`
+  itself: `examples/k8s/ingress.yaml` routes that whole prefix to the static
+  preview container on port 8090, so a UI route living there would be
+  unreachable through the instance hostname. `/preview/<slug>/...` stays
+  the static build output's own prefix (unchanged, Hugo bakes it into every
+  built page's links); only the UI's list and rebuild controls moved.
 
 No CDN and no network fetch at page load: `marked.min.js` and the
 hand-written `style.css`/`ui.js` are all served from this same process.

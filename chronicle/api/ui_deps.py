@@ -58,20 +58,31 @@ def check_same_origin(request: Request) -> None:
     header comparison and closes that off without adding any credential the
     banner would then have to explain away.
     """
-    origin = request.headers.get("origin") or request.headers.get("referer")
-    if origin is None:
-        return
     from urllib.parse import urlsplit
 
-    # A sandboxed iframe (or any context with no origin of its own) sends
-    # literal "null" here, and urlsplit("null").netloc is "", which used to
-    # fall through as if no header had been sent at all: a round C5 review
-    # found that this let a third-party page POST to every state-changing
-    # route from a sandboxed iframe with no origin match required. A header
-    # that is present but does not resolve to this host, blank included, is
-    # therefore always cross-origin, never a pass-through.
-    origin_host = urlsplit(origin).netloc
-    if origin_host != request.url.netloc:
+    # `request.headers.get(...)` returns None only when the header is truly
+    # absent; an empty string ("Origin:" with nothing after it) is a present
+    # header and must not collapse into the same "no header" branch as a
+    # missing one. The original `origin or referer` fallback did exactly
+    # that: an empty (or otherwise unparsable) Origin is falsy, so the `or`
+    # silently substituted Referer, or the "no header at all" pass-through,
+    # for a header that was actually sent and did not resolve to this host.
+    # A round C5 review already fixed the literal "null" case the same way
+    # ("null" is truthy, so it never took this shortcut); a follow-up review
+    # found the empty/malformed case was still open. Presence and validity
+    # are now checked separately: any present Origin that does not resolve
+    # to this host is refused outright, and Referer is only ever consulted
+    # when Origin is genuinely absent.
+    origin_header = request.headers.get("origin")
+    if origin_header is not None:
+        if urlsplit(origin_header).netloc != request.url.netloc:
+            raise ApiError(403, "cross_origin_request", "cross-origin form submissions are refused")
+        return
+
+    referer_header = request.headers.get("referer")
+    if referer_header is None:
+        return
+    if urlsplit(referer_header).netloc != request.url.netloc:
         raise ApiError(403, "cross_origin_request", "cross-origin form submissions are refused")
 
 

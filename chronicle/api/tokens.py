@@ -31,6 +31,7 @@ from .models import now_stamp
 TOKENS_FILE_NAME = "tokens.json"
 TOKENS_LOCK_FILE_NAME = "tokens.lock"
 UI_TOKEN_FILE_NAME = "ui_token.txt"
+UI_DISABLED_FILE_NAME = "ui_disabled"
 UI_TOKEN_NAME = "ui"
 UI_COMMIT_AUTHOR = "scott"
 TOKEN_BYTES = 32
@@ -56,6 +57,7 @@ class TokenStore:
         self.path = self.state_dir / TOKENS_FILE_NAME
         self.lock_path = self.state_dir / TOKENS_LOCK_FILE_NAME
         self.ui_token_path = self.state_dir / UI_TOKEN_FILE_NAME
+        self.ui_disabled_path = self.state_dir / UI_DISABLED_FILE_NAME
         # Every write here is a load-mutate-save of the whole file, including
         # the last_used_at stamp on an ordinary request. The api and the
         # `chronicle token` CLI are separate processes with separate address
@@ -105,7 +107,17 @@ class TokenStore:
                     revoked += 1
             if revoked:
                 self._save(records)
-            return revoked
+        if revoked and name == UI_TOKEN_NAME:
+            # A revoke through /admin/tokens or `chronicle token revoke ui` is
+            # the documented UI kill switch; without this marker,
+            # `ensure_ui_token` (called on every process start) cannot tell
+            # "deliberately revoked" from "bootstrap never finished" and
+            # re-mints a fresh token into the same plaintext file, silently
+            # re-enabling the UI on the operator's next restart. The marker
+            # is the only thing that makes the revocation survive one.
+            self.ui_disabled_path.touch(exist_ok=True)
+            os.chmod(self.ui_disabled_path, 0o600)
+        return revoked
 
     def authenticate(self, token: str) -> TokenRecord | None:
         digest = hash_token(token)
@@ -132,7 +144,16 @@ class TokenStore:
         writing the file, or the file may have been lost since. Either way the
         UI backend can never authenticate with it, so the old record is
         revoked and a fresh one is minted rather than left in place.
+
+        An explicit revoke through `/admin/tokens` or `chronicle token
+        revoke ui` is a different case entirely: the operator's kill switch,
+        not a bootstrap failure, and `ui_disabled_path` (set by `revoke`)
+        says so. This runs on every process start, so without that check a
+        restart would silently re-mint and hand the UI a working token
+        again, undoing the revoke the operator relied on.
         """
+        if self.ui_disabled_path.exists():
+            return
         records = self.load()
         record = next(
             (r for r in records if r.name == UI_TOKEN_NAME and r.revoked_at is None), None
@@ -144,6 +165,21 @@ class TokenStore:
         token = self.issue(UI_TOKEN_NAME)
         self.ui_token_path.write_text(token + "\n", encoding="utf-8")
         os.chmod(self.ui_token_path, 0o600)
+
+    def reenable_ui_token(self) -> str:
+        """Clear the kill switch `revoke(UI_TOKEN_NAME)` set and mint a fresh token.
+
+        Deliberately not just "clear the marker and let the next
+        `ensure_ui_token` handle it": that call only happens at startup, and
+        an admin clicking "re-enable" wants the UI usable on this request,
+        not after the next restart.
+        """
+        if self.ui_disabled_path.exists():
+            self.ui_disabled_path.unlink()
+        token = self.issue(UI_TOKEN_NAME)
+        self.ui_token_path.write_text(token + "\n", encoding="utf-8")
+        os.chmod(self.ui_token_path, 0o600)
+        return token
 
 
 def commit_author(token_name: str) -> str:

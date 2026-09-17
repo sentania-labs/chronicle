@@ -185,6 +185,79 @@ def test_admin_tokens_api_rejects_the_name_ui(admin_client: TestClient) -> None:
     assert response.json()["error"] == "token_name_reserved"
 
 
+def test_revoked_ui_token_stays_disabled_across_a_restart(
+    data_dir: Path, client: TestClient
+) -> None:
+    """Adversarial review finding: `ensure_ui_token` runs on every process
+    start and could not tell a deliberate `/admin/tokens` revoke from a
+    bootstrap failure, so a restart silently re-minted the UI's token and
+    undid the operator's kill switch."""
+    tokens = TokenStore(data_dir / "state")
+    original = next(r for r in tokens.load() if r.name == UI_TOKEN_NAME and r.revoked_at is None)
+    original_plaintext = (
+        (data_dir / "state" / UI_TOKEN_FILE_NAME).read_text(encoding="utf-8").strip()
+    )
+
+    tokens.revoke(UI_TOKEN_NAME)
+    assert tokens.ui_disabled_path.exists()
+    assert tokens.authenticate(original_plaintext) is None
+
+    # A restart calls ensure_ui_token again; the marker must survive it.
+    restarted = TokenStore(data_dir / "state")
+    restarted.ensure_ui_token()
+    assert restarted.ui_disabled_path.exists()
+    live = [r for r in restarted.load() if r.name == UI_TOKEN_NAME and r.revoked_at is None]
+    assert live == []
+    # The plaintext file was never touched by the no-op restart: still the
+    # pre-revoke value, and it still does not authenticate.
+    assert (data_dir / "state" / UI_TOKEN_FILE_NAME).read_text(encoding="utf-8").strip() == (
+        original_plaintext
+    )
+    assert restarted.authenticate(original_plaintext) is None
+    assert original.hash not in [r.hash for r in restarted.load() if r.revoked_at is None]
+
+
+def test_reenable_ui_token_clears_the_marker_and_mints_a_working_token(
+    data_dir: Path, client: TestClient
+) -> None:
+    tokens = TokenStore(data_dir / "state")
+    tokens.revoke(UI_TOKEN_NAME)
+    assert tokens.ui_disabled_path.exists()
+
+    fresh = tokens.reenable_ui_token()
+
+    assert not tokens.ui_disabled_path.exists()
+    record = tokens.authenticate(fresh)
+    assert record is not None and record.name == UI_TOKEN_NAME
+    assert (data_dir / "state" / UI_TOKEN_FILE_NAME).read_text(encoding="utf-8").strip() == fresh
+
+    # A restart after re-enabling leaves the fresh token alone (it is valid,
+    # so ensure_ui_token has nothing to fix).
+    restarted = TokenStore(data_dir / "state")
+    restarted.ensure_ui_token()
+    assert restarted.authenticate(fresh) is not None
+
+
+def test_ui_disabled_across_restart_via_admin_page_and_re_enable_via_admin_page(
+    admin_client: TestClient, data_dir: Path
+) -> None:
+    """End to end through the routes an operator actually clicks: revoke
+    `ui` on `/admin/tokens`, confirm the UI is refused even after a
+    simulated restart, then re-enable and confirm it works again."""
+    revoked = admin_client.post("/admin/tokens/ui/revoke")
+    assert revoked.status_code == 200
+    assert "Re-enable UI" in revoked.text
+
+    TokenStore(data_dir / "state").ensure_ui_token()  # simulated restart
+    claim = admin_client.post("/content/drafts/does-not-exist/claim")
+    assert claim.status_code == 503
+
+    reenabled = admin_client.post("/admin/tokens/ui/reenable")
+    assert reenabled.status_code == 200
+    assert "New token (shown once)" in reenabled.text
+    assert "Re-enable UI" not in reenabled.text
+
+
 def test_admin_tokens_api_issue_list_and_revoke(admin_client: TestClient) -> None:
     issued = admin_client.post("/admin/api/tokens", json={"name": "dashboard"})
     assert issued.status_code == 200

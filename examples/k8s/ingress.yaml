@@ -1,9 +1,14 @@
 # Reference only, not the lab's deployment. See README.md in this directory.
 #
 # Internal-only by convention (no public DNS is ever wired to Chronicle from
-# this repo). Root path goes to api (service, UI, admin); /preview goes to
-# preview (spec section 7 and 14). ingressClassName and host are cluster
-# specifics left for the deployer.
+# this repo). Root path goes to api (service, UI, admin, including the UI's
+# own /content/previews list and rebuild controls); /preview goes to the
+# static preview container's built output only (spec section 7 and 14). A
+# round C5 review found the UI's preview tab originally lived at /preview
+# itself, which this same ingress prefix would have routed straight past
+# the api to the static container, making the tab unreachable; the UI route
+# moved to /content/previews so it rides the api's own "/" rule instead.
+# ingressClassName and host are cluster specifics left for the deployer.
 #
 # Two Ingress objects, not one: a path-rewrite annotation applies to every
 # path in the object, not just the one that declares a capture group, so

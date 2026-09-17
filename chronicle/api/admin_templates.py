@@ -10,6 +10,8 @@ from __future__ import annotations
 from html import escape
 from typing import Any
 
+from .tokens import UI_TOKEN_NAME
+
 STYLE = """
 body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; color: #1a1a1a; }
 h1 { font-size: 1.4rem; }
@@ -265,18 +267,38 @@ def github_repo_page(repos: list[dict[str, Any]]) -> str:
 
 
 def tokens_page(
-    tokens: list[dict[str, Any]], notice: str | None = None, minted: str | None = None
+    tokens: list[dict[str, Any]],
+    notice: str | None = None,
+    minted: str | None = None,
+    *,
+    ui_disabled: bool = False,
 ) -> str:
     minted_html = (
         f'<p class="notice ok">New token (shown once): <code>{escape(minted)}</code></p>'
         if minted
         else ""
     )
+
+    def actions(name: str) -> str:
+        # The `ui` token's kill switch survives a restart (`ui_disabled`
+        # marker, chronicle/api/tokens.py); revoking it here alone is not
+        # enough to bring the UI back, so its row gets a "re-enable UI"
+        # button instead of (never alongside) a second revoke once already
+        # disabled.
+        if name == UI_TOKEN_NAME and ui_disabled:
+            return (
+                '<form method="post" action="/admin/tokens/ui/reenable">'
+                '<button type="submit">Re-enable UI</button></form>'
+            )
+        return (
+            f'<form method="post" action="/admin/tokens/{escape(name)}/revoke">'
+            '<button type="submit">Revoke</button></form>'
+        )
+
     rows = "".join(
         f"<tr><td>{escape(t['name'])}</td><td>{escape(t['created_at'])}</td>"
         f"<td>{escape(t['last_used_at'] or 'never')}</td><td>{escape(t['revoked_at'] or 'no')}</td>"
-        f'<td><form method="post" action="/admin/tokens/{escape(t["name"])}/revoke">'
-        f'<button type="submit">Revoke</button></form></td></tr>'
+        f"<td>{actions(t['name'])}</td></tr>"
         for t in tokens
     )
     body = f"""

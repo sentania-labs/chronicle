@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -55,6 +56,24 @@ def _preview_url(run: Any) -> str | None:
     return url if isinstance(url, str) else None
 
 
+# `create_draft` reports dropped frontmatter keys and failed image imports
+# as warnings rather than a 422, because the import itself still succeeded
+# (AGENTS.md: "Store.create_draft returns (Draft, warnings), not a bare
+# Draft"). A redirect can't carry the response body that came back from the
+# store, so the warnings ride one flash query parameter instead, joined on a
+# separator no warning message produces (they are built from f-strings over
+# key/filename reprs, never a raw unit separator byte) and read back once by
+# the editor GET that follows.
+_WARNING_SEP = "\x1f"
+
+
+def _redirect_to_draft(draft_id: str, warnings: list[str]) -> RedirectResponse:
+    if not warnings:
+        return RedirectResponse(f"/content/drafts/{draft_id}", status_code=303)
+    query = urlencode({"warnings": _WARNING_SEP.join(warnings)})
+    return RedirectResponse(f"/content/drafts/{draft_id}?{query}", status_code=303)
+
+
 @router.get("/", response_class=HTMLResponse)
 def home() -> RedirectResponse:
     return RedirectResponse("/content/drafts", status_code=303)
@@ -94,8 +113,8 @@ def submission_to_draft(
         # "new" and "claimed" submissions, so claiming here is the one step
         # that makes that button work without a second click.
         services.store.act_on_submission(submission_id, "claim", consumer.name)
-    draft, _warnings = services.store.create_draft(consumer.name, from_submission=submission_id)
-    return RedirectResponse(f"/content/drafts/{draft.id}", status_code=303)
+    draft, warnings = services.store.create_draft(consumer.name, from_submission=submission_id)
+    return _redirect_to_draft(draft.id, warnings)
 
 
 @router.post("/content/submissions/{submission_id}/discard")
@@ -157,6 +176,7 @@ def _editor_response(
     last_run = store.last_run(draft_id)
     preview_url = _preview_url(store.last_run(draft_id, kind="preview"))
     watch = store.get_watch(draft_id)
+    publish_run = store.last_run(draft_id, kind="publish")
     html = tpl.editor_page(
         _dump(draft),
         versions,
@@ -165,6 +185,15 @@ def _editor_response(
         preview_url,
         banner=banner,
         publish_pr_open=watch is not None and watch.kind == "publish",
+        # `Store.act_on_draft` separately refuses a re-approve while a
+        # publish run is still queued or building (409
+        # publish_run_in_progress), the gap between "approved" and a watch
+        # entry existing (the watch is only created once the publisher has
+        # actually opened a PR). The transition table and the
+        # publish_pr_open check above can't see a run with no PR yet, so a
+        # round C5 review found this button rendering and 409ing on every
+        # click for exactly that window.
+        publish_run_active=publish_run is not None and publish_run.status in ("queued", "building"),
         notice=notice,
         notice_kind=notice_kind,
     )
@@ -175,7 +204,36 @@ def _editor_response(
 def draft_editor(
     draft_id: str, request: Request, services: Services = Depends(get_services)
 ) -> HTMLResponse:
-    return _editor_response(services, draft_id, banner=banner_enabled(request))
+    raw_warnings = request.query_params.get("warnings")
+    notice = None
+    notice_kind = "error"
+    if raw_warnings:
+        notice = "Import warnings: " + "; ".join(raw_warnings.split(_WARNING_SEP))
+        notice_kind = "warning"
+    return _editor_response(
+        services, draft_id, banner=banner_enabled(request), notice=notice, notice_kind=notice_kind
+    )
+
+
+def _apply_summary_or_description(
+    frontmatter: dict[str, Any], existing: dict[str, Any], value: str
+) -> None:
+    # The editor shows one field labelled "summary or description"
+    # (`val("summary") or val("description")`), but they are two separate
+    # allowed Hugo frontmatter keys, and an imported or API-authored draft
+    # can carry either or both. A round C5 review found this used to always
+    # write "summary" and unconditionally drop "description", so saving an
+    # unrelated edit silently deleted a `description` an unchanged form
+    # never touched. Writing back to whichever key(s) the draft originally
+    # had (both, if both existed) preserves that shape instead of collapsing
+    # it to one key chosen by the UI.
+    present = [key for key in ("summary", "description") if key in existing]
+    keys = present or ["summary"]
+    for key in keys:
+        if value:
+            frontmatter[key] = value
+        else:
+            frontmatter.pop(key, None)
 
 
 def _build_frontmatter(
@@ -183,12 +241,12 @@ def _build_frontmatter(
 ) -> dict[str, Any]:
     frontmatter = dict(existing)
     frontmatter["title"] = form.get("title", "").strip()
-    for key, form_key in (("date", "date"), ("summary", "summary")):
-        value = form.get(form_key, "").strip()
-        if value:
-            frontmatter[key] = value
-        else:
-            frontmatter.pop(key, None)
+    value = form.get("date", "").strip()
+    if value:
+        frontmatter["date"] = value
+    else:
+        frontmatter.pop("date", None)
+    _apply_summary_or_description(frontmatter, existing, form.get("summary", "").strip())
     if pinned_slug:
         # The url field is readonly once a slug is pinned (`draft.slug`,
         # not any `slug` key in frontmatter): the form's own value is a
@@ -207,7 +265,6 @@ def _build_frontmatter(
             frontmatter["url"] = value
         else:
             frontmatter.pop("url", None)
-    frontmatter.pop("description", None)
     for key in ("categories", "tags"):
         raw = form.get(key, "").strip()
         items = [item.strip() for item in raw.split(",") if item.strip()]
@@ -407,13 +464,13 @@ async def import_create(
     form = await request.form()
     slug = str(form.get("slug", ""))
     try:
-        draft, _warnings = services.store.create_draft(consumer.name, from_post=slug)
+        draft, warnings = services.store.create_draft(consumer.name, from_post=slug)
     except ApiError as exc:
         return HTMLResponse(
             tpl.import_page([], slug, banner=banner_enabled(request), notice=exc.message),
             status_code=exc.status_code,
         )
-    return RedirectResponse(f"/content/drafts/{draft.id}", status_code=303)
+    return _redirect_to_draft(draft.id, warnings)
 
 
 # --- Preview tab ------------------------------------------------------------
@@ -427,7 +484,7 @@ def _wall_seconds(run: Any) -> float | None:
     return round((finished - started).total_seconds(), 2)
 
 
-@router.get("/preview", response_class=HTMLResponse)
+@router.get("/content/previews", response_class=HTMLResponse)
 def preview_list(request: Request, services: Services = Depends(get_services)) -> HTMLResponse:
     store = services.store
     rows = []
@@ -451,7 +508,7 @@ def preview_list(request: Request, services: Services = Depends(get_services)) -
     return HTMLResponse(tpl.preview_list_page(rows, banner=banner_enabled(request)))
 
 
-@router.post("/preview/{draft_id}/rebuild", response_class=HTMLResponse)
+@router.post("/content/previews/{draft_id}/rebuild", response_class=HTMLResponse)
 def preview_rebuild(
     draft_id: str,
     request: Request,
@@ -469,7 +526,7 @@ def preview_rebuild(
             tpl.page("Rebuild failed", "", banner=banner_enabled(request), notice=exc.message),
             status_code=exc.status_code,
         )
-    return RedirectResponse("/preview", status_code=303)
+    return RedirectResponse("/content/previews", status_code=303)
 
 
 @router.get("/runs/{run_id}", response_class=HTMLResponse)

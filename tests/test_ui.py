@@ -222,6 +222,93 @@ def test_editor_save_forwards_base_version_and_bumps_version(
     assert versions[-1].author == "scott"
 
 
+def _save_form(draft: Any, **overrides: str) -> dict[str, str]:
+    form = {
+        "base_version": str(draft.version_no),
+        "title": draft.title or "Untitled",
+        "date": "",
+        "categories": "",
+        "tags": "",
+        "summary": "",
+        "url": "",
+        "featureImage": "",
+        "body": draft.body,
+    }
+    form.update(overrides)
+    return form
+
+
+def test_save_preserves_description_key_when_summary_field_is_unchanged(
+    client: TestClient, services: Services
+) -> None:
+    """Adversarial review finding: the save handler always wrote the
+    editor's single "summary or description" field back to `summary` and
+    unconditionally dropped `description`, so an unrelated edit on a draft
+    that only had `description` silently deleted it."""
+    draft_id = make_draft(services, "drafting", title="Has Description")
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(
+        draft_id,
+        "scott",
+        draft.version_no,
+        {**draft.frontmatter, "description": "original description"},
+        draft.body,
+    )
+    draft = services.store.get_draft(draft_id)
+    assert "description" in draft.frontmatter
+
+    # The form's displayed value comes from `val("summary") or
+    # val("description")`, so an unchanged submission echoes it back
+    # unmodified under the "summary" form field.
+    form = _save_form(draft, summary="original description")
+    response = client.post(f"/content/drafts/{draft_id}/save", data=form)
+    assert response.status_code == 200
+
+    saved = services.store.get_draft(draft_id)
+    assert saved.frontmatter.get("description") == "original description"
+    assert "summary" not in saved.frontmatter
+
+
+def test_save_writes_both_keys_when_both_were_present(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "drafting", title="Has Both")
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(
+        draft_id,
+        "scott",
+        draft.version_no,
+        {**draft.frontmatter, "summary": "old", "description": "old"},
+        draft.body,
+    )
+    draft = services.store.get_draft(draft_id)
+
+    form = _save_form(draft, summary="new text")
+    response = client.post(f"/content/drafts/{draft_id}/save", data=form)
+    assert response.status_code == 200
+
+    saved = services.store.get_draft(draft_id)
+    assert saved.frontmatter.get("summary") == "new text"
+    assert saved.frontmatter.get("description") == "new text"
+
+
+def test_save_defaults_to_summary_key_when_neither_was_present(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "drafting", title="Has Neither")
+    draft = services.store.get_draft(draft_id)
+    assert "summary" not in draft.frontmatter
+    assert "description" not in draft.frontmatter
+
+    form = _save_form(draft, summary="brand new")
+    response = client.post(f"/content/drafts/{draft_id}/save", data=form)
+    assert response.status_code == 200
+
+    saved = services.store.get_draft(draft_id)
+    assert saved.frontmatter.get("summary") == "brand new"
+    assert "description" not in saved.frontmatter
+
+
 def test_stale_save_renders_409_with_diff_summary_and_both_panes(
     client: TestClient, services: Services
 ) -> None:
@@ -392,6 +479,50 @@ def test_import_search_and_create(client: TestClient, services: Services, data_d
     assert draft.slug == "unifi-network"
 
 
+def test_import_warnings_from_dropped_frontmatter_and_missing_image_render_on_the_editor(
+    client: TestClient, services: Services
+) -> None:
+    """Adversarial review finding: `create_draft`'s own warnings (dropped
+    unknown frontmatter keys, images it could not find) were discarded by
+    the redirect and never reached the editor, so an incomplete import
+    looked identical to a complete one."""
+    from chronicle.api.models import Post
+
+    services.store.apply_digest(
+        "scott",
+        [
+            Post(
+                slug="lossy-post",
+                path="content/posts/lossy.md",
+                title="Lossy Post",
+                date="2026-01-01",
+                sha="abc",
+            )
+        ],
+    )
+    (services.store.site_dir / "content" / "posts").mkdir(parents=True, exist_ok=True)
+    (services.store.site_dir / "content" / "posts" / "lossy.md").write_text(
+        "---\ntitle: Lossy Post\nnotAnAllowedKey: surprise\n---\n![missing](missing-image.png)\n",
+        encoding="utf-8",
+    )
+
+    created = client.post("/content/import", data={"slug": "lossy-post"})
+    assert created.status_code == 200
+    assert "warning" in created.text.lower()
+    assert "notAnAllowedKey" in created.text
+    assert "missing-image.png" in created.text
+
+    draft_id = str(created.url).rstrip("/").rsplit("/", 1)[-1].split("?", 1)[0]
+    draft = services.store.get_draft(draft_id)
+    assert "notAnAllowedKey" not in draft.frontmatter
+    assert draft.images == []
+
+    # A plain reload of the editor (no warnings query string) shows no
+    # leftover warning banner: the flash is one-shot, not sticky state.
+    reload_ = client.get(f"/content/drafts/{draft_id}")
+    assert "warning" not in reload_.text.lower()
+
+
 # --- Preview tab and run log -------------------------------------------------
 
 
@@ -402,7 +533,7 @@ def test_preview_list_and_rebuild_and_run_log(client: TestClient, services: Serv
     services.store.start_run(run.id, "builder-1", "0.164.0", False, built_version=draft.version_no)
     services.store.finish_run(run.id, "builder-1", True, {"preview_url": f"/preview/{draft.slug}/"})
 
-    listing = client.get("/preview")
+    listing = client.get("/content/previews")
     assert listing.status_code == 200
     assert f"/preview/{draft.slug}/" in listing.text
     assert "Rebuild" in listing.text
@@ -411,7 +542,7 @@ def test_preview_list_and_rebuild_and_run_log(client: TestClient, services: Serv
     assert log_page.status_code == 200
     assert "succeeded" in log_page.text
 
-    rebuild = client.post(f"/preview/{draft_id}/rebuild")
+    rebuild = client.post(f"/content/previews/{draft_id}/rebuild")
     assert rebuild.status_code == 200
 
 
@@ -438,13 +569,62 @@ def test_null_origin_post_is_refused(client: TestClient, services: Services) -> 
     assert response.status_code == 403
 
 
+def test_empty_origin_post_is_refused(client: TestClient, services: Services) -> None:
+    """A present but empty Origin header is falsy in Python, so `origin or
+    referer` used to substitute Referer (or the "absent" pass-through) for
+    it; a follow-up review found the same class of bug the null-origin fix
+    addressed, one layer earlier. Present-but-empty is always refused."""
+    draft_id = make_draft(services, "drafting")
+    response = client.post(f"/content/drafts/{draft_id}/claim", headers={"Origin": ""})
+    assert response.status_code == 403
+
+
+def test_garbage_origin_post_is_refused(client: TestClient, services: Services) -> None:
+    draft_id = make_draft(services, "drafting")
+    response = client.post(
+        f"/content/drafts/{draft_id}/claim", headers={"Origin": "not a url at all"}
+    )
+    assert response.status_code == 403
+
+
+def test_empty_origin_with_good_referer_is_still_refused(
+    client: TestClient, services: Services
+) -> None:
+    """A present-but-unparsable Origin must never fall back to Referer, even
+    a same-origin one: Origin, when sent at all, is the authoritative
+    signal."""
+    draft_id = make_draft(services, "drafting")
+    response = client.post(
+        f"/content/drafts/{draft_id}/claim",
+        headers={"Origin": "", "Referer": "http://testserver/content/drafts"},
+    )
+    assert response.status_code == 403
+
+
+def test_absent_origin_with_good_referer_is_allowed(client: TestClient, services: Services) -> None:
+    draft_id = make_draft(services, "drafting")
+    response = client.post(
+        f"/content/drafts/{draft_id}/claim",
+        headers={"Referer": "http://testserver/content/drafts"},
+    )
+    assert response.status_code == 200
+    assert response.url.path == f"/content/drafts/{draft_id}"
+
+
+def test_absent_origin_and_referer_is_allowed(client: TestClient, services: Services) -> None:
+    draft_id = make_draft(services, "drafting")
+    response = client.post(f"/content/drafts/{draft_id}/claim")
+    assert response.status_code == 200
+    assert response.url.path == f"/content/drafts/{draft_id}"
+
+
 def test_rebuild_failure_notice_is_escaped(client: TestClient) -> None:
     """Adversarial review finding: the rebuild-failure page used to splice
     the draft id (verbatim, from the 404 error message) into an unescaped
     `<p>`, which is a reflected-XSS path for a nonexistent draft id."""
     from urllib.parse import quote
 
-    response = client.post(f"/preview/{quote('<img src=x onerror=alert(1)>')}/rebuild")
+    response = client.post(f"/content/previews/{quote('<img src=x onerror=alert(1)>')}/rebuild")
     assert response.status_code == 404
     assert "<img src=x" not in response.text
     assert "&lt;img src=x" in response.text
@@ -529,6 +709,30 @@ def test_approve_button_hidden_while_publish_pr_open(
     assert "republish" not in response.text.lower()
 
 
+def test_approve_button_hidden_while_publish_run_is_queued_or_building(
+    client: TestClient, services: Services
+) -> None:
+    """Adversarial review finding: between "approved" and a watch entry
+    existing (the watch is only written once the publisher opens a PR), a
+    publish run can already be `queued` or `building`; `Store.act_on_draft`
+    refuses a re-approve then too (409 publish_run_in_progress), but the
+    button only checked `publish_pr_open` and still rendered."""
+    draft_id = make_draft(services, "approved")
+    run = services.store._queue_run(draft_id, "publish")
+    services.store.index.upsert_run(run)  # _queue_run alone does not index it
+
+    response = client.get(f"/content/drafts/{draft_id}")
+    assert "no actions available from this status" in response.text.lower()
+
+    services.store.start_run(run.id, "publisher-1", "", False)
+    response = client.get(f"/content/drafts/{draft_id}")
+    assert "no actions available from this status" in response.text.lower()
+
+    services.store.finish_run(run.id, "publisher-1", True, {})
+    response = client.get(f"/content/drafts/{draft_id}")
+    assert '<button type="submit">approve' in response.text.lower()
+
+
 def test_banner_shown_by_default(client: TestClient) -> None:
     response = client.get("/content/drafts")
     assert "internal-only and unauthenticated" in response.text
@@ -554,7 +758,7 @@ def test_ui_token_never_appears_in_any_rendered_page(
         f"/content/drafts/{draft_id}",
         "/content/submissions",
         "/content/import",
-        "/preview",
+        "/content/previews",
     ]
     for path in pages:
         response = client.get(path)
