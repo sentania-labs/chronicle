@@ -156,6 +156,21 @@ itself (opening a PR from an approved draft, watching for its merge) is
 still C4 and C5: `approve` and `unpublish` still only write a run record
 and a queue entry. No reconciler yet.
 
+A fresh named volume (or PVC) comes up owned by uid 1000 now: the
+Dockerfile creates and chowns `/data`, `/data/preview`, and
+`/data/builder-work` before `USER 1000` in every stage that mounts them,
+and the builder checks both paths are writable every tick rather than
+claiming and burning a run against a wrongly-owned mount (see
+`chronicle/builder/runner.py`'s `check_writable` and the `preview_writable`
+heartbeat field). `make compose-smoke` (`ci/compose-smoke.sh`) proves the
+whole path against fresh volumes end to end.
+
+### Not done, noticed
+
+`ci/compose-smoke.sh` is not wired into CI this round: the runners have no
+fixture blog repo or GitHub App to digest against, and building that out is
+its own piece of work for C6, not a fresh-volume fix.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
