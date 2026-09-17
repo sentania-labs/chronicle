@@ -307,3 +307,41 @@ def test_output_path_shares_a_filesystem_with_the_preview_destination(
     path = runner.output_path(store, "some-run-id")
     assert path.is_relative_to(store.preview_dir)
     assert not path.is_relative_to(builder_settings.work_dir)
+
+
+def test_recovers_a_building_run_whose_lease_is_gone_entirely(
+    store: Store, builder_settings: BuilderSettings
+) -> None:
+    """Regression: a builder that crashes with an uncaught exception still
+    releases the lease in tick's own finally, leaving a run `building` with
+    no lease file at all rather than an expired one. That case has to be
+    recovered too, not just an expired lease.
+    """
+    draft_id = _make_draft(store)
+    run_id = _queue_preview(store, draft_id)
+    store.start_run(run_id, "dead-builder", "0.164.0", toolchain_drift=False)
+    leases = _leases(builder_settings)
+    assert leases.read(run_id) is None
+
+    recovered = runner.recover_expired_leases(store, leases, "new-builder")
+    assert recovered == 1
+    assert store.get_run(run_id).status == "queued"
+
+
+def test_os_error_during_build_fails_the_run_instead_of_raising(
+    store: Store, builder_settings: BuilderSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _prep_site(store)
+    draft_id = _make_draft(store)
+    run_id = _queue_preview(store, draft_id)
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise OSError("Invalid cross-device link")
+
+    monkeypatch.setattr(runner, "_atomic_swap", _boom)
+    runner.build_one(store, builder_settings, store.get_run(run_id))
+
+    finished = store.get_run(run_id)
+    assert finished.status == "failed"
+    assert finished.result is not None
+    assert finished.result["error_class"] == "builder_error"

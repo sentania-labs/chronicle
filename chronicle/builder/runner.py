@@ -80,6 +80,16 @@ def recover_expired_leases(store: Store, leases: LeaseDirectory, actor: str) -> 
     Runs at every loop tick, not only at startup, so a lease that expires
     while this builder is busy with something else is still recovered on the
     next pass rather than waiting for a restart.
+
+    Two cases, not one: a lease past its `expires_at` is the expected way a
+    hung build gets noticed, but `tick`'s own `finally` releases a run's
+    lease the moment `build_one` returns control to it at all, including on
+    an exception neither `build_one` nor anything it calls caught (found
+    live in the C3 real-blog check: an unhandled `OSError` from a bad
+    `os.replace` left a run `building` with its lease already gone, both
+    before this second case existed). A run still marked `building` with no
+    live lease at all, expired or missing, was not being built by anyone the
+    moment this loop looked, full stop.
     """
     recovered = 0
     for lease in leases.expired_leases():
@@ -88,6 +98,10 @@ def recover_expired_leases(store: Store, leases: LeaseDirectory, actor: str) -> 
             store.requeue_run(lease.run_id, actor, f"lease held by {lease.builder_id} expired")
             recovered += 1
         leases.release(lease.run_id)
+    for run in store.runs_in_flight("preview"):
+        if not leases.held(run.id):
+            store.requeue_run(run.id, actor, "building with no live lease")
+            recovered += 1
     return recovered
 
 
@@ -232,6 +246,20 @@ def build_one(store: Store, settings: BuilderSettings, run: Run) -> None:
             settings.builder_id,
             succeeded=False,
             result={"wall_time_seconds": round(wall_time, 3), "error_class": "conversion_failed"},
+        )
+    except OSError as exc:
+        # A filesystem-level failure (an unexpected cross-device rename, a
+        # permission error, disk full) is still this one run's failure, not
+        # a reason to crash the whole poll loop and leave the run `building`
+        # with no one holding its lease (recover_expired_leases's second
+        # case exists for exactly the crash this except clause now prevents).
+        wall_time = time.monotonic() - started
+        log_path.write_text(f"builder error: {exc}\n", encoding="utf-8")
+        store.finish_run(
+            run.id,
+            settings.builder_id,
+            succeeded=False,
+            result={"wall_time_seconds": round(wall_time, 3), "error_class": "builder_error"},
         )
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
