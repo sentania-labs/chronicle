@@ -156,6 +156,7 @@ def _editor_response(
     feedback = [_dump(f) for f in store.list_feedback(draft_id)]
     last_run = store.last_run(draft_id)
     preview_url = _preview_url(store.last_run(draft_id, kind="preview"))
+    watch = store.get_watch(draft_id)
     html = tpl.editor_page(
         _dump(draft),
         versions,
@@ -163,6 +164,7 @@ def _editor_response(
         _dump(last_run) if last_run else None,
         preview_url,
         banner=banner,
+        publish_pr_open=watch is not None and watch.kind == "publish",
         notice=notice,
         notice_kind=notice_kind,
     )
@@ -220,12 +222,37 @@ async def draft_save(
     try:
         services.store.save_draft(draft_id, consumer.name, base_version, frontmatter, body_text)
     except ApiError as exc:
-        if exc.status_code != 409:
-            raise
+        # Only a stale base_version is the conflict this view exists for; a
+        # draft with an open publish PR also saves as a 409
+        # ("publish_pr_open", chronicle/api/store.py's save_draft), and a
+        # round C5 review found that rendering the conflict page for that
+        # case showed an empty diff summary against wording that claims
+        # something changed underneath the visitor, which it did not.
+        if exc.code != "stale_base_version":
+            return _editor_response(
+                services,
+                draft_id,
+                banner=banner_enabled(request),
+                notice=exc.message,
+                notice_kind="error",
+                status_code=exc.status_code,
+            )
         current = services.store.get_draft(draft_id)
-        diff_summary = str(exc.extra.get("diff_summary", ""))
+        # Recomputed fresh against the draft's actual current version rather
+        # than trusting `exc.extra["diff_summary"]`: that value was computed
+        # inside `save_draft`'s lock at the moment of the conflict, and a
+        # review found that a second save landing between then and this
+        # handler running could leave it describing an older version than
+        # the one `current` (and the reloaded form) now shows.
+        try:
+            diff_summary = services.store.diff_between(draft_id, base_version, current.version_no)
+        except ApiError:
+            # base_version named no real version to begin with (0, or ahead
+            # of everything): save_draft's own best-effort summary already
+            # covers that case without raising.
+            diff_summary = str(exc.extra.get("diff_summary", ""))
         attempted = {
-            "title": frontmatter.get("title", ""),
+            "frontmatter": frontmatter,
             "body": body_text,
             "base_version": base_version,
         }
@@ -417,13 +444,11 @@ def preview_rebuild(
     try:
         services.store.act_on_draft(draft_id, "preview", consumer.name, consumer.is_ui)
     except ApiError as exc:
+        # `tpl.page`'s own `notice` argument already escapes; the body here
+        # must never repeat that message unescaped (a round C5 review found
+        # this reflecting an unescaped draft_id straight back in the page).
         return HTMLResponse(
-            tpl.page(
-                "Rebuild failed",
-                f"<p>{exc.message}</p>",
-                banner=banner_enabled(request),
-                notice=exc.message,
-            ),
+            tpl.page("Rebuild failed", "", banner=banner_enabled(request), notice=exc.message),
             status_code=exc.status_code,
         )
     return RedirectResponse("/preview", status_code=303)

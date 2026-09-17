@@ -426,6 +426,109 @@ def test_cross_origin_post_is_refused(client: TestClient, services: Services) ->
     assert response.status_code == 403
 
 
+def test_null_origin_post_is_refused(client: TestClient, services: Services) -> None:
+    """A sandboxed iframe sends `Origin: null`; that must not pass as same-origin.
+
+    Adversarial review finding: `urlsplit("null").netloc` is empty, which
+    used to fall through the same branch as "no header at all" and let a
+    cross-origin sandboxed iframe submit every state-changing form here.
+    """
+    draft_id = make_draft(services, "drafting")
+    response = client.post(f"/content/drafts/{draft_id}/claim", headers={"Origin": "null"})
+    assert response.status_code == 403
+
+
+def test_rebuild_failure_notice_is_escaped(client: TestClient) -> None:
+    """Adversarial review finding: the rebuild-failure page used to splice
+    the draft id (verbatim, from the 404 error message) into an unescaped
+    `<p>`, which is a reflected-XSS path for a nonexistent draft id."""
+    from urllib.parse import quote
+
+    response = client.post(f"/preview/{quote('<img src=x onerror=alert(1)>')}/rebuild")
+    assert response.status_code == 404
+    assert "<img src=x" not in response.text
+    assert "&lt;img src=x" in response.text
+
+
+def test_submission_material_javascript_url_is_not_a_live_link(
+    client: TestClient, agent_token: str
+) -> None:
+    """Adversarial review finding: a submission's material url is
+    unvalidated input; escape() alone leaves a `javascript:` scheme intact,
+    so it used to render as a clickable link that runs on click."""
+    response = client.post(
+        "/v1/submissions",
+        json={
+            "brief": "brief",
+            "materials": [{"name": "link", "url": "javascript:alert(document.cookie)"}],
+            "image_ids": [],
+        },
+        headers=auth(agent_token),
+    )
+    submission_id = response.json()["id"]
+    detail = client.get(f"/content/submissions/{submission_id}")
+    assert '<a href="javascript:' not in detail.text
+    assert "javascript:alert" in detail.text  # shown as inert text, not a link
+
+
+def test_stale_save_conflict_preserves_full_attempted_frontmatter(
+    client: TestClient, services: Services
+) -> None:
+    """Adversarial review finding: the conflict pane used to keep only the
+    attempted title and body, silently dropping tags/date/summary edits
+    from the "manual merge" pane."""
+    draft_id = make_draft(services, "drafting", title="Original")
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(
+        draft_id, "ghostwriter", draft.version_no, {"title": "Landed"}, "landed body"
+    )
+    response = client.post(
+        f"/content/drafts/{draft_id}/save",
+        data={
+            "base_version": str(draft.version_no),
+            "title": "My title",
+            "date": "",
+            "categories": "lab",
+            "tags": "unifi",
+            "summary": "my summary",
+            "url": "",
+            "featureImage": "",
+            "body": "my body",
+        },
+    )
+    assert response.status_code == 409
+    assert "lab" in response.text
+    assert "unifi" in response.text
+    assert "my summary" in response.text
+
+
+def test_approve_button_hidden_while_publish_pr_open(
+    client: TestClient, services: Services
+) -> None:
+    """Adversarial review finding: `_action_buttons` rendered a re-approve
+    button purely off the transition table, which does not know about
+    `Store.act_on_draft`'s own refusal to re-approve while a publish PR is
+    already open; the button used to 409 on every click until the PR
+    closed."""
+    from chronicle.api.models import WatchEntry
+
+    draft_id = make_draft(services, "approved", with_publish=True)
+    services.store.record_watch(
+        WatchEntry(
+            draft_id=draft_id,
+            kind="publish",
+            branch="post/a-draft",
+            pr_number=7,
+            pr_url="https://github.com/o/r/pull/7",
+            created_at="2026-09-17T00:00:00-05:00",
+        ),
+        "scott",
+    )
+    response = client.get(f"/content/drafts/{draft_id}")
+    assert "open publish pull request" in response.text
+    assert "republish" not in response.text.lower()
+
+
 def test_banner_shown_by_default(client: TestClient) -> None:
     response = client.get("/content/drafts")
     assert "internal-only and unauthenticated" in response.text

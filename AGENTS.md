@@ -182,10 +182,32 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
 - **The UI's markdown preview pane is client-side only, filled by `ui.js`
   from the visitor's own textarea, never by anything the server renders.**
   Every value a UI template does interpolate goes through `html.escape`
-  first, same bar as `admin_templates.py`; `marked.parse`'s output is only
-  ever assigned into the DOM the same browser tab's own input produced it
-  in, which is why it is not a second XSS surface the way echoing another
-  user's content back through it would be.
+  first, same bar as `admin_templates.py`. A round C5 review found that a
+  draft's body is not trusted input even here: a different consumer token
+  can `PUT` a body containing an event-handler payload, and Scott's own
+  browser is what later renders it when he opens the editor. `ui.js` now
+  runs `marked.parse`'s output through a small hand-written DOM sanitiser
+  (strips script-bearing tags, `on*` attributes, and `javascript:` URLs)
+  before assigning it into the preview pane; do not remove that step to
+  "simplify" the preview, and do not add a second `innerHTML` assignment of
+  parsed markdown anywhere without the same treatment.
+- **`ui_deps.check_same_origin` treats an `Origin` header that does not
+  resolve to this host as cross-origin, including the literal string
+  `"null"` a sandboxed iframe sends.** A round C5 review found that
+  `urlsplit("null").netloc` is empty, which used to fall through the same
+  branch as "no header sent at all" and let a cross-origin sandboxed iframe
+  submit every state-changing UI form. Only the genuine absence of both
+  `Origin` and `Referer` is allowed through; a present-but-unparsable value
+  never is.
+- **The editor's action buttons and the 409 conflict view both know about
+  more than `transitions.DRAFT_TRANSITIONS` alone.** `Store.act_on_draft`
+  separately refuses a re-approve while a publish PR is already open
+  (409 `publish_pr_open`), which the transition table itself cannot see;
+  `_action_buttons` takes a `publish_pr_open` flag so that button does not
+  render only to 409 on click, and `draft_save`'s 409 handler checks
+  `exc.code == "stale_base_version"` before treating a 409 as the
+  conflict-view case, because `publish_pr_open` is also a 409 with no
+  meaningful diff to show. A round C5 review found both gaps live.
 
 ## Round C4 status
 

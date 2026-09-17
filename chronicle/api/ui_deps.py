@@ -63,8 +63,15 @@ def check_same_origin(request: Request) -> None:
         return
     from urllib.parse import urlsplit
 
+    # A sandboxed iframe (or any context with no origin of its own) sends
+    # literal "null" here, and urlsplit("null").netloc is "", which used to
+    # fall through as if no header had been sent at all: a round C5 review
+    # found that this let a third-party page POST to every state-changing
+    # route from a sandboxed iframe with no origin match required. A header
+    # that is present but does not resolve to this host, blank included, is
+    # therefore always cross-origin, never a pass-through.
     origin_host = urlsplit(origin).netloc
-    if origin_host and origin_host != request.url.netloc:
+    if origin_host != request.url.netloc:
         raise ApiError(403, "cross_origin_request", "cross-origin form submissions are refused")
 
 

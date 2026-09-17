@@ -99,10 +99,21 @@ def submission_detail_page(
     banner: bool,
     notice: str | None = None,
 ) -> str:
+    def material_link(url: str) -> str:
+        # A submission's material url is unvalidated input (chronicle.api.
+        # models.Material.url is a bare str); escape() alone leaves the
+        # scheme untouched, so a `javascript:` value would still render as
+        # a clickable link that runs on Scott's click (found in a round C5
+        # review). Only ever emit an anchor for a scheme a browser will
+        # navigate to, not execute.
+        if url.lower().startswith(("http://", "https://")):
+            return f' (<a href="{escape(url)}">{escape(url)}</a>)'
+        return f" ({escape(url)})"
+
     materials = "".join(
         f"<li><strong>{escape(m['name'])}</strong>"
         + (f": {escape(m['text'])}" if m.get("text") else "")
-        + (f' (<a href="{escape(m["url"])}">{escape(m["url"])}</a>)' if m.get("url") else "")
+        + (material_link(m["url"]) if m.get("url") else "")
         + "</li>"
         for m in submission["materials"]
     )
@@ -292,10 +303,18 @@ def _image_list(draft_id: str, images: list[dict[str, Any]]) -> str:
     return f"<table><tr><th>filename</th><th>role</th><th></th></tr>{rows}</table>"
 
 
-def _action_buttons(draft_id: str, status: str, published: dict[str, Any] | None) -> str:
+def _action_buttons(
+    draft_id: str, status: str, published: dict[str, Any] | None, publish_pr_open: bool
+) -> str:
     buttons = []
     for (from_status, action), transition in DRAFT_TRANSITIONS.items():
         if from_status != status or action == "revise":
+            continue
+        if action == "approve" and status == "approved" and publish_pr_open:
+            # `Store.act_on_draft` itself refuses a re-approve while a
+            # publish PR is already open (409 publish_pr_open); the table
+            # alone can't see that, so a round C5 review found this button
+            # rendering and then 409ing on every click until the PR closes.
             continue
         label = action.replace("_", " ")
         if action == "approve" and published:
@@ -359,6 +378,7 @@ def editor_page(
     preview_url: str | None,
     *,
     banner: bool,
+    publish_pr_open: bool = False,
     notice: str | None = None,
     notice_kind: str = "error",
 ) -> str:
@@ -379,10 +399,17 @@ def editor_page(
         f'<p><a href="{escape(preview_url)}">Last built preview</a></p>' if preview_url else ""
     )
     body_text = escape(draft["body"])
+    pr_open_notice = (
+        '<p class="notice conflict">This draft has an open publish pull request; '
+        "saving is refused until it merges or closes.</p>"
+        if publish_pr_open
+        else ""
+    )
     body = f"""
 {claim_html}
 {preview_link}
 {_run_status(last_run)}
+{pr_open_notice}
 <h2>Edit</h2>
 <form method="post" action="/content/drafts/{escape(draft["id"])}/save">
 <input type="hidden" name="base_version" value="{draft["version_no"]}">
@@ -410,7 +437,7 @@ def editor_page(
 <button type="submit">Upload and attach</button>
 </form>
 <h2>Actions</h2>
-<div class="actions">{_action_buttons(draft["id"], draft["status"], draft.get("published"))}</div>
+<div class="actions">{_action_buttons(draft["id"], draft["status"], draft.get("published"), publish_pr_open)}</div>
 <h2>Version history</h2>
 {_version_history(draft["id"], versions)}
 <h2>Feedback</h2>
@@ -455,12 +482,26 @@ reapply anything from your attempted text on the right.</p>
 </div>
 <div>
 <h2>Your attempted text (not saved, for manual merging)</h2>
-<p class="muted">title: {escape(attempted.get("title", ""))}</p>
+{_attempted_frontmatter_summary(attempted.get("frontmatter", {}))}
 <pre>{escape(attempted.get("body", ""))}</pre>
 </div>
 </div>
 """
     return page("Save conflict", body, banner=banner, notice_kind="conflict")
+
+
+def _attempted_frontmatter_summary(frontmatter: dict[str, Any]) -> str:
+    # Every frontmatter field the visitor attempted, not just title and
+    # body: a round C5 review found that a conflict on a save that also
+    # changed tags, date, or summary silently dropped those from the
+    # "your attempted text" pane, leaving nothing to manually merge from.
+    def render(value: Any) -> str:
+        if isinstance(value, list):
+            return escape(", ".join(str(v) for v in value))
+        return escape(str(value))
+
+    rows = "".join(f"<li>{escape(key)}: {render(value)}</li>" for key, value in frontmatter.items())
+    return f"<ul class='muted'>{rows}</ul>" if rows else ""
 
 
 def diff_page(
