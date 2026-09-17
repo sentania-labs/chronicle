@@ -397,7 +397,7 @@ def _version_history(draft_id: str, versions: list[dict[str, Any]]) -> str:
         return "<p>no versions yet.</p>"
     rows = "".join(
         f"<li>v{v['version_no']} by {escape(v['author'])} at {escape(v['created_at'])}"
-        + (f" &mdash; {escape(v['message'])}" if v.get("message") else "")
+        + (f": {escape(v['message'])}" if v.get("message") else "")
         + f' (<a href="/content/drafts/{escape(draft_id)}/diff?from={v["version_no"] - 1}&to={v["version_no"]}">diff vs previous</a>)</li>'
         for v in versions
     )
@@ -408,7 +408,7 @@ def _run_status(run: dict[str, Any] | None) -> str:
     if run is None:
         return "<p>no runs yet.</p>"
     return (
-        f"<p>last run: {escape(run['kind'])} &mdash; {escape(run['status'])} at "
+        f"<p>last run: {escape(run['kind'])}: {escape(run['status'])} at "
         f"{escape(run.get('finished_at') or run.get('started_at') or run['created_at'])} "
         f'(<a href="/runs/{escape(run["id"])}">log</a>)</p>'
     )
