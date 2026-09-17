@@ -14,12 +14,14 @@ and conflict-detecting saves, feedback, images, runs, and events, all under
 `/v1` and all behind a consumer token. C2 added the admin front door (claim,
 sessions, tokens page, status page), a GitHub App connected through the
 manifest flow, and the digest of main that turns published posts into
-`Post` records and `from_post` imports. This round (C3) makes preview real:
-the builder container watches the run queue, converts a draft to a Hugo
-post, and builds it; the preview container serves the result at
-`/preview/<slug>/...`. The GitHub publish path itself (opening a PR,
-watching for a merge) is still C4 and C5; `approve` and `unpublish` still
-only record a queued run and stop.
+`Post` records and `from_post` imports. C3 made preview real: the builder
+container watches the run queue, converts a draft to a Hugo post, and
+builds it; the preview container serves the result at
+`/preview/<slug>/...`. This round (C4) makes publish, unpublish, merge
+watch, and reconciliation real: `approve` and `unpublish` open a pull
+request against the blog repo through the GitHub App, a watcher polls it
+until it merges or closes, and reconciliation flags (never corrects) a
+mismatch between main and Chronicle's own records.
 
 ## Preview
 
@@ -62,6 +64,98 @@ never blocks a build).
 A full rebuild of the real blog (347 posts, two theme submodules) measured
 2.6 seconds wall time end to end in the C3 pull request's live check
 against a local clone; see that PR for the full run record and evidence.
+
+## Publish and unpublish
+
+`POST /v1/drafts/{id}/actions/approve` (from `in_review`) and
+`POST /v1/drafts/{id}/actions/unpublish` (from `published`) each queue a
+run of kind `publish` or `unpublish`. A publisher thread inside the api
+process (ADR 013; it needs no Hugo toolchain, so it does not live in the
+builder container) claims one at a time:
+
+1. Create or hard-reset the branch `post/<slug>` at the default branch's
+   current head, through the GitHub App's git data API.
+2. Convert the draft with the same `chronicle/api/convert.py` the builder
+   uses for preview, run the lint and normalize pass
+   (`chronicle/api/lint.py`, ported from an earlier vault publisher: it
+   auto-fixes a relative image reference missing its leading slash and
+   warns, never blocks, on a malformed markdown link), and write the post
+   file plus its images as one commit.
+3. Open a pull request to the default branch (body: title, description or
+   summary, the preview URL, the run id, the image list, and a
+   `chronicle: publish` or `chronicle: unpublish` marker line), or, if one
+   is already open for that branch, update its body instead of opening a
+   second one. Idempotent by construction: re-running the action for the
+   same draft always resets the branch and reuses the same PR.
+4. Record the branch, PR number, PR URL, and commit sha on the run and on
+   `Draft.published`. First publish stamps `date` as now in
+   America/Chicago; republish keeps the original date and sets `lastmod`
+   to now.
+
+The draft's status does not change here: `approved` and `published` stay
+apart until the merge is actually observed (below). Unpublish deletes
+exactly the post file and images the last successful publish recorded, not
+whatever the draft's current state happens to compute to.
+
+## Merge watch
+
+A watcher thread, alongside the publisher in the same process, polls every
+PR Chronicle has open (`data/repo/watch/<draft_id>.json`, one file per
+draft, so a restart resumes exactly where it left off) at
+`CHRONICLE_WATCH_POLL_SECONDS` (default 60s), backing off toward
+`CHRONICLE_WATCH_POLL_MAX_SECONDS` (default 900s) while nothing is open.
+
+- **Merged:** delete the remote branch, refresh `data/site/` and the
+  affected `Post` record, and move the draft to `published` or
+  `unpublished`. Reconciliation also runs immediately after (spec section
+  12's third trigger).
+- **Closed without merging:** move the draft back to `in_review` with a
+  `github`-authored feedback entry saying the PR was closed.
+
+## Reconciliation
+
+Runs at startup, hourly (`CHRONICLE_RECONCILE_INTERVAL_SECONDS`, default
+3600s), and right after every observed merge. Fetches the default branch,
+re-parses posts and the build toolchain, and computes five flags, never
+correcting anything on its own conclusion (`docs/decisions/
+005-reconciliation-flags-only.md`):
+
+| Flag | What it means |
+| --- | --- |
+| `draft_published_missing_on_main` | a draft says `published` but its post is gone from main |
+| `post_on_main_without_published_draft` | main has a post with no draft tracking it as published |
+| `post_removed_without_unpublish` | a post Chronicle knew about vanished from main with no unpublish run |
+| `slug_drift` | the post's file is still there, but its slug on main no longer matches the draft's pinned slug |
+| `content_drift` | a published post's content on main differs from what Chronicle last published |
+
+`content_drift` also records a new draft version authored `github` with
+the content actually on main, so Chronicle's own copy never silently goes
+stale; it still never changes the draft's status. The admin status page
+lists every open flag with the resolutions that apply to its type: `mark
+published`, `mark unpublished`, `import as draft`, `ignore`. Each
+resolution is one admin-authored event, and a status change it implies
+still goes through the same transition table every other action uses.
+
+## Test-token mode
+
+Test only, never used in a real deployment: setting
+`CHRONICLE_GITHUB_TEST_TOKEN` and `CHRONICLE_ALLOW_TEST_TOKEN=1` runs
+publish, watch, and reconcile against `CHRONICLE_GITHUB_TEST_REPO`
+(`owner/name`) with that bearer token directly, no GitHub App installation
+required (`docs/decisions/012-test-token-github-mode.md`). The token alone
+is refused: the api will not start unless both variables are set, naming
+both in the error. The admin status page and `/readyz` both report
+`github_app: test token mode` so it is never mistaken for a verified App.
+`examples/k8s/` never mentions either variable.
+
+`sentania-labs/chronicle-target` is the standing target for this mode: a
+private throwaway repository seeded with a two-post Hugo site in the real
+blog's shape (dated filenames, `url`, `type`, `author`, images,
+`.github/workflows/hugo.yml` pinned to Hugo 0.164.0, default branch
+`main`, no theme). Every round's live check that needs a real publish,
+merge, or reconcile cycle runs against it with a personal access token in
+place of an installation token; it is not the real blog, and nothing here
+ever touches `sentania/sentania.github.io`.
 
 ## The API
 
@@ -116,8 +210,10 @@ data/
     feedback/<draft_id>.md       the same entries rendered for a human, never parsed back
     posts/<slug>.json
     runs/<id>.json
-    runs/queue/<run_id>.json     consumed by the builder
+    runs/queue/<run_id>.json     consumed by the builder (preview) or the publisher (publish/unpublish)
     runs/logs/<run_id>.log       captured build output, read by GET /v1/runs/{id}/log
+    watch/<draft_id>.json        one open Chronicle PR the watcher is polling (ADR 013)
+    reconcile/<flag_id>.json     one reconciliation flag (spec section 12, ADR 005)
     events/log.jsonl             append-only, one object per line, monotonic seq
     index/chronicle.db           derived SQLite, gitignored, rebuildable
   images/<sha[:2]>/<sha>.<ext>   content-addressed, sha256 is the image id
@@ -131,6 +227,9 @@ data/
     toolchain.json                 last digest's Hugo version and theme commits, 0644
     builder/heartbeat.json         builder id, last loop time, hugo version, queue depth
     builder/leases/<run_id>.json   one builder's claim on one run (ADR 011)
+    publisher/heartbeat.json       last publish/unpublish poll loop time, queue depth
+    watcher/heartbeat.json         last watch poll loop time, PRs watched, current interval
+    reconcile/heartbeat.json       last reconciliation run time, current interval
   builder-work/                  the builder's scratch tree and Hugo caches, disposable
     scratch/<run_id>/, cache/, resources/
   preview/                       built preview output, disposable

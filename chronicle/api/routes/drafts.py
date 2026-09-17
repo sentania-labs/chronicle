@@ -144,15 +144,17 @@ def get_status(draft_id: str, services: Services = Depends(get_services)) -> dic
     draft = services.store.get_draft(draft_id)
     last_run = services.store.last_run(draft.id)
     last_preview_run = services.store.last_run(draft.id, kind="preview")
+    published = draft.published or {}
     return {
         "status": draft.status,
         "slug": draft.slug,
         "last_run": last_run.model_dump(mode="json") if last_run else None,
         "preview_url": _preview_url(last_preview_run),
-        # The GitHub client's publish path arrives in C4; until then these
-        # are honestly null rather than a guessed URL.
-        "branch": None,
-        "pr_url": None,
+        # Set once a publish or unpublish run has actually recorded a
+        # result (Store.record_publish_result); null before that, not a
+        # guessed value.
+        "branch": published.get("branch"),
+        "pr_url": published.get("pr_url"),
     }
 
 
