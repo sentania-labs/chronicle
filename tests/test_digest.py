@@ -270,3 +270,72 @@ def test_digest_reports_an_update_when_a_post_changes(
     assert second.unchanged == 1
     assert store.get_post("first-post").title == "First Post Revised"
     store.close()
+
+
+def test_digest_then_from_post_import_of_a_real_shaped_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real blog's posts are dated filenames with no `slug:` key, keep
+    their images under `static/images/<name>/`, and reference them
+    root-relative in both `featureImage` and the body. This is the shape
+    that produced zero images and a dropped `url` in the live check against
+    the real repo; digest and from_post together should now round-trip it."""
+    from tests.conftest import png_bytes
+
+    repo = tmp_path / "blog.git-src"
+    repo.mkdir()
+    _git(repo, "init", "--initial-branch=main")
+
+    posts = repo / "content" / "posts"
+    posts.mkdir(parents=True)
+    slug = "2026-08-01-vcf-operations-can-now-see-my-unifi-network"
+    (posts / f"{slug}.md").write_text(
+        "---\n"
+        "title: VCF Operations Can Now See My Unifi Network\n"
+        "url: /vcf-operations-can-now-see-my-unifi-network/\n"
+        "type: post\n"
+        "date: 2026-08-01\n"
+        "author: scott\n"
+        "featureImage: /images/vcf-operations-can-now-see-my-unifi-network/featured.png\n"
+        "---\n"
+        "body text\n"
+        "![diagram](/images/vcf-operations-can-now-see-my-unifi-network/diagram.png)\n",
+        encoding="utf-8",
+    )
+    image_dir = repo / "static" / "images" / "vcf-operations-can-now-see-my-unifi-network"
+    image_dir.mkdir(parents=True)
+    (image_dir / "featured.png").write_bytes(png_bytes((1, 2, 3)))
+    (image_dir / "diagram.png").write_bytes(png_bytes((4, 5, 6)))
+
+    workflows = repo / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "hugo.yml").write_text(
+        "name: hugo\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+        "    env:\n      HUGO_VERSION: 0.164.0\n    steps:\n      - run: echo build\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "real-shaped post")
+
+    store, admin = _build(tmp_path / "data", repo, monkeypatch)
+    digested = run_digest(store, "chronicle", admin)
+    assert digested.created == 1
+
+    draft, warnings = store.create_draft("chronicle", from_post=slug)
+    assert warnings == []
+    assert draft.frontmatter["url"] == "/vcf-operations-can-now-see-my-unifi-network/"
+    assert draft.frontmatter["featureImage"] == (
+        "/images/vcf-operations-can-now-see-my-unifi-network/featured.png"
+    )
+
+    assert len(draft.images) == 2
+    by_role = {img.role: img for img in draft.images}
+    assert by_role["feature"].filename == "featured.png"
+    assert by_role["feature"].source_ref == (
+        "/images/vcf-operations-can-now-see-my-unifi-network/featured.png"
+    )
+    assert by_role["inline"].filename == "diagram.png"
+    assert by_role["inline"].source_ref == (
+        "/images/vcf-operations-can-now-see-my-unifi-network/diagram.png"
+    )
+    store.close()

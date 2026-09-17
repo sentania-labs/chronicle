@@ -97,6 +97,62 @@ def test_from_post_import_pulls_bundle_images_and_marks_the_feature_image(store:
     assert roles == {"cover.png": "feature", "inline.png": "inline"}
 
 
+def test_from_post_import_resolves_real_post_image_layout(store: Store) -> None:
+    """Real posts are dated filenames with no `slug:` key, keep images under
+    `static/images/<name>/`, and reference them root-relative. The record
+    slug is the filename stem, not the image directory name, so resolution
+    has to go through the frontmatter/body references rather than the old
+    `static/images/<slug>/` sweep alone."""
+    slug = "2026-08-01-vcf-operations-can-now-see-my-unifi-network"
+    post_dir = store.site_dir / "content" / "posts"
+    post_dir.mkdir(parents=True, exist_ok=True)
+    (post_dir / f"{slug}.md").write_text(
+        "---\n"
+        "title: VCF Operations Can Now See My Unifi Network\n"
+        "url: /vcf-operations-can-now-see-my-unifi-network/\n"
+        "type: post\n"
+        "date: 2026-08-01\n"
+        "featureImage: /images/vcf-operations-can-now-see-my-unifi-network/featured.png\n"
+        "---\n"
+        "body text\n"
+        "![diagram](/images/vcf-operations-can-now-see-my-unifi-network/diagram.png)\n",
+        encoding="utf-8",
+    )
+    image_dir = store.site_dir / "static" / "images" / "vcf-operations-can-now-see-my-unifi-network"
+    image_dir.mkdir(parents=True)
+    (image_dir / "featured.png").write_bytes(png_bytes((1, 2, 3)))
+    (image_dir / "diagram.png").write_bytes(png_bytes((4, 5, 6)))
+
+    post = Post(
+        slug=slug,
+        path=f"content/posts/{slug}.md",
+        title="VCF Operations Can Now See My Unifi Network",
+        date="2026-08-01",
+        sha="realsha",
+    )
+    store.posts_dir.mkdir(parents=True, exist_ok=True)
+    store._write_json(store.posts_dir / f"{slug}.json", post.model_dump(mode="json"))
+    store.index.upsert_post(post)
+
+    draft, warnings = store.create_draft("ghostwriter", from_post=slug)
+    assert warnings == []
+    assert draft.frontmatter["url"] == "/vcf-operations-can-now-see-my-unifi-network/"
+    assert draft.frontmatter["featureImage"] == (
+        "/images/vcf-operations-can-now-see-my-unifi-network/featured.png"
+    )
+
+    assert len(draft.images) == 2
+    by_role = {img.role: img for img in draft.images}
+    assert by_role["feature"].filename == "featured.png"
+    assert by_role["feature"].source_ref == (
+        "/images/vcf-operations-can-now-see-my-unifi-network/featured.png"
+    )
+    assert by_role["inline"].filename == "diagram.png"
+    assert by_role["inline"].source_ref == (
+        "/images/vcf-operations-can-now-see-my-unifi-network/diagram.png"
+    )
+
+
 def test_from_post_import_without_a_digested_file_is_404(store: Store) -> None:
     post = Post(
         slug="ghost", path="content/posts/ghost.md", title="Ghost", date="2024-01-01", sha="x"

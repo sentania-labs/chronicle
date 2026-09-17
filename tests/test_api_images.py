@@ -95,7 +95,7 @@ def test_attach_and_detach_on_a_draft(client: TestClient, agent_token: str) -> N
     )
     assert attached.status_code == 200
     assert attached.json()["images"] == [
-        {"image_id": image_id, "filename": "shot.png", "role": "feature"}
+        {"image_id": image_id, "filename": "shot.png", "role": "feature", "source_ref": None}
     ]
 
     bad_role = client.put(

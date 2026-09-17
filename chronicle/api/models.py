@@ -14,18 +14,25 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# Spec section 4 says "Hugo allowlist"; which keys are in it is ADR 007.
+# Spec section 4 says "Hugo allowlist"; which keys are in it is ADR 007,
+# amended 2026-09-16 against the real blog's 347 posts and the dashboard
+# port's field set.
 FRONTMATTER_ALLOWLIST = (
     "title",
+    "author",
+    "type",
     "date",
     "lastmod",
     "draft",
-    "description",
-    "tags",
-    "categories",
-    "series",
+    "url",
     "slug",
+    "description",
+    "summary",
+    "categories",
+    "tags",
+    "series",
     "featureImage",
+    "shareImage",
 )
 
 SUBMISSION_STATUSES = ("new", "claimed", "drafted", "discarded")
@@ -85,6 +92,12 @@ class DraftImage(BaseModel):
     image_id: str
     filename: str
     role: str
+    # The path the post itself used to reach this image (a frontmatter value
+    # or a body reference), kept so publish (C4) can rewrite references
+    # against wherever the image ends up. None for images picked up only by
+    # the static/images/<slug>/ directory sweep, which has no reference to
+    # record.
+    source_ref: str | None = None
 
 
 class Claim(BaseModel):
