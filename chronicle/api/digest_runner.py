@@ -52,16 +52,25 @@ def _clone_url(admin: AdminServices | None) -> tuple[str, str | None, str | None
     `_auth_env`) rather than embedding it in the URL, which is what git
     would otherwise persist into `remote.origin.url`.
     """
+    settings_url: str | None = None
+    fallback_token: str | None = None
     if admin is not None:
         record = admin.github_store.load()
         if record is not None and record.owner_repo and record.installation_id:
             token = _installation_token(admin, record.installation_id)
             return f"https://github.com/{record.owner_repo}.git", record.default_branch, token
         settings_url = admin.settings.digest_repo_url
-    else:
-        settings_url = None
+        # Test-token mode (ADR 012) has no GitHub App record to mint an
+        # installation token from, but CHRONICLE_DIGEST_REPO_URL can still
+        # name the same private repo the test token acts against (the C4
+        # live check's own shape: chronicle-target is private); passing the
+        # test token here is what makes that clone succeed instead of
+        # falling back to an anonymous fetch that a private repo refuses.
+        fallback_token = (
+            admin.settings.github_test_token if admin.settings.test_token_mode else None
+        )
     if settings_url:
-        return settings_url, None, None
+        return settings_url, None, fallback_token
     raise DigestNotConfigured(
         "no GitHub App repository is configured and CHRONICLE_DIGEST_REPO_URL is not set"
     )

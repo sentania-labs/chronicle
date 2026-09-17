@@ -147,6 +147,33 @@ def test_digest_without_any_source_configured_fails_honestly(
         run_digest(store, "chronicle", admin)
 
 
+def test_digest_repo_url_carries_the_test_token_in_test_token_mode(
+    tmp_path: Path, blog_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR 012: CHRONICLE_DIGEST_REPO_URL alone clones anonymously, which a
+    private repo (chronicle-target) refuses; test-token mode must carry its
+    token into the same clone, not just into GitHubRepoOps calls."""
+    monkeypatch.setenv("CHRONICLE_DIGEST_REPO_URL", str(blog_repo))
+    monkeypatch.setenv("CHRONICLE_ALLOW_TEST_TOKEN", "1")
+    monkeypatch.setenv("CHRONICLE_GITHUB_TEST_TOKEN", "fake-test-token")
+    store = Store.open(tmp_path / "data")
+    admin = AdminServices.build(tmp_path / "data")
+
+    captured: dict[str, str | None] = {}
+    original = digest.clone_or_update
+
+    def spy(
+        site_dir: Path, repo_url: str, branch: str | None = None, token: str | None = None
+    ) -> str:
+        captured["token"] = token
+        return original(site_dir, repo_url, branch, token=token)
+
+    monkeypatch.setattr(digest, "clone_or_update", spy)
+    run_digest(store, "test", admin)
+
+    assert captured["token"] == "fake-test-token"
+
+
 def test_digest_run_creates_posts_and_a_second_run_is_a_no_op(
     tmp_path: Path, blog_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
