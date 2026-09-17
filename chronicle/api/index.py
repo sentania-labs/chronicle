@@ -88,6 +88,15 @@ class Index:
         derived cache (ADR 006), so the safe fix is to drop the stale
         tables and let `reindex` rebuild them, not migrate column by
         column.
+
+        Only an older stored version triggers this: a database stamped
+        with a version newer than this build's SCHEMA_VERSION was written
+        by code this build does not understand, and must be left exactly
+        as found so `_index_check`'s readyz mismatch report stays honest
+        (test_store.py:test_an_existing_schema_version_is_never_restamped).
+        A newer schema is additive by convention, so this build's own
+        `CREATE TABLE/INDEX IF NOT EXISTS` statements are no-ops against it
+        either way.
         """
         row = self.conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'"
@@ -98,7 +107,7 @@ class Index:
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
         ).fetchone()
         stored = int(version_row["value"]) if version_row else 0
-        if stored == SCHEMA_VERSION:
+        if stored >= SCHEMA_VERSION:
             return
         tables = [
             r["name"]
