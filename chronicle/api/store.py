@@ -461,7 +461,11 @@ class Store:
         draft.image_dir = convert.image_dir_name(allowed.get("url"), slug)
 
         images, image_warnings = self._import_post_images(
-            source_path, slug, body, allowed.get("featureImage"), allowed.get("shareImage")
+            source_path,
+            draft.image_dir,
+            body,
+            allowed.get("featureImage"),
+            allowed.get("shareImage"),
         )
         draft.images = images
         warnings.extend(image_warnings)
@@ -508,7 +512,7 @@ class Store:
     def _import_post_images(
         self,
         source_path: Path,
-        slug: str,
+        image_dir: str,
         body: str,
         feature_image: Any,
         share_image: Any,
@@ -539,16 +543,19 @@ class Store:
             )
             imported_names.add(path.name)
 
-        # Fallback sweep for the page-bundle and static/images/<slug>/ layouts
-        # (ADR 007 predates the real-post case): anything not already picked
-        # up by an explicit reference still gets attached, with no reference
-        # path to record.
+        # Fallback sweep for the page-bundle and static/images/<image_dir>/
+        # layouts (ADR 007 predates the real-post case; ADR 015 fixed this
+        # sweep to look in the post's actual, url-derived image directory
+        # rather than a dated digest slug, which found nothing on a real
+        # dated-filename post and silently dropped every unreferenced
+        # image): anything not already picked up by an explicit reference
+        # still gets attached, with no reference path to record.
         candidates: list[Path] = []
         if source_path.name == "index.md":
             candidates.extend(
                 p for p in source_path.parent.iterdir() if p.is_file() and p != source_path
             )
-        bundle_dir = self.site_dir / "static" / "images" / slug
+        bundle_dir = self.site_dir / "static" / "images" / image_dir
         if bundle_dir.is_dir():
             candidates.extend(p for p in bundle_dir.iterdir() if p.is_file())
 
