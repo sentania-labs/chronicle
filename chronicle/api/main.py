@@ -54,6 +54,14 @@ DATA_DIR_ENV = "CHRONICLE_DATA_DIR"
 # BodySizeLimitMiddleware below also enforces this on the stream itself, so a
 # chunked request with no (or a lying) Content-Length cannot get around it.
 MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024
+# A restore bundle carries repo/ (with .git history) and every image, easily
+# past the 8 MiB default; /admin/backup/upload is the one route that needs
+# a much larger ceiling. Still bounded, not exempted: the route reads the
+# whole upload into memory (chronicle/api/routes/admin.py:backup_upload), so
+# an unbounded cap would trade the 413 for a memory-exhaustion path even
+# though this route already sits behind an authenticated admin session.
+MAX_BACKUP_UPLOAD_BYTES = 512 * 1024 * 1024
+BACKUP_UPLOAD_PATH = "/admin/backup/upload"
 
 
 class OversizedBody(Exception):
@@ -106,15 +114,22 @@ class BodySizeLimitMiddleware:
     crossed, before a route handler ever sees the rest of the body.
     """
 
-    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+    def __init__(
+        self, app: ASGIApp, max_bytes: int, path_overrides: dict[str, int] | None = None
+    ) -> None:
         self.app = app
         self.max_bytes = max_bytes
+        self.path_overrides = path_overrides or {}
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
+        # Local, not `self.max_bytes`: the middleware instance is shared
+        # across every concurrent request, so a per-path ceiling must live
+        # on the stack, never mutated on `self`.
+        max_bytes = self.path_overrides.get(scope.get("path", ""), self.max_bytes)
         headers = dict(scope.get("headers") or [])
         content_length = headers.get(b"content-length")
         if content_length is not None:
@@ -122,8 +137,8 @@ class BodySizeLimitMiddleware:
                 declared = int(content_length)
             except ValueError:
                 declared = 0
-            if declared > self.max_bytes:
-                await _oversized_response(declared, self.max_bytes, send)
+            if declared > max_bytes:
+                await _oversized_response(declared, max_bytes, send)
                 return
 
         total = 0
@@ -135,14 +150,14 @@ class BodySizeLimitMiddleware:
                 total += (
                     len(message.get("body", b"")) if isinstance(message.get("body"), bytes) else 0
                 )
-                if total > self.max_bytes:
+                if total > max_bytes:
                     raise OversizedBody(total)
             return message
 
         try:
             await self.app(scope, limited_receive, send)
         except OversizedBody as exc:
-            await _oversized_response(exc.total, self.max_bytes, send)
+            await _oversized_response(exc.total, max_bytes, send)
 
 
 async def _oversized_response(declared: int, max_bytes: int, send: Send) -> None:
@@ -267,29 +282,39 @@ def _bootstrap(app: FastAPI) -> None:
         log.warning("data directory not usable, /v1 and /admin will report unready: %s", exc)
 
 
-def reload_after_restore(app: FastAPI) -> None:
-    """Rebind every long-lived handle onto the data directory a restore just replaced.
+def quiesce_for_restore(app: FastAPI) -> None:
+    """Stop every long-lived handle before a live restore's tree swap.
 
-    `Services` opens one `Store` (one SQLite connection, one advisory file
-    lock) for the whole process lifetime, and `background.start` closes over
-    that same `store` for the publisher, watcher, and reconcile threads.
-    `/admin/backup/restore`'s tree swap (ADR 016) happens underneath all of
-    them without their knowledge, exactly the same failure the builder
-    container hits (a long-lived connection does not notice the file
-    beneath it was replaced), and it is running in this very process rather
-    than a separate one, so a manual restart is not an option here. Stop the
-    background threads, close the stale store (releasing its lock fd, since
-    a second `Store.open` in the same process would otherwise contend with
-    it), and start over exactly as `_bootstrap` does on a fresh process.
-    Reopening `Services` also re-runs `TokenStore.ensure_ui_token`, which
-    revokes a `ui` record the restored `tokens.json` no longer matches the
-    surviving local `ui_token.txt` and mints a fresh one, the same self-heal
-    a real process restart already gets for free.
+    `restore_backup`'s own docstring says the api process must be stopped
+    first: its swap is a bare `shutil.move` of `repo/` and `images/`, not
+    taken under any lock, on the same single-writer assumption ADR 013
+    makes for the publisher. `/admin/backup/restore` is the one caller that
+    can't actually stop the process (it's running inside it), so it must
+    still get the same effect: this must run and complete, stopping the
+    publisher, watcher, and reconcile threads and closing the store's
+    SQLite connection and advisory lock, before `restore_backup` is called,
+    never after. `resume_after_restore` below is `_bootstrap`'s reopen
+    sequence, replayed after the swap; it must run whether `restore_backup`
+    succeeded or raised, or the process is left with no services at all
+    until a real restart.
     """
     if app.state.background is not None:
         app.state.background.stop()
     if app.state.services is not None:
         app.state.services.close()
+    app.state.services = None
+    app.state.admin_services = None
+    app.state.background = None
+
+
+def resume_after_restore(app: FastAPI) -> None:
+    """Rebind every long-lived handle onto the data directory a restore just replaced.
+
+    Reopening `Services` also re-runs `TokenStore.ensure_ui_token`, which
+    revokes a `ui` record the restored `tokens.json` no longer matches the
+    surviving local `ui_token.txt` and mints a fresh one, the same self-heal
+    a real process restart already gets for free.
+    """
     path = os.environ.get(DATA_DIR_ENV)
     if not path or not os.path.isdir(path):
         app.state.services = None
@@ -338,7 +363,11 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, validation_error_handler)
     app.add_exception_handler(StarletteHTTPException, http_error_handler)
     app.add_exception_handler(AdminAuthRedirect, admin_redirect_handler)
-    app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
+    app.add_middleware(
+        BodySizeLimitMiddleware,
+        max_bytes=MAX_REQUEST_BODY_BYTES,
+        path_overrides={BACKUP_UPLOAD_PATH: MAX_BACKUP_UPLOAD_BYTES},
+    )
     app.add_middleware(ContentSecurityPolicyMiddleware)
 
     _bootstrap(app)

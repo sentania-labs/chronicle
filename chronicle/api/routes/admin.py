@@ -664,22 +664,29 @@ def backup_restore(
             ),
             status_code=400,
         )
+
+    # Deferred import: `main` imports this module at startup to mount the
+    # router, so importing it back at module scope here would be circular.
+    from .. import main as main_module
+
+    data_dir = _data_dir(admin)
+    # restore_backup's own contract is that the api process is stopped
+    # first: its tree swap is a bare shutil.move, not taken under any lock,
+    # on the single-writer assumption ADR 013 makes for the publisher. This
+    # route can't stop the process, so it gets the same effect by stopping
+    # the publisher, watcher, reconcile threads, and the store's own SQLite
+    # connection before the swap runs, never after; a write racing the swap
+    # would otherwise land in the pre-restore tree this same call deletes.
+    main_module.quiesce_for_restore(request.app)
     try:
-        report = backup_mod.restore_backup(_data_dir(admin), staged_path)
+        report = backup_mod.restore_backup(data_dir, staged_path)
     except backup_mod.BackupError as exc:
         return HTMLResponse(
             tpl.backup_page(last_backup=_read_last_backup(admin), notice=str(exc)), status_code=400
         )
     finally:
         staged_path.unlink(missing_ok=True)
-
-    # The swap just replaced the data directory this process's Store,
-    # TokenStore, and background threads all still hold handles into.
-    # Deferred import: `main` imports this module at startup to mount the
-    # router, so importing it back at module scope here would be circular.
-    from .. import main as main_module
-
-    main_module.reload_after_restore(request.app)
+        main_module.resume_after_restore(request.app)
 
     notice = f"restored: before={report.before} after={report.after}"
     if report.credentials_decryptable is False:
