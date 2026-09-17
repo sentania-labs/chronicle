@@ -31,11 +31,10 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from . import background
+from . import admin_status, background
 from .admin_deps import AdminAuthRedirect, AdminServices, admin_redirect_handler
 from .deps import Services
 from .errors import ApiError, api_error_handler, http_error_handler, validation_error_handler
-from .github_app import readiness_state
 from .index import SCHEMA_VERSION
 from .routes import build_v1_router
 from .routes.admin import api_router as admin_api_router
@@ -165,8 +164,7 @@ def _git_check() -> Check:
 def _github_app_check(admin_services: AdminServices | None) -> Check:
     if admin_services is None:
         return Check(name="github_app", ok=True, detail="not configured")
-    record = admin_services.github_store.load()
-    state = readiness_state(record)
+    state = admin_status.github_app_state(admin_services)
     # Drift and "not yet verified" are honest states, not failures: a fresh
     # bootstrap or a repo pick still in progress should not flip /readyz red.
     ok = not state.startswith("failing")

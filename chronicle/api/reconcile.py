@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import threading
 from dataclasses import dataclass
 
 from . import digest as digest_mod
 from .admin_deps import AdminServices
 from .digest_runner import refresh_from_target
+from .github_client import GitHubApiError
 from .models import FRONTMATTER_ALLOWLIST, Draft, now_stamp
 from .publisher import build_repo_target
 from .store import Store
@@ -29,6 +31,17 @@ from .store import Store
 log = logging.getLogger("chronicle.api.reconcile")
 RECONCILE_ACTOR = "chronicle-reconcile"
 HEARTBEAT_PATH = ("state", "reconcile", "heartbeat.json")
+
+# Which of the four resolutions (spec section 12) makes sense for each flag
+# type; the admin page only renders these, and `Store.resolve_flag` still
+# rejects anything else as a defence-in-depth check, not just a UI nicety.
+APPLICABLE_RESOLUTIONS: dict[str, tuple[str, ...]] = {
+    "draft_published_missing_on_main": ("mark_unpublished", "ignore"),
+    "post_on_main_without_published_draft": ("import_as_draft", "ignore"),
+    "post_removed_without_unpublish": ("ignore",),
+    "slug_drift": ("ignore",),
+    "content_drift": ("ignore",),
+}
 
 
 class ReconcileNotConfigured(Exception):
@@ -178,12 +191,14 @@ def _content_drift(
 
 
 def run_once_logged(store: Store, admin: AdminServices, actor: str = RECONCILE_ACTOR) -> None:
-    """`run`, but a `ReconcileNotConfigured` is logged and swallowed.
+    """`run`, with every expected failure logged and swallowed.
 
     The one entry point every caller that isn't a direct test uses
     (startup, the hourly loop, and the watcher's post-merge call): none of
     them should crash the api, or the watcher's merge handling, just
-    because no GitHub App or test-token repo is configured yet.
+    because no GitHub App or test-token repo is configured yet, or a fetch
+    of main failed transiently (network, a repo temporarily unreachable) or
+    a GitHub API call failed the same way a publish or watch call can.
     """
     try:
         summary = run(store, admin, actor)
@@ -195,6 +210,8 @@ def run_once_logged(store: Store, admin: AdminServices, actor: str = RECONCILE_A
         )
     except ReconcileNotConfigured:
         log.info("reconcile: skipped, no GitHub App or test-token repo configured yet")
+    except (OSError, subprocess.CalledProcessError, GitHubApiError) as exc:
+        log.warning("reconcile: run failed, will retry next trigger: %s", exc)
 
 
 def _write_heartbeat(store: Store, interval_seconds: float) -> None:
@@ -216,9 +233,16 @@ def run_loop(
     since it has to happen right after that specific merge, not on this
     loop's own clock.
     """
-    run_once_logged(store, admin)
+    _run_once_never_raises(store, admin)
     while not stop_event.is_set():
         _write_heartbeat(store, interval_seconds)
         if stop_event.wait(interval_seconds):
             break
+        _run_once_never_raises(store, admin)
+
+
+def _run_once_never_raises(store: Store, admin: AdminServices) -> None:
+    try:
         run_once_logged(store, admin)
+    except Exception:  # noqa: BLE001 - an unexpected bug here must not kill the loop
+        log.exception("reconcile: unexpected failure, will retry next trigger")

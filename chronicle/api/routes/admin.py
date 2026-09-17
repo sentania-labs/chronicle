@@ -43,6 +43,8 @@ from ..deps import Services, get_services
 from ..digest_runner import run as run_digest
 from ..errors import ApiError
 from ..github_client import GitHubApiError, build_manifest, manifest_target_url
+from ..models import RECONCILE_RESOLUTIONS
+from ..reconcile import run_once_logged as run_reconcile
 from ..tokens import UI_TOKEN_NAME
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -418,6 +420,55 @@ def trigger_digest_json(
         admin.digest_running = False
         admin._digest_lock.release()
     return summary.as_dict()
+
+
+# --- Reconciliation (spec section 12) ---------------------------------------
+
+
+@router.post("/reconcile")
+def trigger_reconcile(
+    admin: AdminServices = Depends(require_admin_session_html),
+    services: Services = Depends(get_services),
+) -> Any:
+    # A manual run outside the hourly loop, so an admin can act on a flag
+    # right after fixing what caused it rather than waiting for the clock;
+    # run_once_logged already swallows "not configured" rather than
+    # raising, so this is a plain redirect either way.
+    run_reconcile(services.store, admin)
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/reconcile/{flag_id}/resolve", response_class=HTMLResponse)
+async def resolve_flag(
+    flag_id: str,
+    request: Request,
+    admin: AdminServices = Depends(require_admin_session_html),
+    services: Services = Depends(get_services),
+) -> Any:
+    form = await _form(request)
+    services.store.resolve_flag(flag_id, form.get("resolution", ""), "admin")
+    return RedirectResponse("/admin", status_code=303)
+
+
+class FlagResolve(BaseModel):
+    resolution: str
+
+
+@api_router.post("/reconcile/{flag_id}/resolve")
+def resolve_flag_json(
+    flag_id: str,
+    payload: FlagResolve,
+    admin: AdminServices = Depends(require_admin_session_json),
+    services: Services = Depends(get_services),
+) -> dict[str, Any]:
+    if payload.resolution not in RECONCILE_RESOLUTIONS:
+        raise ApiError(
+            422,
+            "resolution_unknown",
+            f"resolution must be one of {', '.join(RECONCILE_RESOLUTIONS)}",
+        )
+    flag = services.store.resolve_flag(flag_id, payload.resolution, "admin")
+    return flag.model_dump(mode="json")
 
 
 # --- Tokens ----------------------------------------------------------------

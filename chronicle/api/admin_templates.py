@@ -89,6 +89,34 @@ def change_password_page(notice: str | None = None, notice_kind: str = "error") 
     return page("Change password", body, notice, notice_kind)
 
 
+def _heartbeat_rows(row: Any, heartbeat: dict[str, Any] | None, name: str) -> str:
+    if not heartbeat:
+        return f"<tr><td colspan=2>no heartbeat yet; the {name} has not completed a loop</td></tr>"
+    return "".join(row(key, value) for key, value in heartbeat.items())
+
+
+def _flag_rows(row: Any, flags: list[dict[str, Any]]) -> str:
+    if not flags:
+        return "<tr><td colspan=3>none</td></tr>"
+    rows = []
+    for flag in flags:
+        buttons = "".join(
+            f'<form style="display:inline" method="post" '
+            f'action="/admin/reconcile/{escape(flag["id"])}/resolve">'
+            f'<input type="hidden" name="resolution" value="{escape(resolution)}">'
+            f'<button type="submit">{escape(resolution)}</button></form> '
+            for resolution in flag["applicable_resolutions"]
+        )
+        rows.append(
+            "<tr>"
+            f"<td>{escape(flag['type'])}</td>"
+            f"<td>{escape(flag['detail'])}</td>"
+            f"<td>{buttons}</td>"
+            "</tr>"
+        )
+    return "".join(rows)
+
+
 def status_page(status: dict[str, Any], notice: str | None = None) -> str:
     def row(*cells: Any) -> str:
         return "<tr>" + "".join(f"<td>{escape(str(cell))}</td>" for cell in cells) + "</tr>"
@@ -102,23 +130,14 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
         "".join(row(t["path"], t["commit"]) for t in status["toolchain"]["submodules"])
         or "<tr><td colspan=2>none</td></tr>"
     )
-    heartbeat = status["builder_heartbeat"]
-    builder_rows = (
-        row("builder id", heartbeat["builder_id"])
-        + row("last loop at", heartbeat["last_loop_at"])
-        + row("hugo version (builder)", heartbeat["hugo_version"])
-        + row("queue depth (preview)", heartbeat["queue_depth"])
-        + row(
-            "preview volume writable",
-            "yes" if heartbeat.get("preview_writable", True) else "no: see builder logs",
-        )
-        if heartbeat
-        else "<tr><td colspan=2>no heartbeat yet; the builder has not completed a poll"
-        " loop</td></tr>"
-    )
+    builder_rows = _heartbeat_rows(row, status["builder_heartbeat"], "builder")
+    publisher_rows = _heartbeat_rows(row, status.get("publisher_heartbeat"), "publisher")
+    watcher_rows = _heartbeat_rows(row, status.get("watcher_heartbeat"), "watcher")
+    reconcile_rows = _heartbeat_rows(row, status.get("reconcile_heartbeat"), "reconcile")
     preview_run_rows = "".join(
         row(name, count) for name, count in status["preview_runs_by_status"].items()
     )
+    flag_rows = _flag_rows(row, status.get("reconcile_flags", []))
     body = f"""
 {nav()}
 <h2>GitHub App</h2>
@@ -144,6 +163,17 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
 <table>{builder_rows}</table>
 <h3>Preview runs by status</h3>
 <table>{preview_run_rows}</table>
+<h2>Publisher</h2>
+<table>{publisher_rows}</table>
+<h2>Watcher</h2>
+<table>{watcher_rows}</table>
+<h2>Reconciliation</h2>
+<table>{reconcile_rows}</table>
+<form method="post" action="/admin/reconcile">
+<button type="submit">Run reconciliation now</button>
+</form>
+<h3>Open flags</h3>
+<table><tr><th>type</th><th>detail</th><th>resolve</th></tr>{flag_rows}</table>
 <h2>Submissions by status</h2>
 <table>{submission_rows or "<tr><td colspan=2>none</td></tr>"}</table>
 <h2>Drafts by status</h2>
