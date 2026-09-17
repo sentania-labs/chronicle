@@ -19,7 +19,7 @@ from typing import Any
 
 from .models import Draft, Event, Image, Post, Run, Submission, Version
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 INDEX_DIR_NAME = "index"
 INDEX_FILE_NAME = "chronicle.db"
 
@@ -31,9 +31,11 @@ CREATE TABLE IF NOT EXISTS submissions (
 CREATE INDEX IF NOT EXISTS submissions_status ON submissions(status);
 CREATE TABLE IF NOT EXISTS drafts (
     id TEXT PRIMARY KEY, status TEXT NOT NULL, slug TEXT, title TEXT NOT NULL,
-    updated_at TEXT NOT NULL, version_no INTEGER NOT NULL, claim_author TEXT);
+    updated_at TEXT NOT NULL, version_no INTEGER NOT NULL, claim_author TEXT,
+    image_dir TEXT);
 CREATE INDEX IF NOT EXISTS drafts_status ON drafts(status);
 CREATE INDEX IF NOT EXISTS drafts_slug ON drafts(slug);
+CREATE INDEX IF NOT EXISTS drafts_image_dir ON drafts(image_dir);
 CREATE TABLE IF NOT EXISTS versions (
     draft_id TEXT NOT NULL, version_no INTEGER NOT NULL, author TEXT NOT NULL,
     created_at TEXT NOT NULL, PRIMARY KEY (draft_id, version_no));
@@ -106,8 +108,8 @@ class Index:
     def upsert_draft(self, record: Draft) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO drafts"
-            " (id, status, slug, title, updated_at, version_no, claim_author)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " (id, status, slug, title, updated_at, version_no, claim_author, image_dir)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record.id,
                 record.status,
@@ -116,6 +118,7 @@ class Index:
                 record.updated_at,
                 record.version_no,
                 record.claim.author if record.claim else None,
+                record.image_dir,
             ),
         )
         self.conn.commit()
@@ -187,6 +190,13 @@ class Index:
         )
         taken = {row["slug"] for row in rows}
         return taken | set(self.post_slugs())
+
+    def pinned_image_dirs(self, exclude_draft_id: str | None = None) -> set[str]:
+        rows = self.conn.execute(
+            "SELECT image_dir FROM drafts WHERE image_dir IS NOT NULL AND id IS NOT ?",
+            (exclude_draft_id,),
+        )
+        return {row["image_dir"] for row in rows}
 
     def image_id_for_sha(self, sha256: str) -> str | None:
         row = self.conn.execute(

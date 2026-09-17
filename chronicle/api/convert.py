@@ -24,11 +24,16 @@ The three rules, checked against the real blog's 347 posts:
   not reproduce that, and an author who wants it can set `url` by hand,
   which this module then leaves alone).
 - **Images.** Every attached image is copied to
-  `static/images/<slug>/<filename>` and every reference to it in the body or
-  in a frontmatter image field is rewritten to `/images/<slug>/<filename>`.
-  A reference matches by its recorded `source_ref` (what the post itself
-  used before the import) or, for an image that has none because it was
-  uploaded fresh, by filename.
+  `static/images/<image_dir>/<filename>` and every reference to it in the
+  body or in a frontmatter image field is rewritten to
+  `/images/<image_dir>/<filename>`. `image_dir` is the post's own URL slug
+  (the last non-empty path segment of `url`), never the dated filename and
+  never `draft.slug` directly when the two differ (ADR 015); it is pinned
+  once on the draft (`Draft.image_dir`) at the same moment the slug is
+  pinned, so a later save or republish never relocates the directory. A
+  reference matches by its recorded `source_ref` (what the post itself used
+  before the import) or, for an image that has none because it was uploaded
+  fresh, by filename.
 
 `draft: false` is forced on the way out. A preview of a draft that Hugo
 skipped as a draft would be an empty page, and publish never wants the flag
@@ -138,12 +143,27 @@ def post_url(draft: Draft, slug: str) -> str:
     return f"/{stamp.year:04d}/{stamp.month:02d}/{slug}/"
 
 
-def image_site_path(slug: str, filename: str) -> str:
-    return f"{STATIC_IMAGES_DIR}/{slug}/{PurePosixPath(filename).name}"
+def image_dir_name(url: str | None, fallback_slug: str) -> str:
+    """ADR 015: the URL's last non-empty path segment, or the pinned slug.
+
+    `url` is a post's own frontmatter value (an import keeps the one the
+    real post already used; a new draft may not have one yet), so this is
+    the one place both `_fill_from_post` and `_pin_slug` in `store.py` call
+    to agree on the same directory name a draft is going to keep for life.
+    """
+    if isinstance(url, str) and url.strip():
+        segments = [part for part in url.strip().split("/") if part]
+        if segments:
+            return segments[-1]
+    return fallback_slug
 
 
-def image_url(slug: str, filename: str) -> str:
-    return f"/images/{slug}/{PurePosixPath(filename).name}"
+def image_site_path(image_dir: str, filename: str) -> str:
+    return f"{STATIC_IMAGES_DIR}/{image_dir}/{PurePosixPath(filename).name}"
+
+
+def image_url(image_dir: str, filename: str) -> str:
+    return f"/images/{image_dir}/{PurePosixPath(filename).name}"
 
 
 def _is_safe_relative(path: str) -> bool:
@@ -162,7 +182,7 @@ def _disambiguated_filename(filename: str, image_id: str) -> str:
     return f"{path.stem}-{image_id[:8]}{path.suffix}"
 
 
-def placements(draft: Draft, slug: str) -> list[ImagePlacement]:
+def placements(draft: Draft, image_dir: str) -> list[ImagePlacement]:
     """Where each attached image lands, deduplicating a repeated filename.
 
     `attach_image` (`chronicle/api/store.py`) already rejects attaching a
@@ -171,9 +191,9 @@ def placements(draft: Draft, slug: str) -> list[ImagePlacement]:
     check existed, or by anything that writes `Draft.images` directly, could
     still carry two entries with the same filename and different content. A
     plain second occurrence would collide with the first at
-    `static/images/<slug>/<filename>` and silently overwrite it (round C3
-    review); a repeated name here gets its image id worked into the output
-    path instead.
+    `static/images/<image_dir>/<filename>` and silently overwrite it (round
+    C3 review); a repeated name here gets its image id worked into the
+    output path instead.
     """
     seen: dict[str, int] = {}
     placed: list[ImagePlacement] = []
@@ -186,8 +206,8 @@ def placements(draft: Draft, slug: str) -> list[ImagePlacement]:
                 image_id=image.image_id,
                 filename=name,
                 role=image.role,
-                site_path=image_site_path(slug, output_name),
-                url=image_url(slug, output_name),
+                site_path=image_site_path(image_dir, output_name),
+                url=image_url(image_dir, output_name),
             )
         )
     return placed
@@ -271,7 +291,11 @@ def convert(draft: Draft) -> ConvertedPost:
     if not draft.frontmatter.get("title"):
         raise ConversionError(f"draft {draft.id} has no title in its frontmatter")
 
-    placed = placements(draft, slug)
+    # `draft.image_dir` is pinned once, at the same moment the slug is
+    # (ADR 015); this fallback only fires for a draft written before that
+    # field existed, or a test that builds a Draft by hand.
+    image_dir = draft.image_dir or image_dir_name(draft.frontmatter.get("url"), slug)
+    placed = placements(draft, image_dir)
     by_ref, by_name = _rewrite_map(draft, placed)
 
     frontmatter = dict(draft.frontmatter)

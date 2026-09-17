@@ -159,6 +159,34 @@ def test_image_placements_point_at_static_images_slug() -> None:
     assert converted.images[0].url == "/images/my-post/pic.png"
 
 
+def test_image_dir_follows_url_not_dated_slug() -> None:
+    """ADR 015: the image directory is the URL's last path segment, not
+    draft.slug, when the two differ (an imported post whose digest slug
+    kept its dated filename stem)."""
+    draft = _draft(
+        slug="2026-08-01-vcf-operations-can-now-see-my-unifi-network",
+        image_dir="vcf-operations-can-now-see-my-unifi-network",
+        frontmatter={
+            "title": "VCF Operations Can Now See My UniFi Network",
+            "url": "/2026/08/vcf-operations-can-now-see-my-unifi-network/",
+        },
+        images=[DraftImage(image_id="img1", filename="featured.png", role="feature")],
+    )
+    converted = convert.convert(draft)
+    assert converted.images[0].site_path == (
+        "static/images/vcf-operations-can-now-see-my-unifi-network/featured.png"
+    )
+
+
+def test_image_dir_name_helper() -> None:
+    assert (
+        convert.image_dir_name("/2026/08/vcf-operations-can-now-see-my-unifi-network/", "fallback")
+        == "vcf-operations-can-now-see-my-unifi-network"
+    )
+    assert convert.image_dir_name(None, "fallback") == "fallback"
+    assert convert.image_dir_name("   ", "fallback") == "fallback"
+
+
 def test_two_attached_images_with_the_same_filename_get_distinct_output_paths() -> None:
     """Defensive fallback: the API rejects this at attach time, but a draft
     written some other way could still carry two images under one filename,

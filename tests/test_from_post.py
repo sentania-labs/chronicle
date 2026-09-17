@@ -45,6 +45,28 @@ def test_from_post_import_pins_slug_and_copies_body(store: Store) -> None:
     assert warnings == []
 
 
+def test_from_post_image_dir_follows_url_not_dated_digest_slug(store: Store) -> None:
+    """ADR 015: a real post's digest slug can be its dated filename stem;
+    the image directory Chronicle pins must be the URL's own slug so a
+    republish reproduces static/images/<dir>/ byte for byte."""
+    _seed_post_on_site(
+        store,
+        "2026-08-01-vcf-operations-can-now-see-my-unifi-network",
+        extra_frontmatter="url: /2026/08/vcf-operations-can-now-see-my-unifi-network/\n",
+    )
+    draft, _warnings = store.create_draft(
+        "ghostwriter", from_post="2026-08-01-vcf-operations-can-now-see-my-unifi-network"
+    )
+    assert draft.slug == "2026-08-01-vcf-operations-can-now-see-my-unifi-network"
+    assert draft.image_dir == "vcf-operations-can-now-see-my-unifi-network"
+
+
+def test_from_post_image_dir_falls_back_to_slug_with_no_url(store: Store) -> None:
+    _seed_post_on_site(store, "no-url-post")
+    draft, _warnings = store.create_draft("ghostwriter", from_post="no-url-post")
+    assert draft.image_dir == "no-url-post"
+
+
 def test_from_post_drops_unknown_frontmatter_keys_with_a_warning(store: Store) -> None:
     _seed_post_on_site(store, "legacy-post", extra_frontmatter="oldFieldFromTheDashboard: yes\n")
     draft, warnings = store.create_draft("ghostwriter", from_post="legacy-post")

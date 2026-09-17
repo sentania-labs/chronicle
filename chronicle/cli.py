@@ -16,6 +16,8 @@ import os
 import sys
 from pathlib import Path
 
+from . import backup as backup_mod
+from .api import convert
 from .api.admin_deps import AdminServices
 from .api.digest_runner import DigestNotConfigured
 from .api.digest_runner import run as run_digest
@@ -80,6 +82,47 @@ def _token(args: argparse.Namespace) -> int:
     return 0
 
 
+def _convert_dry_run(args: argparse.Namespace) -> int:
+    """Print what publish would write, touching nothing on GitHub.
+
+    Exists for the C6 image-directory-rule live check: it lets a diff
+    against a real blog clone's static/images/ layout run without a GitHub
+    App or a network call. `Store.image_blob` is never read here; only the
+    paths and rewritten references convert.convert already computes.
+    """
+    store = Store.open(_data_dir(args))
+    try:
+        draft = store.get_draft(args.draft_id)
+        converted = convert.convert(draft)
+    finally:
+        store.close()
+    print(f"post_path: {converted.post_path}")
+    print(f"url: {converted.url}")
+    print(f"image_dir: {draft.image_dir}")
+    for placement in converted.images:
+        print(f"image: {placement.site_path} -> {placement.url}")
+    print("--- rewritten body ---")
+    print(converted.text)
+    return 0
+
+
+def _backup_create(args: argparse.Namespace) -> int:
+    out = Path(args.out) if args.out else None
+    path = backup_mod.create_backup(_data_dir(args), out)
+    print(str(path))
+    return 0
+
+
+def _backup_restore(args: argparse.Namespace) -> int:
+    if not args.yes:
+        print("pass --yes to confirm restore", file=sys.stderr)
+        return 1
+    report = backup_mod.restore_backup(_data_dir(args), Path(args.bundle))
+    print(f"before: {report.before}")
+    print(f"after: {report.after}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="chronicle", description="Chronicle operator commands")
     parser.add_argument("--data-dir", help=f"the data directory (default: ${DATA_DIR_ENV})")
@@ -99,6 +142,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     digest = commands.add_parser("digest", help="digest the configured blog repo's main branch")
     digest.set_defaults(handler=_digest)
+
+    convert_dry_run = commands.add_parser(
+        "convert-dry-run",
+        help="print what publish would write for a draft, without touching GitHub",
+    )
+    convert_dry_run.add_argument("draft_id")
+    convert_dry_run.set_defaults(handler=_convert_dry_run)
+
+    backup = commands.add_parser("backup", help="create and restore backup bundles")
+    backup_commands = backup.add_subparsers(dest="backup_command", required=True)
+    backup_create = backup_commands.add_parser("create", help="create a backup bundle")
+    backup_create.add_argument("--out", help="output path (default: cwd, timestamped name)")
+    backup_create.set_defaults(handler=_backup_create)
+    backup_restore = backup_commands.add_parser("restore", help="restore a backup bundle")
+    backup_restore.add_argument("bundle")
+    backup_restore.add_argument(
+        "--yes", action="store_true", help="confirm the restore; required, not a default"
+    )
+    backup_restore.set_defaults(handler=_backup_restore)
 
     return parser
 

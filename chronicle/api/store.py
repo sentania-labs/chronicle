@@ -25,8 +25,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, cast
 
+from . import convert, gitrepo
 from . import digest as digest_mod
-from . import gitrepo
 from .atomic import write_atomic
 from .errors import ApiError
 from .images import normalise
@@ -454,6 +454,11 @@ class Store:
         draft.frontmatter = allowed
         draft.body = body
         draft.source_post = {"slug": post.slug, "path": post.path, "sha": post.sha}
+        # ADR 015: the image directory is the post's own url slug, never
+        # `post.slug` (digest's slug can carry a dated filename stem), so an
+        # import reproduces the real blog's static/images/<dir>/ byte for
+        # byte even when the two differ.
+        draft.image_dir = convert.image_dir_name(allowed.get("url"), slug)
 
         images, image_warnings = self._import_post_images(
             source_path, slug, body, allowed.get("featureImage"), allowed.get("shareImage")
@@ -785,7 +790,23 @@ class Store:
                 f"slug {candidate!r} is already taken; set a unique slug in frontmatter first",
                 slug=candidate,
             )
+        image_dir = convert.image_dir_name(draft.frontmatter.get("url"), candidate)
+        if image_dir in self.index.pinned_image_dirs(exclude_draft_id=draft.id):
+            raise ApiError(
+                409,
+                "image_dir_collision",
+                f"static/images/{image_dir}/ is already pinned by another draft",
+                image_dir=image_dir,
+            )
+        if (self.site_dir / "static" / "images" / image_dir).is_dir():
+            raise ApiError(
+                409,
+                "image_dir_collision",
+                f"static/images/{image_dir}/ already exists on main for a different post",
+                image_dir=image_dir,
+            )
         draft.slug = candidate
+        draft.image_dir = image_dir
 
     def _queue_run(self, draft_id: str, kind: str) -> Run:
         run = Run(id=new_id(), draft_id=draft_id, kind=kind, created_at=now_stamp())
