@@ -297,7 +297,9 @@ def test_preview_queues_a_run_and_pins_a_slug(client: TestClient, agent_token: s
     assert log["log"] == ""
 
     status = client.get(f"/v1/drafts/{draft_id}/status", headers=auth(agent_token)).json()
-    assert status["status"] == "previewed"
+    # A draft only becomes `previewed` once its build succeeds (the builder's
+    # answer, not the enqueue-time api's); queuing alone leaves it as it was.
+    assert status["status"] == "drafting"
     assert status["last_run"]["id"] == run_id
     assert status["preview_url"] is None
     assert status["branch"] is None

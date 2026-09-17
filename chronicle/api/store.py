@@ -14,6 +14,7 @@ diff and the backup bundle is what protects them (spec section 13).
 from __future__ import annotations
 
 import difflib
+import fcntl
 import functools
 import json
 import re
@@ -21,6 +22,7 @@ import threading
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from types import TracebackType
 from typing import Any, cast
 
 from . import digest as digest_mod
@@ -47,9 +49,16 @@ from .models import (
     render_content,
     slugify,
 )
-from .transitions import resolve_draft, resolve_save, resolve_submission
+from .transitions import (
+    PREVIEW_SUCCEEDED,
+    resolve_draft,
+    resolve_run_outcome,
+    resolve_save,
+    resolve_submission,
+)
 
 IMAGE_ROLES = ("inline", "feature")
+LOCK_FILE_NAME = ".store.lock"
 
 # from_post image discovery: markdown `![alt](path)` and bare HTML `<img
 # src="...">`, the two ways a real post's body points at an image.
@@ -80,6 +89,63 @@ def new_id() -> str:
     return uuid.uuid4().hex
 
 
+class StoreLock:
+    """One lock across threads and across processes.
+
+    C1 and C2 had exactly one writer, the api process, so a `threading.Lock`
+    was the whole story. C3 adds a second: the builder container opens the
+    same data directory to move a run from queued to building to succeeded,
+    and it commits those writes to the same internal git repository. Two
+    processes running `git add`/`git commit` at once collide on git's own
+    `index.lock`, and two processes doing read-check-write on the same JSON
+    record race the same way two threads would.
+
+    So the thread lock is kept (it is what serialises the api's own
+    threadpool, and it is cheap) and an advisory `flock` on a single file at
+    the root of the data directory is taken underneath it. The lock file
+    lives outside `repo/` deliberately: nothing that is pure runtime
+    coordination belongs in the history git tracks.
+
+    Not reentrant, on purpose: a mutating method that needs another one
+    splits out an `_unlocked` half instead (see `_put_image_unlocked`).
+    """
+
+    def __init__(self, lock_path: Path) -> None:
+        self._thread_lock = threading.Lock()
+        self._lock_path = lock_path
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = self._lock_path.open("a+")
+
+    def acquire(self) -> None:
+        self._thread_lock.acquire()
+        try:
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
+        except BaseException:
+            self._thread_lock.release()
+            raise
+
+    def release(self) -> None:
+        try:
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._thread_lock.release()
+
+    def __enter__(self) -> StoreLock:
+        self.acquire()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.release()
+
+    def close(self) -> None:
+        self._handle.close()
+
+
 def locked[Method: Callable[..., Any]](method: Method) -> Method:
     """Run a mutating store method start to finish under the store lock."""
 
@@ -93,6 +159,7 @@ def locked[Method: Callable[..., Any]](method: Method) -> Method:
 
 class Store:
     def __init__(self, data_dir: Path) -> None:
+        data_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir = data_dir
         self.repo_dir = data_dir / "repo"
         self.submissions_dir = self.repo_dir / "submissions"
@@ -107,11 +174,12 @@ class Store:
         self.preview_dir = data_dir / "preview"
         self.site_dir = data_dir / "site"
         self.index = Index(index_path(self.repo_dir))
-        # The api is one process serving sync handlers on a threadpool, so one
-        # process-wide lock held across each mutating method is what makes
+        # One lock held across each mutating method is what makes
         # read-check-write-commit-index atomic; without it two saves at the
-        # same base_version both pass the conflict check.
-        self._lock = threading.Lock()
+        # same base_version both pass the conflict check. It spans processes
+        # as well as threads because the builder is a second writer (see
+        # StoreLock).
+        self._lock = StoreLock(data_dir / LOCK_FILE_NAME)
 
     @classmethod
     def open(cls, data_dir: Path) -> Store:
@@ -137,6 +205,7 @@ class Store:
 
     def close(self) -> None:
         self.index.close()
+        self._lock.close()
 
     # Files
 
@@ -688,7 +757,7 @@ class Store:
         run = Run(id=new_id(), draft_id=draft_id, kind=kind, created_at=now_stamp())
         self._write_json(self._run_path(run.id), run.model_dump(mode="json"))
         self._write_json(
-            self.queue_dir / f"{run.id}.json",
+            self._queue_entry_path(run.id),
             {
                 "run_id": run.id,
                 "draft_id": draft_id,
@@ -781,6 +850,20 @@ class Store:
         self.index.upsert_image(record)
         return record, True
 
+    def image_blob(self, image_id: str) -> Path:
+        """The stored bytes of an image, found by id rather than by extension.
+
+        The blob's extension is decided by what Pillow decoded on upload
+        (`images.normalise`), not by the filename a draft records, so the
+        only reliable way back to the file is the sidecar's neighbours.
+        """
+        self.get_image(image_id)
+        directory = self.images_dir / image_id[:2]
+        for path in sorted(directory.glob(f"{image_id}.*")):
+            if path.suffix != ".json":
+                return path
+        raise ApiError(404, "image_blob_missing", f"image {image_id} has a record but no bytes")
+
     def get_image(self, image_id: str) -> Image:
         sidecar = self._image_sidecar_path(image_id)
         if not sidecar.exists():
@@ -839,9 +922,158 @@ class Store:
             raise ApiError(404, "run_not_found", f"no run {run_id}")
         return Run.model_validate(self._read_json(path))
 
-    def last_run(self, draft_id: str) -> Run | None:
-        run_id = self.index.last_run_id(draft_id)
+    def last_run(self, draft_id: str, kind: str | None = None) -> Run | None:
+        run_id = self.index.last_run_id(draft_id, kind)
         return self.get_run(run_id) if run_id else None
+
+    def run_log(self, run_id: str) -> str:
+        """A run's captured build output, or empty text until it has one.
+
+        `log_path` is stored relative to the data directory so the record
+        stays valid whatever the volume is mounted at in a given container.
+        """
+        run = self.get_run(run_id)
+        if not run.log_path:
+            return ""
+        path = self.data_dir / run.log_path
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8", errors="replace")
+
+    def log_path_for(self, run_id: str) -> Path:
+        return self.runs_dir / "logs" / f"{run_id}.log"
+
+    # The run queue: written by the api (`_queue_run`), drained by the builder
+
+    def _queue_entry_path(self, run_id: str) -> Path:
+        return self.queue_dir / f"{run_id}.json"
+
+    def queued_entries(self, kind: str | None = None) -> list[dict[str, Any]]:
+        """Queue entries oldest first, so a builder drains in enqueue order."""
+        entries: list[dict[str, Any]] = []
+        if not self.queue_dir.exists():
+            return entries
+        for path in sorted(self.queue_dir.glob("*.json")):
+            try:
+                entry = self._read_json(path)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if kind is not None and entry.get("kind") != kind:
+                continue
+            entries.append(entry)
+        entries.sort(
+            key=lambda entry: (str(entry.get("enqueued_at", "")), str(entry.get("run_id")))
+        )
+        return entries
+
+    def queue_depth(self, kind: str | None = None) -> int:
+        return len(self.queued_entries(kind))
+
+    @locked
+    def start_run(
+        self,
+        run_id: str,
+        builder_id: str,
+        hugo_version: str,
+        toolchain_drift: bool,
+    ) -> Run:
+        """Move a claimed run to `building` and stamp who is building it."""
+        run = self.get_run(run_id)
+        run.status = "building"
+        run.started_at = now_stamp()
+        run.finished_at = None
+        run.builder_id = builder_id
+        run.hugo_version = hugo_version
+        run.toolchain_drift = toolchain_drift
+        run.log_path = str(self.log_path_for(run_id).relative_to(self.data_dir))
+        self._write_json(self._run_path(run_id), run.model_dump(mode="json"))
+        self._append_event(
+            type="run.started", actor=builder_id, draft_id=run.draft_id, to_status=run.status
+        )
+        self._commit(f"run {run_id}: building on {builder_id}", builder_id)
+        self.index.upsert_run(run)
+        return run
+
+    @locked
+    def finish_run(
+        self,
+        run_id: str,
+        actor: str,
+        succeeded: bool,
+        result: dict[str, Any],
+    ) -> tuple[Run, Draft | None]:
+        """Record the outcome, drop the queue entry, and move the draft if the
+        lifecycle says so.
+
+        The draft's status is decided by the transition table and nowhere
+        else (AGENTS.md): a succeeded preview asks for `preview_succeeded`,
+        and a draft whose status has no entry for that outcome (it was
+        rejected, or saved back to `drafting`, while the build ran) is left
+        exactly as it is.
+        """
+        run = self.get_run(run_id)
+        run.status = "succeeded" if succeeded else "failed"
+        run.finished_at = now_stamp()
+        run.result = result
+        self._write_json(self._run_path(run_id), run.model_dump(mode="json"))
+        self._queue_entry_path(run_id).unlink(missing_ok=True)
+
+        draft: Draft | None = None
+        if succeeded and run.kind == "preview":
+            draft = self.get_draft(run.draft_id)
+            transition = resolve_run_outcome(draft.status, PREVIEW_SUCCEEDED)
+            if transition is not None and transition.to_status != draft.status:
+                from_status = draft.status
+                draft.status = transition.to_status
+                draft.updated_at = run.finished_at
+                self._write_json(self._draft_path(draft.id), draft.model_dump(mode="json"))
+                self._append_event(
+                    type=f"draft.{PREVIEW_SUCCEEDED}",
+                    actor=actor,
+                    draft_id=draft.id,
+                    from_status=from_status,
+                    to_status=draft.status,
+                )
+                self.index.upsert_draft(draft)
+
+        self._append_event(
+            type=f"run.{run.status}", actor=actor, draft_id=run.draft_id, to_status=run.status
+        )
+        self._commit(f"run {run_id}: {run.status}", actor)
+        self.index.upsert_run(run)
+        return run, draft
+
+    @locked
+    def requeue_run(self, run_id: str, actor: str, reason: str) -> Run:
+        """Put a run a crashed builder left mid-flight back on the queue."""
+        run = self.get_run(run_id)
+        run.status = "queued"
+        run.started_at = None
+        run.finished_at = None
+        run.builder_id = None
+        self._write_json(self._run_path(run_id), run.model_dump(mode="json"))
+        self._write_json(
+            self._queue_entry_path(run_id),
+            {
+                "run_id": run.id,
+                "draft_id": run.draft_id,
+                "kind": run.kind,
+                "enqueued_at": run.created_at,
+            },
+        )
+        self._append_event(
+            type="run.requeued", actor=actor, draft_id=run.draft_id, to_status=run.status
+        )
+        self._commit(f"run {run_id}: requeued ({reason})", actor)
+        self.index.upsert_run(run)
+        return run
+
+    def runs_in_flight(self, kind: str | None = None) -> list[Run]:
+        """Runs the index says are `building`, read back from their files."""
+        return [self.get_run(run_id) for run_id in self.index.run_ids_with_status("building", kind)]
+
+    def run_counts(self, kind: str) -> dict[str, int]:
+        return self.index.run_counts(kind)
 
     @locked
     def apply_digest(self, actor: str, discovered: list[Post]) -> dict[str, int]:

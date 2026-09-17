@@ -131,19 +131,44 @@ def get_changes(
     return services.store.changes_since(draft_id, since)
 
 
+def _preview_url(last_preview_run: Any) -> str | None:
+    if last_preview_run is None or last_preview_run.status != "succeeded":
+        return None
+    result = last_preview_run.result or {}
+    url = result.get("preview_url")
+    return url if isinstance(url, str) else None
+
+
 @router.get("/{draft_id}/status")
 def get_status(draft_id: str, services: Services = Depends(get_services)) -> dict[str, Any]:
     draft = services.store.get_draft(draft_id)
     last_run = services.store.last_run(draft.id)
+    last_preview_run = services.store.last_run(draft.id, kind="preview")
     return {
         "status": draft.status,
         "slug": draft.slug,
         "last_run": last_run.model_dump(mode="json") if last_run else None,
-        # The builder and the GitHub client arrive in C3 and C2; until then
-        # these are honestly null rather than a guessed URL.
-        "preview_url": None,
+        "preview_url": _preview_url(last_preview_run),
+        # The GitHub client's publish path arrives in C4; until then these
+        # are honestly null rather than a guessed URL.
         "branch": None,
         "pr_url": None,
+    }
+
+
+@router.get("/{draft_id}/preview")
+def get_preview(draft_id: str, services: Services = Depends(get_services)) -> dict[str, Any]:
+    """Same data `status` already carries, narrowed to what a preview link needs.
+
+    Kept cheap and consistent with `get_status` on purpose: both read the same
+    `last_run(kind="preview")` call, so the two routes can never disagree
+    about whether a preview is ready.
+    """
+    draft = services.store.get_draft(draft_id)
+    last_preview_run = services.store.last_run(draft.id, kind="preview")
+    return {
+        "preview_url": _preview_url(last_preview_run),
+        "last_run": last_preview_run.model_dump(mode="json") if last_preview_run else None,
     }
 
 

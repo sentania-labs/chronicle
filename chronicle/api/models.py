@@ -47,6 +47,11 @@ DRAFT_STATUSES = (
     "rejected",
 )
 RUN_KINDS = ("preview", "publish", "unpublish")
+# A run is queued by the api, claimed and moved to building by a builder, and
+# ends succeeded or failed. `requeued` is not a status: a run a crashed
+# builder left behind goes back to `queued`, which is the same state it was
+# in before anyone claimed it.
+RUN_STATUSES = ("queued", "building", "succeeded", "failed")
 
 
 def now_stamp() -> str:
@@ -165,8 +170,16 @@ class Run(BaseModel):
     created_at: str
     started_at: str | None = None
     finished_at: str | None = None
+    # Relative to the data directory, so the record survives the volume being
+    # mounted somewhere else in another container.
     log_path: str | None = None
     result: dict[str, Any] | None = None
+    # Set when a builder claims the run: which builder took it, the Hugo it
+    # actually used, and whether that Hugo differs from the version the site's
+    # own Pages workflow names (spec section 8; drift never blocks a build).
+    builder_id: str | None = None
+    hugo_version: str | None = None
+    toolchain_drift: bool = False
 
 
 class Event(BaseModel):

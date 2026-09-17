@@ -37,8 +37,12 @@ class Transition:
 DRAFT_TRANSITIONS: dict[tuple[str, str], Transition] = {
     ("drafting", "submit"): Transition("in_review"),
     ("previewed", "submit"): Transition("in_review"),
-    ("drafting", "preview"): Transition("previewed", run_kind="preview"),
-    ("in_review", "preview"): Transition("previewed", run_kind="preview"),
+    # Asking for a preview queues a build and changes nothing else: a draft is
+    # `previewed` when a preview exists, which is the builder's answer on a
+    # succeeded run (RUN_OUTCOME_TRANSITIONS below), not the API's answer at
+    # enqueue time. A failed build therefore leaves the draft where it was.
+    ("drafting", "preview"): Transition("drafting", run_kind="preview"),
+    ("in_review", "preview"): Transition("in_review", run_kind="preview"),
     ("previewed", "preview"): Transition("previewed", run_kind="preview"),
     ("in_review", "approve"): Transition("approved", actor=UI_ACTOR, run_kind="publish"),
     ("in_review", "request_revision"): Transition(
@@ -53,6 +57,20 @@ DRAFT_TRANSITIONS: dict[tuple[str, str], Transition] = {
     ("published", "unpublish"): Transition("published", actor=UI_ACTOR, run_kind="unpublish"),
     ("revision_requested", "revise"): Transition("drafting"),
     ("published", "revise"): Transition("drafting"),
+}
+
+# What a finished run does to the draft it was queued for. Separate from
+# DRAFT_TRANSITIONS because the actor is the builder, not a consumer: no token
+# check applies, and an outcome that has no entry for the draft's current
+# status leaves the status alone instead of raising. A draft that was
+# rejected, or saved back into `drafting`, while its build ran must not be
+# dragged into `previewed` by a build that finished afterwards.
+PREVIEW_SUCCEEDED = "preview_succeeded"
+
+RUN_OUTCOME_TRANSITIONS: dict[tuple[str, str], Transition] = {
+    ("drafting", PREVIEW_SUCCEEDED): Transition("previewed"),
+    ("in_review", PREVIEW_SUCCEEDED): Transition("previewed"),
+    ("previewed", PREVIEW_SUCCEEDED): Transition("previewed"),
 }
 
 SUBMISSION_TRANSITIONS: dict[tuple[str, str], Transition] = {
@@ -94,6 +112,11 @@ def resolve_submission(status: str, action: str) -> Transition:
             action=action,
         )
     return transition
+
+
+def resolve_run_outcome(status: str, outcome: str) -> Transition | None:
+    """The status change a finished run implies, or None to leave it alone."""
+    return RUN_OUTCOME_TRANSITIONS.get((status, outcome))
 
 
 def resolve_save(status: str) -> Transition | None:
