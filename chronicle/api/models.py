@@ -51,6 +51,16 @@ def slugify(title: str) -> str:
     return kebab
 
 
+# A slug becomes a filename component (`posts/{slug}.json`) in more than one
+# place (digest, draft slug pinning, from_post import): this is the one
+# pattern all of them check against, so `/` and `..` can never reach a path.
+SLUG_PATTERN = re.compile(r"^[a-z0-9_-]+$")
+
+
+def is_valid_slug(slug: str) -> bool:
+    return bool(slug) and bool(SLUG_PATTERN.fullmatch(slug))
+
+
 class Material(BaseModel):
     name: str
     text: str | None = None

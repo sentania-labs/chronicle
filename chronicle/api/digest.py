@@ -16,6 +16,7 @@ slug still lands on the URL Hugo already gives it.
 
 from __future__ import annotations
 
+import base64
 import re
 import subprocess
 from dataclasses import dataclass
@@ -58,42 +59,72 @@ class Toolchain:
     submodules: list[dict[str, str]]
 
 
-def _run(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    args: list[str], cwd: Path | None = None, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    env = {**GIT_ENV, **(extra_env or {})}
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
-        env=GIT_ENV,
+        env=env,
         capture_output=True,
         text=True,
         check=True,
     )
 
 
-def clone_or_update(site_dir: Path, repo_url: str, branch: str | None = None) -> str:
+def _auth_env(token: str | None) -> dict[str, str]:
+    """Per-invocation git auth via the environment, never argv or the origin URL.
+
+    `GIT_CONFIG_COUNT`/`_KEY_0`/`_VALUE_0` inject `http.extraheader` for this
+    one process only, so an installation token never lands in `remote.origin.url`
+    (persisted in `.git/config`, reused by every later fetch after the token
+    expires) and never appears in `ps` output the way a `git -c ...` argument
+    would.
+    """
+    if not token:
+        return {}
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode("ascii")
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraheader",
+        "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+    }
+
+
+def clone_or_update(
+    site_dir: Path, repo_url: str, branch: str | None = None, token: str | None = None
+) -> str:
     """Clone on first use, else fetch and hard-reset to the remote default branch.
 
     Returns the resulting HEAD sha. A shallow, read-only operation: nothing
     here ever pushes, and no working-tree edit made by hand in `data/site/`
     would survive the next digest, since a reset discards it (that is the
     point: `data/site/` is a disposable mirror, per README's data directory
-    layout).
+    layout). `repo_url` is always credential-free; `token`, when given, is
+    injected per invocation through the environment (see `_auth_env`) and
+    never persisted.
     """
+    auth_env = _auth_env(token)
     if (site_dir / ".git").exists():
-        _run(["fetch", "--depth", "1", "origin"], cwd=site_dir)
-        target_branch = branch or _remote_default_branch(site_dir)
+        current_url = _run(["remote", "get-url", "origin"], cwd=site_dir).stdout.strip()
+        if current_url != repo_url:
+            _run(["remote", "set-url", "origin", repo_url], cwd=site_dir)
+        _run(["fetch", "--depth", "1", "origin"], cwd=site_dir, extra_env=auth_env)
+        target_branch = branch or _remote_default_branch(site_dir, auth_env)
         _run(["reset", "--hard", f"origin/{target_branch}"], cwd=site_dir)
     else:
         site_dir.parent.mkdir(parents=True, exist_ok=True)
         clone_args = ["clone", "--depth", "1", "--recurse-submodules", repo_url, str(site_dir)]
         if branch:
             clone_args[1:1] = ["--branch", branch]
-        _run(clone_args)
-    _run(["submodule", "update", "--init", "--recursive"], cwd=site_dir)
+        _run(clone_args, extra_env=auth_env)
+    _run(["submodule", "update", "--init", "--recursive"], cwd=site_dir, extra_env=auth_env)
     return _run(["rev-parse", "HEAD"], cwd=site_dir).stdout.strip()
 
 
-def _remote_default_branch(site_dir: Path) -> str:
-    result = _run(["remote", "show", "origin"], cwd=site_dir)
+def _remote_default_branch(site_dir: Path, extra_env: dict[str, str] | None = None) -> str:
+    result = _run(["remote", "show", "origin"], cwd=site_dir, extra_env=extra_env)
     for line in result.stdout.splitlines():
         line = line.strip()
         if line.startswith("HEAD branch:"):

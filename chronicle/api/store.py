@@ -41,6 +41,7 @@ from .models import (
     Run,
     Submission,
     Version,
+    is_valid_slug,
     now_stamp,
     render_content,
     slugify,
@@ -582,6 +583,13 @@ class Store:
                 "slug_underivable",
                 f"draft {draft.id} has no title or slug to pin a slug from",
             )
+        if not is_valid_slug(candidate):
+            raise ApiError(
+                422,
+                "slug_invalid",
+                f"slug {candidate!r} must be lowercase letters, digits, hyphens, or underscores",
+                slug=candidate,
+            )
         if candidate in self.index.pinned_slugs(exclude_draft_id=draft.id):
             raise ApiError(
                 409,
@@ -730,6 +738,8 @@ class Store:
     # Posts and runs
 
     def get_post(self, slug: str) -> Post:
+        if not is_valid_slug(slug):
+            raise ApiError(404, "post_not_found", f"no post {slug}")
         path = self.posts_dir / f"{slug}.json"
         if not path.exists():
             raise ApiError(404, "post_not_found", f"no post {slug}")
@@ -767,6 +777,10 @@ class Store:
         updated = 0
         unchanged = 0
         for post in discovered:
+            if not is_valid_slug(post.slug):
+                # A slug this unsafe would land outside posts_dir/*.json if
+                # written; refuse the one record rather than the whole digest.
+                continue
             path = self.posts_dir / f"{post.slug}.json"
             payload = post.model_dump(mode="json")
             if path.exists():

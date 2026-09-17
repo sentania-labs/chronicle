@@ -161,6 +161,21 @@ with a one-time code; Chronicle never sees this step directly.</p>
     return page("Connect GitHub", body)
 
 
+def github_connect_org_page(manifest_json: str, state: str, target_url: str) -> str:
+    body = f"""
+{nav()}
+<p>Submitting this form opens GitHub's own "create a GitHub App" page for
+this organization, pre-filled from the manifest below.</p>
+<form method="post" action="{escape(target_url)}">
+<input type="hidden" name="manifest" value='{escape(manifest_json)}'>
+<button type="submit">Create App for this organization</button>
+</form>
+<h2>Manifest</h2>
+<pre>{escape(manifest_json)}</pre>
+"""
+    return page("Connect GitHub (organization)", body)
+
+
 def github_install_page(installations: list[dict[str, Any]]) -> str:
     def option(inst: dict[str, Any]) -> str:
         login = inst.get("account", {}).get("login", "?")

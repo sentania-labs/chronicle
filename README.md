@@ -191,7 +191,10 @@ The click-by-click order, once for a fresh instance:
    `data/site/` and writes post records. With no GitHub App configured yet,
    setting `CHRONICLE_DIGEST_REPO_URL` to a public https URL runs the same
    digest anonymously, which is how this round's real-world check and CI
-   both exercise it without credentials.
+   both exercise it without credentials. `CHRONICLE_DIGEST_REPO_URL` also
+   accepts a local filesystem path or a `file://` URL to a clone you already
+   have on disk, which is the way to test digest against a private repo
+   without ever putting a GitHub token in Chronicle's environment.
 
 Only steps 3 and 4 happen on GitHub's own pages in your browser; every other
 step is a Chronicle admin page. `/admin/tokens` issues and revokes named

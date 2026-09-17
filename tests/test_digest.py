@@ -193,6 +193,63 @@ def test_digest_run_creates_posts_and_a_second_run_is_a_no_op(
     store.close()
 
 
+def test_clone_or_update_never_persists_the_token_and_origin_is_credential_free(
+    tmp_path: Path, blog_repo: Path
+) -> None:
+    site_dir = tmp_path / "site"
+    token = "ghs_supersecrettoken123"  # noqa: S105 - fixture value, not a real credential
+    digest.clone_or_update(site_dir, str(blog_repo), "main", token=token)
+
+    origin_url = subprocess.run(
+        ["git", "-C", str(site_dir), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert origin_url == str(blog_repo)
+    assert "@" not in origin_url
+
+    for path in (site_dir / ".git").rglob("*"):
+        if path.is_file():
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            assert token not in text, f"{path} contains the digest token"
+
+    # A second call (the fetch branch) must not resurrect the token either.
+    (blog_repo / "content" / "posts" / "another.md").write_text(
+        "---\ntitle: Another\ndate: 2024-03-03\n---\nmore body\n", encoding="utf-8"
+    )
+    _git(blog_repo, "add", "-A")
+    _git(blog_repo, "commit", "-m", "another post")
+    digest.clone_or_update(site_dir, str(blog_repo), "main", token=token)
+    for path in (site_dir / ".git").rglob("*"):
+        if path.is_file():
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            assert token not in text, f"{path} contains the digest token after a fetch"
+
+
+def test_clone_or_update_resets_origin_when_the_selected_repo_changes(
+    tmp_path: Path, blog_repo: Path
+) -> None:
+    other_repo = tmp_path / "other-blog.git-src"
+    other_repo.mkdir()
+    _git(other_repo, "init", "--initial-branch=main")
+    (other_repo / "README.md").write_text("hi\n", encoding="utf-8")
+    _git(other_repo, "add", "-A")
+    _git(other_repo, "commit", "-m", "init")
+
+    site_dir = tmp_path / "site"
+    digest.clone_or_update(site_dir, str(blog_repo), "main")
+    digest.clone_or_update(site_dir, str(other_repo), "main")
+
+    origin_url = subprocess.run(
+        ["git", "-C", str(site_dir), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert origin_url == str(other_repo)
+
+
 def test_digest_reports_an_update_when_a_post_changes(
     tmp_path: Path, blog_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

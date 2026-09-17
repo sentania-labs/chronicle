@@ -67,6 +67,56 @@ def test_callback_rejects_a_mismatched_state(admin_client: TestClient) -> None:
     assert response.status_code == 400
 
 
+def _failing_conversion_transport() -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"message": "code has expired"})
+
+    return httpx.MockTransport(handler)
+
+
+def test_callback_renders_the_failure_page_when_no_app_record_exists_yet(
+    admin_client: TestClient,
+) -> None:
+    """The very first exchange has no App record to record_error() against.
+
+    Before this fix, GitHubAppStore.record_error() called _require() with no
+    record on disk, which raised ValueError instead of returning the 502
+    page, turning an ordinary expired code into an internal server error.
+    """
+    admin_services: AdminServices = admin_client.app.state.admin_services  # type: ignore[attr-defined]
+    admin_services.github_client = GitHubClient(
+        admin_services.settings, transport=_failing_conversion_transport()
+    )
+    assert admin_services.github_store.load() is None
+
+    connect = admin_client.get("/admin/github/connect")
+    state = connect.cookies["chronicle_admin_github_state"]
+
+    response = admin_client.get(
+        "/admin/github/callback", params={"code": "expired-code", "state": state}
+    )
+    assert response.status_code == 502
+    assert "Traceback" not in response.text
+    assert admin_services.github_store.load() is None
+
+
+def test_org_connect_route_renders_a_form_targeting_the_organization_manifest_url(
+    admin_client: TestClient,
+) -> None:
+    connect = admin_client.get("/admin/github/connect")
+    response = admin_client.post(
+        "/admin/github/connect/org", data={"org": "sentania-labs", "manifest": "{}"}
+    )
+    assert connect.status_code == 200
+    assert response.status_code == 200
+    assert "https://github.com/organizations/sentania-labs/settings/apps/new" in response.text
+
+
+def test_org_connect_route_requires_an_org(admin_client: TestClient) -> None:
+    response = admin_client.post("/admin/github/connect/org", data={"manifest": "{}"})
+    assert response.status_code == 422
+
+
 def _manifest_transport(pem: str) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/app-manifests/good-code/conversions":
@@ -266,6 +316,29 @@ def test_github_app_store_permissions_default_empty(tmp_path: Path) -> None:
     store = GitHubAppStore(tmp_path, key)
     assert store.load() is None
     assert not store.is_configured()
+
+
+def test_digest_json_endpoint_returns_409_when_a_digest_is_already_running(
+    admin_client: TestClient,
+) -> None:
+    admin_services: AdminServices = admin_client.app.state.admin_services  # type: ignore[attr-defined]
+    assert admin_services._digest_lock.acquire(blocking=False)
+    try:
+        response = admin_client.post("/admin/api/digest")
+        assert response.status_code == 409
+    finally:
+        admin_services._digest_lock.release()
+
+
+def test_digest_html_endpoint_shows_an_already_running_notice(admin_client: TestClient) -> None:
+    admin_services: AdminServices = admin_client.app.state.admin_services  # type: ignore[attr-defined]
+    assert admin_services._digest_lock.acquire(blocking=False)
+    try:
+        response = admin_client.post("/admin/digest")
+        assert response.status_code == 409
+        assert "already running" in response.text
+    finally:
+        admin_services._digest_lock.release()
 
 
 def test_manifest_json_round_trips_through_the_connect_page(admin_client: TestClient) -> None:

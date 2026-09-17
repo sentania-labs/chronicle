@@ -42,7 +42,7 @@ from ..admin_status import build_status
 from ..deps import Services, get_services
 from ..digest_runner import run as run_digest
 from ..errors import ApiError
-from ..github_client import GitHubApiError, build_manifest
+from ..github_client import GitHubApiError, build_manifest, manifest_target_url
 from ..tokens import UI_TOKEN_NAME
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -207,7 +207,11 @@ def github_callback(
     try:
         conversion = admin.github_client.exchange_manifest_code(code)
     except GitHubApiError as exc:
-        admin.github_store.record_error(exc.error_class)
+        # There is no App record yet on this, the very first exchange, so
+        # record_error() would raise instead of returning; only record an
+        # error once a record actually exists to record it against.
+        if admin.github_store.load() is not None:
+            admin.github_store.record_error(exc.error_class)
         return HTMLResponse(
             tpl.page("Connect GitHub", f"<p>GitHub exchange failed: {exc.error_class}</p>"),
             status_code=502,
@@ -227,6 +231,25 @@ def github_callback(
         f'then come back to <a href="/admin/github/install">choose the installation</a>.</p>'
     )
     return HTMLResponse(tpl.page("GitHub App connected", body))
+
+
+@router.post("/github/connect/org", response_class=HTMLResponse)
+async def github_connect_org(
+    request: Request, admin: AdminServices = Depends(require_admin_session_html)
+) -> Any:
+    form = await _form(request)
+    org = form.get("org", "").strip()
+    manifest_json = form.get("manifest", "")
+    if not org:
+        return HTMLResponse(
+            tpl.page("Connect GitHub", "<p>an organization login is required.</p>"),
+            status_code=422,
+        )
+    state = secrets.token_urlsafe(24)
+    target_url = manifest_target_url(admin.settings, state, org=org)
+    response = HTMLResponse(tpl.github_connect_org_page(manifest_json, state, target_url))
+    set_github_state_cookie(response, admin, request, state)
+    return response
 
 
 @router.get("/github/install", response_class=HTMLResponse)
@@ -353,17 +376,23 @@ def trigger_digest(
     admin: AdminServices = Depends(require_admin_session_html),
     services: Services = Depends(get_services),
 ) -> Any:
-    if admin.digest_running:
-        return RedirectResponse("/admin", status_code=303)
+    # Acquired synchronously, before the worker even starts, so a second
+    # request that arrives before the thread has set digest_running still
+    # sees the lock held instead of racing it (spec: one digest at a time).
+    if not admin._digest_lock.acquire(blocking=False):
+        return HTMLResponse(
+            tpl.page("Chronicle admin", "<p>a digest is already running.</p>"), status_code=409
+        )
+    admin.digest_running = True
 
     def worker() -> None:
-        admin.digest_running = True
         try:
             run_digest(services.store, "scott", admin)
         except Exception:  # noqa: BLE001 - best-effort background job, status page shows the result
             pass
         finally:
             admin.digest_running = False
+            admin._digest_lock.release()
 
     threading.Thread(target=worker, daemon=True).start()
     return RedirectResponse("/admin", status_code=303)
@@ -380,7 +409,14 @@ def trigger_digest_json(
     admin: AdminServices = Depends(require_admin_session_json),
     services: Services = Depends(get_services),
 ) -> dict[str, Any]:
-    summary = run_digest(services.store, "scott", admin)
+    if not admin._digest_lock.acquire(blocking=False):
+        raise ApiError(409, "digest_already_running", "a digest is already running")
+    admin.digest_running = True
+    try:
+        summary = run_digest(services.store, "scott", admin)
+    finally:
+        admin.digest_running = False
+        admin._digest_lock.release()
     return summary.as_dict()
 
 

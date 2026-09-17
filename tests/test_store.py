@@ -7,10 +7,12 @@ import sqlite3
 import threading
 from pathlib import Path
 
+import pytest
+
 from chronicle.api import gitrepo
 from chronicle.api.errors import ApiError
 from chronicle.api.index import SCHEMA_VERSION, Index, index_path
-from chronicle.api.models import Material
+from chronicle.api.models import Material, Post, is_valid_slug
 from chronicle.api.store import Store
 from chronicle.cli import main as cli_main
 
@@ -221,3 +223,40 @@ def test_slug_is_pinned_at_first_preview_and_stays(store: Store) -> None:
 
     store.save_draft(draft.id, "ghostwriter", 1, FRONTMATTER, "more body")
     assert store.get_draft(draft.id).slug == "a-post-about-drift"
+
+
+@pytest.mark.parametrize("bad_slug", ["../x", "a/b", ""])
+def test_is_valid_slug_rejects_path_components(bad_slug: str) -> None:
+    assert not is_valid_slug(bad_slug)
+
+
+def test_is_valid_slug_accepts_a_plain_filename_component() -> None:
+    assert is_valid_slug("a-post-about-drift")
+    assert is_valid_slug("post_2024")
+
+
+def test_get_post_refuses_a_traversing_slug_instead_of_reading_outside_posts_dir(
+    store: Store,
+) -> None:
+    for bad_slug in ("../x", "a/b", ""):
+        try:
+            store.get_post(bad_slug)
+        except ApiError as exc:
+            assert exc.status_code == 404
+        else:
+            raise AssertionError(f"expected get_post({bad_slug!r}) to fail")
+
+
+def test_apply_digest_refuses_to_write_a_post_record_with_a_bad_slug(store: Store) -> None:
+    posts = [
+        Post(slug="../x", path="content/posts/x.md", title="Escape", date="2024-01-01", sha="a"),
+        Post(slug="a/b", path="content/posts/b.md", title="Nested", date="2024-01-01", sha="b"),
+        Post(slug="", path="content/posts/c.md", title="Empty", date="2024-01-01", sha="c"),
+        Post(slug="fine", path="content/posts/fine.md", title="Fine", date="2024-01-01", sha="d"),
+    ]
+    counts = store.apply_digest("chronicle", posts)
+    assert counts["created"] == 1
+    assert store.list_posts() == [store.get_post("fine")]
+    assert not (store.repo_dir / "x.json").exists()
+    assert not (store.posts_dir / "a").exists()
+    assert not (store.repo_dir / ".json").exists()

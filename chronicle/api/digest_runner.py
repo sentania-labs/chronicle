@@ -45,19 +45,23 @@ class DigestSummary:
         }
 
 
-def _clone_url(admin: AdminServices | None) -> tuple[str, str | None]:
+def _clone_url(admin: AdminServices | None) -> tuple[str, str | None, str | None]:
+    """The origin URL, branch, and token to use, kept apart so the URL stays credential-free.
+
+    `clone_or_update` injects the token per invocation (`digest.py`'s
+    `_auth_env`) rather than embedding it in the URL, which is what git
+    would otherwise persist into `remote.origin.url`.
+    """
     if admin is not None:
         record = admin.github_store.load()
         if record is not None and record.owner_repo and record.installation_id:
             token = _installation_token(admin, record.installation_id)
-            return f"https://x-access-token:{token}@github.com/{record.owner_repo}.git", (
-                record.default_branch
-            )
+            return f"https://github.com/{record.owner_repo}.git", record.default_branch, token
         settings_url = admin.settings.digest_repo_url
     else:
         settings_url = None
     if settings_url:
-        return settings_url, None
+        return settings_url, None, None
     raise DigestNotConfigured(
         "no GitHub App repository is configured and CHRONICLE_DIGEST_REPO_URL is not set"
     )
@@ -74,8 +78,8 @@ def _installation_token(admin: AdminServices, installation_id: str) -> str:
 
 def run(store: Store, actor: str, admin: AdminServices | None = None) -> DigestSummary:
     started_at = now_stamp()
-    repo_url, branch = _clone_url(admin)
-    digest_mod.clone_or_update(store.site_dir, repo_url, branch)
+    repo_url, branch, token = _clone_url(admin)
+    digest_mod.clone_or_update(store.site_dir, repo_url, branch, token=token)
     discovered = digest_mod.discover_posts(store.site_dir)
     posts = [
         Post(slug=item.slug, path=item.path, title=item.title, date=item.date, sha=item.sha)
