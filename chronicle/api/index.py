@@ -65,6 +65,7 @@ class Index:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self._drop_if_stale()
         self.conn.executescript(SCHEMA)
         # Only a genuinely new database gets stamped. Overwriting the stored
         # value would make the readyz schema check compare the constant against
@@ -74,6 +75,37 @@ class Index:
                 "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
+        self.conn.commit()
+
+    def _drop_if_stale(self) -> None:
+        """Drop every table left by an older schema before `SCHEMA` runs.
+
+        `CREATE TABLE IF NOT EXISTS` never adds a column to an existing
+        table, so a schema-v1 database opened by schema-v2 code would leave
+        `drafts` without `image_dir` and crash on `CREATE INDEX ...
+        drafts(image_dir)` before this class, or `_start_services`, ever
+        gets a chance to notice the version mismatch. The index is a
+        derived cache (ADR 006), so the safe fix is to drop the stale
+        tables and let `reindex` rebuild them, not migrate column by
+        column.
+        """
+        row = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'"
+        ).fetchone()
+        if row is None:
+            return
+        version_row = self.conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+        stored = int(version_row["value"]) if version_row else 0
+        if stored == SCHEMA_VERSION:
+            return
+        tables = [
+            r["name"]
+            for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        ]
+        for table in tables:
+            self.conn.execute(f"DROP TABLE IF EXISTS {table}")
         self.conn.commit()
 
     def close(self) -> None:
