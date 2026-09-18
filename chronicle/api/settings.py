@@ -33,6 +33,10 @@ WATCH_POLL_MAX_SECONDS_ENV = "CHRONICLE_WATCH_POLL_MAX_SECONDS"
 RECONCILE_INTERVAL_SECONDS_ENV = "CHRONICLE_RECONCILE_INTERVAL_SECONDS"
 # C5, ADR 014: on by default, content and preview carry no login of their own.
 UI_BANNER_ENV = "CHRONICLE_UI_BANNER"
+# Zone every UI-rendered timestamp is shown in; read at render time by
+# `ui_time.py`, not carried on `Settings`, so templates need no extra argument.
+UI_TIMEZONE_ENV = "CHRONICLE_UI_TIMEZONE"
+DEFAULT_UI_TIMEZONE = "America/Chicago"
 
 DEFAULT_EXTERNAL_URL = "http://localhost:8080"
 DEFAULT_GITHUB_API_BASE = "https://api.github.com"

@@ -17,6 +17,7 @@ from typing import Any
 
 from .pagination import Page
 from .transitions import DRAFT_TRANSITIONS, RESERVED_ACTIONS
+from .ui_time import local_time
 
 STYLE_LINKS = (
     '<link rel="stylesheet" href="/static/style.css">'
@@ -212,7 +213,7 @@ def _draft_card(
 <div class="card">
 <h3><a href="/content/drafts/{escape(draft["id"])}">{escape(draft["title"] or "(untitled)")}</a></h3>
 <p class="muted">slug: {escape(draft["slug"] or "-")} | status: {escape(draft["status"])} |
-author: {escape(last_author)} | updated: {escape(draft["updated_at"])} | claim: {claim_text}</p>
+author: {escape(last_author)} | updated: {escape(local_time(draft["updated_at"]))} | claim: {claim_text}</p>
 <p class="muted">PR: {pr_link} | preview: {preview_link} {_flag_badges(flags)}</p>
 </div>
 """
@@ -428,7 +429,7 @@ def _feedback_log(entries: list[dict[str, Any]]) -> str:
         return "<p>no feedback yet.</p>"
     rows = "".join(
         f"<li><strong>v{e['version_no']} {escape(e['action'])}</strong> by {escape(e['author'])} "
-        f"at {escape(e['created_at'])}: {escape(e['text'])}</li>"
+        f"at {escape(local_time(e['created_at']))}: {escape(e['text'])}</li>"
         for e in entries
     )
     return f"<ul>{rows}</ul>"
@@ -438,7 +439,7 @@ def _version_history(draft_id: str, versions: list[dict[str, Any]]) -> str:
     if not versions:
         return "<p>no versions yet.</p>"
     rows = "".join(
-        f"<li>v{v['version_no']} by {escape(v['author'])} at {escape(v['created_at'])}"
+        f"<li>v{v['version_no']} by {escape(v['author'])} at {escape(local_time(v['created_at']))}"
         + (f": {escape(v['message'])}" if v.get("message") else "")
         + f' (<a href="/content/drafts/{escape(draft_id)}/diff?from={v["version_no"] - 1}&to={v["version_no"]}">diff vs previous</a>)</li>'
         for v in versions
@@ -451,7 +452,7 @@ def _run_status(run: dict[str, Any] | None) -> str:
         return "<p>no runs yet.</p>"
     return (
         f"<p>last run: {escape(run['kind'])}: {escape(run['status'])} at "
-        f"{escape(run.get('finished_at') or run.get('started_at') or run['created_at'])} "
+        f"{escape(local_time(run.get('finished_at') or run.get('started_at') or run['created_at']))} "
         f'(<a href="/runs/{escape(run["id"])}">log</a>)</p>'
     )
 
@@ -472,7 +473,7 @@ def editor_page(
     claim = draft.get("claim")
     if claim:
         claim_html = (
-            f"<p>Claimed by {escape(claim['author'])} since {escape(claim['since'])}. "
+            f"<p>Claimed by {escape(claim['author'])} since {escape(local_time(claim['since']))}. "
             f'<form style="display:inline" method="post" action="/content/drafts/{escape(draft["id"])}/release">'
             '<button type="submit">Release claim</button></form></p>'
         )
@@ -623,7 +624,7 @@ def preview_list_page(rows: list[dict[str, Any]], *, banner: bool) -> str:
             "<tr>"
             f'<td><a href="/content/drafts/{escape(r["draft_id"])}">{escape(r["title"])}</a></td>'
             f'<td><a href="{escape(r["preview_url"])}">{escape(r["preview_url"])}</a></td>'
-            f"<td>{escape(r['built_at'] or '-')}</td>"
+            f"<td>{escape(local_time(r['built_at']))}</td>"
             f"<td>{escape(str(r['wall_seconds']) if r['wall_seconds'] is not None else '-')}</td>"
             f"<td>{'drift' if r['toolchain_drift'] else 'match'}</td>"
             f'<td><form method="post" action="/content/previews/{escape(r["draft_id"])}/rebuild">'
@@ -643,7 +644,7 @@ def preview_list_page(rows: list[dict[str, Any]], *, banner: bool) -> str:
 def run_log_page(run: dict[str, Any], log_text: str, *, banner: bool) -> str:
     body = f"""
 <p class="muted">kind: {escape(run["kind"])} | status: {escape(run["status"])} |
-started: {escape(run.get("started_at") or "-")} | finished: {escape(run.get("finished_at") or "-")} |
+started: {escape(local_time(run.get("started_at")))} | finished: {escape(local_time(run.get("finished_at")))} |
 builder: {escape(run.get("builder_id") or "-")} | hugo: {escape(run.get("hugo_version") or "-")} |
 toolchain drift: {run.get("toolchain_drift")}</p>
 <pre>{escape(log_text) or "(no log captured yet)"}</pre>
