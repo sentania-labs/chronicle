@@ -40,7 +40,7 @@ import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -62,6 +62,23 @@ HUGO_CONFIG_TIMEOUT_SECONDS = 20.0
 # Hugo's taxonomy system; `unconfigured_taxonomy_keys` checks these against
 # what a site's own `hugo config` says it actually defines.
 TAXONOMY_FRONTMATTER_KEYS = ("categories", "tags", "series")
+
+
+def _is_safe_relative_dir(value: str) -> bool:
+    """Whether a directory Hugo's own config reports stays inside the site.
+
+    `read_hugo_conventions` joins `contentdir`/`staticdir` onto `site_dir`
+    with `Path.__truediv__`, which does not defend itself: `Path("/a") /
+    "/etc"` returns `/etc` outright, and a `..`-laden relative value walks
+    back out of `site_dir` the same way a shell `cd` would. A digested
+    site's `hugo.toml` is data from main, not Chronicle's own config, so a
+    stray absolute path or a `contentDir = "../../etc"` typo must fall back
+    rather than hand `discover_posts` a walk root outside the clone, the
+    same defence `convert.post_path`'s `_is_safe_relative` already applies
+    to a post's own recorded path.
+    """
+    parts = PurePosixPath(value).parts
+    return bool(parts) and not value.startswith("/") and ".." not in parts
 
 
 def _safe_directory_config() -> str:
@@ -196,6 +213,14 @@ def read_hugo_conventions(site_dir: Path, environment: str | None = None) -> Hug
         return _fallback_conventions(env_name, "hugo config output had no usable contentdir")
     if not isinstance(staticdir, str) or not staticdir.strip():
         return _fallback_conventions(env_name, "hugo config output had no usable staticdir")
+    if not _is_safe_relative_dir(contentdir):
+        return _fallback_conventions(
+            env_name, f"hugo config reported a contentdir outside the site: {contentdir!r}"
+        )
+    if not _is_safe_relative_dir(staticdir):
+        return _fallback_conventions(
+            env_name, f"hugo config reported a staticdir outside the site: {staticdir!r}"
+        )
 
     params = parsed.get("params")
     raw_sections = params.get("mainsections") if isinstance(params, dict) else None

@@ -184,6 +184,60 @@ def test_falls_back_when_hugo_config_output_is_not_parseable_json(
     assert "json" in (conventions.fallback_reason or "")
 
 
+def test_falls_back_when_contentdir_is_absolute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`site_dir / "/etc"` returns `/etc` outright (`Path.__truediv__`
+    does not defend against an absolute right-hand side), so a `hugo.toml`
+    on main reporting an absolute `contentDir` must fall back rather than
+    hand `discover_posts` a walk root outside the clone."""
+    site_dir = tmp_path / "site"
+    site_dir.mkdir()
+
+    class FakeResult:
+        stdout = '{"contentdir": "/etc", "staticdir": ["static"]}'
+
+    monkeypatch.setattr(digest.subprocess, "run", lambda *a, **k: FakeResult())
+
+    conventions = digest.read_hugo_conventions(site_dir)
+
+    assert conventions.source == "fallback"
+    assert conventions.contentdir == digest.FALLBACK_CONTENT_DIR
+    assert "contentdir" in (conventions.fallback_reason or "")
+
+
+def test_falls_back_when_contentdir_escapes_with_dot_dot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    site_dir = tmp_path / "site"
+    site_dir.mkdir()
+
+    class FakeResult:
+        stdout = '{"contentdir": "../../../../etc", "staticdir": ["static"]}'
+
+    monkeypatch.setattr(digest.subprocess, "run", lambda *a, **k: FakeResult())
+
+    conventions = digest.read_hugo_conventions(site_dir)
+
+    assert conventions.source == "fallback"
+    assert conventions.contentdir == digest.FALLBACK_CONTENT_DIR
+
+
+def test_falls_back_when_staticdir_escapes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    site_dir = tmp_path / "site"
+    site_dir.mkdir()
+
+    class FakeResult:
+        stdout = '{"contentdir": "content", "staticdir": ["../outside"]}'
+
+    monkeypatch.setattr(digest.subprocess, "run", lambda *a, **k: FakeResult())
+
+    conventions = digest.read_hugo_conventions(site_dir)
+
+    assert conventions.source == "fallback"
+    assert conventions.staticdir == digest.FALLBACK_STATIC_DIR
+
+
 def test_discover_posts_falls_back_to_content_posts_with_no_type_filter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
