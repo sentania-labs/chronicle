@@ -14,6 +14,7 @@ from __future__ import annotations
 from html import escape
 from posixpath import basename
 from typing import Any
+from urllib.parse import quote
 
 from .pagination import Page
 from .transitions import DRAFT_TRANSITIONS, RESERVED_ACTIONS
@@ -64,17 +65,20 @@ def page(
 </body></html>"""
 
 
-def _pagination_links(pg: Page[Any], base_url: str, *, extra: str = "") -> str:
+def _pagination_links(pg: Page[Any], base_url: str, *, extra: str = "", anchor: str = "") -> str:
     """Previous/next links and the total count, `?page=N` on `base_url`,
     with whatever other query string (`extra`, already a leading `&...`)
-    the current listing carries (a status filter, a search term)."""
+    the current listing carries (a status filter, a search term), and an
+    optional `#anchor` so a listing that shares a page with other sections
+    lands back on itself."""
+    suffix = f"#{anchor}" if anchor else ""
     prev_html = (
-        f'<a href="{base_url}?page={pg.page - 1}{extra}">&laquo; previous</a>'
+        f'<a href="{base_url}?page={pg.page - 1}{extra}{suffix}">&laquo; previous</a>'
         if pg.has_previous
         else "<span>&laquo; previous</span>"
     )
     next_html = (
-        f'<a href="{base_url}?page={pg.page + 1}{extra}">next &raquo;</a>'
+        f'<a href="{base_url}?page={pg.page + 1}{extra}{suffix}">next &raquo;</a>'
         if pg.has_next
         else "<span>next &raquo;</span>"
     )
@@ -219,15 +223,31 @@ author: {escape(last_author)} | updated: {escape(local_time(draft["updated_at"])
 """
 
 
-def drafts_board_page(pg: Page[dict[str, Any]], *, status_filter: str | None, banner: bool) -> str:
-    cards = (
-        "".join(
-            _draft_card(row["draft"], row["last_author"], row["run_info"], row["flags"])
-            for row in pg.items
-        )
-        or "<p>no posts.</p>"
+def _cards(rows: list[dict[str, Any]]) -> str:
+    return "".join(
+        _draft_card(row["draft"], row["last_author"], row["run_info"], row["flags"]) for row in rows
     )
-    extra = f"&status={escape(status_filter)}" if status_filter else ""
+
+
+def drafts_board_page(
+    active: list[dict[str, Any]],
+    archive: Page[dict[str, Any]],
+    *,
+    status_filter: str | None,
+    q: str,
+    banner: bool,
+) -> str:
+    """Work in flight (every status but `published`) in full above, then the
+    published archive in its own collapsed section. Only the archive is paged:
+    live work is never pushed off screen by a long archive, and the archive's
+    own count and page links say how much is folded away."""
+    filters = {"status": status_filter or "", "q": q}
+    extra = "".join(f"&{k}={quote(v)}" for k, v in filters.items() if v)
+    # A search, a status filter of `published`, or a page past the first all
+    # mean the visitor is looking for something in the archive, so it opens.
+    archive_open = " open" if (q or status_filter == "published" or archive.page > 1) else ""
+    active_html = _cards(active) or "<p>nothing in flight.</p>"
+    archive_html = _cards(archive.items) or "<p>no published posts.</p>"
     body = f"""
 <form method="post" action="/content/drafts/new">
 <button type="submit">New post</button>
@@ -235,10 +255,17 @@ def drafts_board_page(pg: Page[dict[str, Any]], *, status_filter: str | None, ba
 <form method="get" action="/content/drafts">
 <label for="status">Filter by status</label>
 <select id="status" name="status">{_status_options(status_filter)}</select>
+<label for="q">Search</label>
+<input type="text" id="q" name="q" value="{escape(q)}" placeholder="title or slug">
 <button type="submit">Filter</button>
 </form>
-{cards}
-{_pagination_links(pg, "/content/drafts", extra=extra)}
+<h2>In flight ({len(active)})</h2>
+{active_html}
+<details id="published"{archive_open}>
+<summary>Published archive ({archive.total})</summary>
+{archive_html}
+{_pagination_links(archive, "/content/drafts", extra=extra, anchor="published")}
+</details>
 """
     return page("Posts", body, banner=banner)
 

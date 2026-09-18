@@ -10,6 +10,7 @@ internal network would use it.
 from __future__ import annotations
 
 import io
+import re
 from pathlib import Path
 from typing import Any
 
@@ -173,28 +174,153 @@ def test_reserved_actions_are_labelled_scott_only(client: TestClient, services: 
     assert "reject" in response.text.lower()
 
 
-def test_drafts_board_paginates_at_fifty_with_next_and_previous(
+def _retag(
+    services: Services, draft_id: str, *, updated_at: str | None = None, slug: str | None = None
+) -> None:
+    store = services.store
+    draft = store.get_draft(draft_id)
+    if updated_at is not None:
+        draft.updated_at = updated_at
+    if slug is not None:
+        draft.slug = slug
+    store._write_json(store._draft_path(draft.id), draft.model_dump(mode="json"))
+    store.index.upsert_draft(draft)
+
+
+def _card_titles(html: str) -> list[str]:
+    return re.findall(r'<h3><a href="/content/drafts/[^"]+">([^<]*)</a></h3>', html)
+
+
+def test_drafts_board_paginates_the_published_archive_at_fifty(
     client: TestClient, services: Services
 ) -> None:
     for i in range(55):
-        make_draft(services, "drafting", title=f"Draft {i}")
+        make_draft(services, "published", title=f"Post {i}")
 
     first = client.get("/content/drafts")
     assert first.status_code == 200
+    assert "Published archive (55)" in first.text
     assert "page 1 of 2" in first.text
     assert "(55 total)" in first.text
     assert "&laquo; previous</span>" in first.text  # no link: already first page
-    assert 'href="/content/drafts?page=2"' in first.text
+    assert 'href="/content/drafts?page=2#published"' in first.text
+    assert len(_card_titles(first.text)) == 50
 
     second = client.get("/content/drafts?page=2")
     assert second.status_code == 200
     assert "page 2 of 2" in second.text
     assert "next &raquo;</span>" in second.text  # no link: already last page
-    assert 'href="/content/drafts?page=1"' in second.text
+    assert 'href="/content/drafts?page=1#published"' in second.text
+    assert len(_card_titles(second.text)) == 5
+    assert '<details id="published" open>' in second.text  # paging means looking at it
 
     beyond = client.get("/content/drafts?page=99")
     assert beyond.status_code == 200
     assert "page 2 of 2" in beyond.text  # clamped to the last real page
+
+
+def test_board_splits_work_in_flight_from_the_published_archive(
+    client: TestClient, services: Services
+) -> None:
+    make_draft(services, "drafting", title="Mid edit")
+    make_draft(services, "in_review", title="Awaiting Scott")
+    make_draft(services, "revision_requested", title="Sent back")
+    make_draft(services, "published", title="Old race report")
+    make_draft(services, "published", title="Another old one")
+
+    html = client.get("/content/drafts").text
+    in_flight, _, archive = html.partition('<details id="published"')
+    assert "In flight (3)" in in_flight
+    assert "Published archive (2)" in archive
+    assert set(_card_titles(in_flight)) == {"Mid edit", "Awaiting Scott", "Sent back"}
+    assert set(_card_titles(archive)) == {"Old race report", "Another old one"}
+    # Collapsed by default: nothing asked for the archive.
+    assert '<details id="published">' in html
+
+
+def test_board_lists_newest_first_within_each_section(
+    client: TestClient, services: Services
+) -> None:
+    old_live = make_draft(services, "drafting", title="Live old")
+    new_live = make_draft(services, "drafting", title="Live new")
+    old_pub = make_draft(services, "published", title="Pub 2005")
+    new_pub = make_draft(services, "published", title="Pub 2026")
+    _retag(services, old_live, updated_at="2026-09-10T08:00:00-05:00")
+    _retag(services, new_live, updated_at="2026-09-18T08:00:00-05:00")
+    _retag(services, old_pub, updated_at="2005-06-01T08:00:00-05:00")
+    _retag(services, new_pub, updated_at="2026-09-01T08:00:00-05:00")
+
+    html = client.get("/content/drafts").text
+    in_flight, _, archive = html.partition('<details id="published"')
+    assert _card_titles(in_flight) == ["Live new", "Live old"]
+    assert _card_titles(archive) == ["Pub 2026", "Pub 2005"]
+
+
+def test_board_orders_by_instant_not_by_offset_text(client: TestClient, services: Services) -> None:
+    """`2026-09-18T01:00:00-05:00` is 06:00 UTC, later than
+    `2026-09-18T03:00:00+00:00`, though it sorts earlier as a string."""
+    earlier = make_draft(services, "drafting", title="Earlier")
+    later = make_draft(services, "drafting", title="Later")
+    _retag(services, earlier, updated_at="2026-09-18T03:00:00+00:00")
+    _retag(services, later, updated_at="2026-09-18T01:00:00-05:00")
+    assert _card_titles(client.get("/content/drafts").text) == ["Later", "Earlier"]
+
+
+def test_live_work_stays_on_screen_when_the_archive_is_on_a_later_page(
+    client: TestClient, services: Services
+) -> None:
+    make_draft(services, "drafting", title="Live one")
+    for i in range(60):
+        make_draft(services, "published", title=f"Archived {i}")
+    second = client.get("/content/drafts?page=2").text
+    assert "In flight (1)" in second
+    assert "Live one" in second
+
+
+def test_board_search_matches_title_and_slug_case_insensitively(
+    client: TestClient, services: Services
+) -> None:
+    by_title = make_draft(services, "drafting", title="Bonneville Salt Flats")
+    by_slug = make_draft(services, "published", title="Unrelated title")
+    make_draft(services, "published", title="Nothing to see")
+    _retag(services, by_slug, slug="bonneville-2011-recap")
+    _retag(services, by_title, slug="salt-flats")
+
+    html = client.get("/content/drafts?q=BONNEVILLE").text
+    in_flight, _, archive = html.partition('<details id="published"')
+    assert _card_titles(in_flight) == ["Bonneville Salt Flats"]
+    assert _card_titles(archive) == ["Unrelated title"]
+    assert "In flight (1)" in html
+    assert "Published archive (1)" in html
+    assert '<details id="published" open>' in html  # searching opens the archive
+    assert 'value="BONNEVILLE"' in html
+
+    assert "nothing in flight." in client.get("/content/drafts?q=zzz-no-such").text
+
+
+def test_board_search_and_status_filter_and_paging_combine(
+    client: TestClient, services: Services
+) -> None:
+    for i in range(55):
+        make_draft(services, "published", title=f"Race report {i}")
+    make_draft(services, "published", title="Something else")
+    make_draft(services, "drafting", title="Race prep")
+
+    both = client.get("/content/drafts?status=published&q=race").text
+    assert "In flight (0)" in both
+    assert "Published archive (55)" in both
+    assert "Race prep" not in both
+    assert "Something else" not in both
+    assert 'href="/content/drafts?page=2&status=published&q=race#published"' in both
+
+    drafting_only = client.get("/content/drafts?status=drafting&q=race").text
+    assert _card_titles(drafting_only) == ["Race prep"]
+    assert "Published archive (0)" in drafting_only
+
+
+def test_board_search_term_is_escaped(client: TestClient) -> None:
+    html = client.get('/content/drafts?q="><script>alert(1)</script>').text
+    assert "<script>alert(1)</script>" not in html
 
 
 def test_drafts_board_status_filter_has_no_inline_handler(client: TestClient) -> None:

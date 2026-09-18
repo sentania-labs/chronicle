@@ -21,8 +21,10 @@ from .. import ui_templates as tpl
 from ..deps import Consumer, Services
 from ..errors import ApiError
 from ..images import MAX_IMAGE_BYTES
-from ..pagination import paginate
+from ..models import Draft
+from ..pagination import Page, paginate
 from ..ui_deps import banner_enabled, check_same_origin, get_services, require_ui_consumer
+from ..ui_time import sort_key
 
 router = APIRouter(tags=["ui"])
 
@@ -147,10 +149,27 @@ def draft_new(
     return _redirect_to_draft(draft.id, warnings)
 
 
+def _board_row(
+    services: Services, draft: Draft, flags_by_draft: dict[str, list[dict[str, Any]]]
+) -> dict[str, Any]:
+    store = services.store
+    versions = store.list_versions(draft.id)
+    last_author = versions[-1].author if versions else "-"
+    last_preview = store.last_run(draft.id, kind="preview")
+    run_info = {"preview_url": _preview_url(last_preview)} if last_preview else None
+    return {
+        "draft": _dump(draft),
+        "last_author": last_author,
+        "run_info": run_info,
+        "flags": flags_by_draft.get(draft.id, []),
+    }
+
+
 @router.get("/content/drafts", response_class=HTMLResponse)
 def drafts_board(
     request: Request,
     status: str | None = None,
+    q: str = "",
     page: int = Query(1, ge=1),
     services: Services = Depends(get_services),
 ) -> HTMLResponse:
@@ -160,23 +179,34 @@ def drafts_board(
         if flag.draft_id:
             flags_by_draft.setdefault(flag.draft_id, []).append(_dump(flag))
 
-    rows = []
-    for draft in store.list_drafts(status or None):
-        versions = store.list_versions(draft.id)
-        last_author = versions[-1].author if versions else "-"
-        last_preview = store.last_run(draft.id, kind="preview")
-        run_info = {"preview_url": _preview_url(last_preview)} if last_preview else None
-        rows.append(
-            {
-                "draft": _dump(draft),
-                "last_author": last_author,
-                "run_info": run_info,
-                "flags": flags_by_draft.get(draft.id, []),
-            }
-        )
-    pg = paginate(rows, page)
+    drafts = store.list_drafts(status or None)
+    needle = q.strip().lower()
+    if needle:
+        drafts = [
+            d
+            for d in drafts
+            if needle in (d.title or "").lower() or needle in (d.slug or "").lower()
+        ]
+    # Newest first, here and not in `Index.draft_ids`: that ordering is the
+    # API's own list contract (oldest first) and must not move under it.
+    drafts.sort(key=lambda d: sort_key(d.updated_at), reverse=True)
+    active = [d for d in drafts if d.status != "published"]
+    archive = [d for d in drafts if d.status == "published"]
+    # Only the archive is paged, and its rows (versions, last preview run) are
+    # only loaded for the visible page: after a digest the archive is hundreds
+    # of records and the board should not read every one to show fifty.
+    visible = paginate(archive, page)
+    active_rows = [_board_row(services, d, flags_by_draft) for d in active]
+    archive_pg = Page(
+        items=[_board_row(services, d, flags_by_draft) for d in visible.items],
+        page=visible.page,
+        page_size=visible.page_size,
+        total=visible.total,
+    )
     return HTMLResponse(
-        tpl.drafts_board_page(pg, status_filter=status, banner=banner_enabled(request))
+        tpl.drafts_board_page(
+            active_rows, archive_pg, status_filter=status, q=q, banner=banner_enabled(request)
+        )
     )
 
 
