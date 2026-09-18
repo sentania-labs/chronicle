@@ -913,15 +913,15 @@ def test_approve_button_hidden_while_publish_run_is_queued_or_building(
     services.store.index.upsert_run(run)  # _queue_run alone does not index it
 
     response = client.get(f"/content/drafts/{draft_id}")
-    assert "no actions available from this status" in response.text.lower()
+    assert f"/content/drafts/{draft_id}/actions/approve" not in response.text
 
     services.store.start_run(run.id, "publisher-1", "", False)
     response = client.get(f"/content/drafts/{draft_id}")
-    assert "no actions available from this status" in response.text.lower()
+    assert f"/content/drafts/{draft_id}/actions/approve" not in response.text
 
     services.store.finish_run(run.id, "publisher-1", True, {})
     response = client.get(f"/content/drafts/{draft_id}")
-    assert '<button type="submit">approve' in response.text.lower()
+    assert f"/content/drafts/{draft_id}/actions/approve" in response.text
 
 
 def test_banner_shown_by_default(client: TestClient) -> None:

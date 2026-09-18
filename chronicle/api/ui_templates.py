@@ -724,7 +724,7 @@ def editor_page(
     title_value = frontmatter.get("title", "")
     title_value = title_value if isinstance(title_value, str) else ""
     body = f"""
-<div id="editor-app" data-draft-id="{draft_id}" data-version="{draft["version_no"]}" data-updated-at="{escape(draft["updated_at"])}">
+<div id="editor-app" data-draft-id="{draft_id}" data-version="{draft["version_no"]}">
 <div id="backup-banner" class="backup-banner" role="alert" hidden>
 <span id="backup-banner-text"></span>
 <button type="button" id="backup-restore">Restore</button>
