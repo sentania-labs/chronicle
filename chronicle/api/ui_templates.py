@@ -111,7 +111,7 @@ def submissions_list_page(pg: Page[dict[str, Any]], *, banner: bool) -> str:
             f'<td><a href="/content/submissions/{escape(s["id"])}">{escape(s["brief"][:80])}</a></td>'
             f"<td>{escape(s['status'])}</td>"
             f"<td>{escape(s['from_'])}</td>"
-            f"<td>{escape(s['created_at'])}</td>"
+            f"<td>{escape(local_time(s['created_at']))}</td>"
             f"<td>{len(s['image_ids'])}</td>"
             f"<td>{escape(s['claimed_by'] or '-')}</td>"
             "</tr>"
