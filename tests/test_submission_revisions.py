@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -321,3 +322,53 @@ def test_the_transition_table_decides_who_may_be_revised() -> None:
         assert caught.value.code == "submission_frozen"
     assert ("new", "revise") in SUBMISSION_TRANSITIONS
     assert resolve_submission("claimed", "revise").to_status == "claimed"
+
+
+@pytest.mark.parametrize("image_id", ["aaz", "A" * 64, "aa" + "0" * 61])
+def test_a_malformed_image_id_is_refused_even_when_its_sidecar_path_exists(
+    store: Store, image_id: str
+) -> None:
+    # The existence check alone would let these through: each names a real
+    # file. Only the shape guard keeps a caller-chosen string out of a path.
+    sidecar = store._image_sidecar_path(image_id)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text("{}", encoding="utf-8")
+    created = store.create_submission("ghostwriter", "b", [], [])
+
+    with pytest.raises(ApiError) as caught:
+        store.revise_submission(created.id, "ghostwriter", 1, "b2", [], [image_id])
+
+    assert caught.value.status_code == 422
+    assert caught.value.code == "image_not_found"
+    assert store.get_submission(created.id).version_no == 1
+
+
+def test_concurrent_revisions_at_the_same_base_version_yield_exactly_one_winner(
+    store: Store,
+) -> None:
+    created = store.create_submission("ghostwriter", "first", [], [])
+    workers = 12
+    start = threading.Barrier(workers)
+    outcomes: list[str] = []
+    guard = threading.Lock()
+
+    def revise(number: int) -> None:
+        start.wait()
+        try:
+            store.revise_submission(created.id, "ghostwriter", 1, f"edit {number}", [], [])
+            result = "ok"
+        except ApiError as exc:
+            result = f"{exc.status_code} {exc.code}"
+        with guard:
+            outcomes.append(result)
+
+    threads = [threading.Thread(target=revise, args=(n,)) for n in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(outcomes) == ["409 stale_base_version"] * (workers - 1) + ["ok"]
+    record = store.get_submission(created.id)
+    assert record.version_no == 2
+    assert [v.version_no for v in store.list_submission_versions(created.id)] == [1, 2]

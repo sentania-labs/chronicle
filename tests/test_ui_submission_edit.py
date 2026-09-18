@@ -154,3 +154,59 @@ def test_a_leading_blank_line_in_a_textarea_survives_the_html_parser(
     # A browser drops exactly one newline right after <textarea>, so the
     # template emits one extra: the stored text's own leading newline stays.
     assert 'cols="80">\n\nstarts blank</textarea>' in page
+
+
+def test_a_post_missing_material_fields_is_a_422_and_changes_nothing(
+    client: TestClient, agent_token: str
+) -> None:
+    submission_id = make_submission(client, agent_token)
+    response = client.post(
+        f"/content/submissions/{submission_id}/edit",
+        data={"base_version": "1", "brief": "only a brief"},
+    )
+    assert response.status_code == 422
+    assert "missing form fields: material_name, material_url, material_text" in response.text
+    record = client.get(f"/v1/submissions/{submission_id}", headers=auth(agent_token)).json()
+    assert record["version_no"] == 1
+    assert record["brief"] == "original brief"
+    assert [m["name"] for m in record["materials"]] == ["notes", "link"]
+
+
+def test_a_post_missing_the_brief_is_a_422_and_does_not_blank_it(
+    client: TestClient, agent_token: str
+) -> None:
+    submission_id = make_submission(client, agent_token)
+    data = form(1)
+    del data["brief"]
+    response = client.post(f"/content/submissions/{submission_id}/edit", data=data)
+    assert response.status_code == 422
+    assert "missing form fields: brief" in response.text
+    record = client.get(f"/v1/submissions/{submission_id}", headers=auth(agent_token)).json()
+    assert record["version_no"] == 1
+    assert record["brief"] == "original brief"
+
+
+def test_an_edit_on_a_submission_drafted_in_another_tab_keeps_what_was_typed(
+    client: TestClient, agent_token: str, services: Services
+) -> None:
+    submission_id = make_submission(client, agent_token)
+    services.store.act_on_submission(submission_id, "claim", "scott")
+    services.store.create_draft("scott", from_submission=submission_id)
+
+    response = client.post(
+        f"/content/submissions/{submission_id}/edit",
+        data=form(
+            1,
+            brief="my carefully typed brief",
+            material_name=["notes", ""],
+            material_url=["", ""],
+            material_text=["a paragraph I do not want to lose", ""],
+        ),
+    )
+
+    assert response.status_code == 409
+    assert "can no longer be edited" in response.text
+    assert "Your attempted text" in response.text
+    assert "my carefully typed brief" in response.text
+    assert "a paragraph I do not want to lose" in response.text
+    assert "What changed underneath you" not in response.text

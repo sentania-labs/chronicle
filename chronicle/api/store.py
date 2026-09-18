@@ -96,8 +96,8 @@ FRONTMATTER_STRING_KEYS = (
 FRONTMATTER_STRING_LIST_KEYS = ("tags", "categories")
 
 # Seeding a draft from a submission (`_seed_draft_from_submission`): a material
-# "looks like a post" when it opens with a frontmatter block or a markdown
-# heading. The frontmatter pattern mirrors what `digest.parse_frontmatter`
+# "looks like a post" when it opens with a frontmatter block (preferred) or a
+# markdown heading. The frontmatter pattern mirrors what `digest.parse_frontmatter`
 # will actually split, so detection and parsing cannot disagree.
 _FRONTMATTER_BLOCK = re.compile(r"\A(---|\+\+\+)\n.*?\n\1\n", re.DOTALL)
 _IMAGE_ID = re.compile(r"[0-9a-f]{64}")
@@ -584,11 +584,13 @@ class Store:
     ) -> list[str]:
         """Give a new draft the writing a submission already carries.
 
-        The primary material (the first that looks like a post, else the
-        first with any text) becomes the body; its frontmatter, if any, is
-        parsed the way an import parses a post and allowlisted with the same
-        drop-and-warn rule. Every other material is reference for the writer,
-        so it goes to the feedback log and never into the body. Runs inside
+        The primary material (the first with frontmatter, else the first
+        opening with a heading, else the first with any text) becomes the
+        body; its frontmatter, if any, is parsed the way an import parses a
+        post, then allowlisted and type-checked with a drop-and-warn rule (a
+        key the save path would 422 is dropped, never a 422 here). Every
+        other material is reference for the writer, so it goes to the
+        feedback log and never into the body. Runs inside
         `_create_draft_unlocked`'s lock: only `_unlocked` helpers here.
         """
         warnings: list[str] = []
@@ -599,10 +601,19 @@ class Store:
                 warnings.append(f"material {primary.name!r}: {parse_error}")
             allowed: dict[str, Any] = {}
             for key, value in (frontmatter or {}).items():
-                if key in FRONTMATTER_ALLOWLIST:
-                    allowed[key] = value
-                else:
+                if key not in FRONTMATTER_ALLOWLIST:
                     warnings.append(f"dropped unknown frontmatter key {key!r}")
+                    continue
+                expected = _frontmatter_type_problem(key, value)
+                if expected is not None:
+                    # The save path would 422 this value; the seed itself
+                    # succeeded, so drop the key and say why instead.
+                    warnings.append(
+                        f"dropped frontmatter key {key!r}: it must be {expected}"
+                        f" (got {type(value).__name__})"
+                    )
+                    continue
+                allowed[key] = value
             title = allowed.get("title")
             if not title:
                 heading = _LEADING_HEADING.match(body)
@@ -2093,18 +2104,20 @@ def _clean_material_text(text: str) -> str:
     return text.removeprefix("\ufeff").replace("\r\n", "\n")
 
 
-def _looks_like_post(text: str) -> bool:
-    return bool(_FRONTMATTER_BLOCK.match(text) or _LEADING_HEADING.match(text))
-
-
 def _primary_material(materials: list[Material]) -> Material | None:
-    """The material a draft body is seeded from: the first that looks like a
-    post, else the first with any text at all, else None."""
-    with_text = [material for material in materials if material.text]
-    for material in with_text:
-        if material.text is not None and _looks_like_post(_clean_material_text(material.text)):
-            return material
-    return with_text[0] if with_text else None
+    """The material a draft body is seeded from: the first with a frontmatter
+    block, else the first that opens with a heading, else the first with any
+    text at all, else None. A frontmatter block outranks a heading because a
+    run log or script that merely starts with `# ` is common, and a real post
+    with frontmatter must not be demoted behind it."""
+    with_text = [
+        (material, _clean_material_text(material.text)) for material in materials if material.text
+    ]
+    for pattern in (_FRONTMATTER_BLOCK, _LEADING_HEADING):
+        for material, text in with_text:
+            if pattern.match(text):
+                return material
+    return with_text[0][0] if with_text else None
 
 
 def _split_material(text: str) -> tuple[dict[str, Any] | None, str, str | None]:
@@ -2120,6 +2133,21 @@ def _split_material(text: str) -> tuple[dict[str, Any] | None, str, str | None]:
     return frontmatter, body, None
 
 
+def _frontmatter_type_problem(key: str, value: Any) -> str | None:
+    """What `key` must be when `value` is the wrong type, else None. The one
+    definition of the type rules, shared by the save path (which 422s) and
+    the submission seed (which drops the key and warns)."""
+    if key in FRONTMATTER_STRING_KEYS and not isinstance(value, str):
+        return "a string"
+    if key in FRONTMATTER_STRING_LIST_KEYS and (
+        not isinstance(value, list) or not all(isinstance(item, str) for item in value)
+    ):
+        return "a list of strings"
+    if key == "draft" and not isinstance(value, bool):
+        return "true or false"
+    return None
+
+
 def check_frontmatter(frontmatter: dict[str, Any]) -> None:
     unknown = sorted(key for key in frontmatter if key not in FRONTMATTER_ALLOWLIST)
     if unknown:
@@ -2130,17 +2158,10 @@ def check_frontmatter(frontmatter: dict[str, Any]) -> None:
             unknown_keys=unknown,
             allowed_keys=list(FRONTMATTER_ALLOWLIST),
         )
-    for key in FRONTMATTER_STRING_KEYS:
-        if key in frontmatter and not isinstance(frontmatter[key], str):
-            raise _wrong_type(key, "a string")
-    for key in FRONTMATTER_STRING_LIST_KEYS:
-        value = frontmatter.get(key)
-        if key in frontmatter and (
-            not isinstance(value, list) or not all(isinstance(item, str) for item in value)
-        ):
-            raise _wrong_type(key, "a list of strings")
-    if "draft" in frontmatter and not isinstance(frontmatter["draft"], bool):
-        raise _wrong_type("draft", "true or false")
+    for key, value in frontmatter.items():
+        expected = _frontmatter_type_problem(key, value)
+        if expected is not None:
+            raise _wrong_type(key, expected)
 
     title = frontmatter.get("title")
     if not isinstance(title, str) or not title.strip():

@@ -208,8 +208,14 @@ def submission_detail_page(
     if conflict_diff is not None:
         # A stale edit: nothing was overwritten. The form below is already
         # reloaded at the current version, and what the visitor tried to save
-        # is shown here so nothing they wrote is lost.
-        attempted = attempted or {}
+        # is shown below so nothing they wrote is lost.
+        conflict_html += f"""
+<h2>What changed underneath you</h2>
+<pre>{escape(conflict_diff) or "(no diff available)"}</pre>
+"""
+    if attempted is not None:
+        # Also shown when the edit was refused for another reason (the
+        # submission was drafted or discarded in another tab).
         attempted_materials = "".join(
             f"<li><strong>{escape(m['name'])}</strong>"
             + (f" ({escape(m['url'])})" if m.get("url") else "")
@@ -217,9 +223,7 @@ def submission_detail_page(
             + "</li>"
             for m in attempted.get("materials", [])
         )
-        conflict_html = f"""
-<h2>What changed underneath you</h2>
-<pre>{escape(conflict_diff) or "(no diff available)"}</pre>
+        conflict_html += f"""
 <h2>Your attempted text (not saved, for manual merging)</h2>
 <pre>{escape(attempted.get("brief", ""))}</pre>
 <ul>{attempted_materials}</ul>

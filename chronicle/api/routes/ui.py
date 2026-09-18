@@ -155,6 +155,24 @@ async def submission_edit(
             notice_kind="error",
             status_code=422,
         )
+    # A browser always sends every field (an emptied one arrives as ""); a
+    # request that omits one is not the edit form, and defaulting it would
+    # write an empty brief or clear every material. The API route refuses the
+    # same omission.
+    missing = [
+        field
+        for field in ("brief", "material_name", "material_url", "material_text")
+        if field not in form
+    ]
+    if missing:
+        return _submission_response(
+            services,
+            submission_id,
+            request,
+            notice=f"missing form fields: {', '.join(missing)}",
+            notice_kind="error",
+            status_code=422,
+        )
     brief = _crlf_to_lf(str(form.get("brief", "")))
     materials: list[Material] = []
     rows = zip_longest(
@@ -175,12 +193,16 @@ async def submission_edit(
             Material(name=name or f"material {number}", url=url or None, text=text or None)
         )
     image_ids = [str(value) for value in form.getlist("image_id")]
+    attempted = {"brief": brief, "materials": [m.model_dump() for m in materials]}
     try:
         services.store.revise_submission(
             submission_id, consumer.name, base_version, brief, materials, image_ids
         )
     except ApiError as exc:
         if exc.code != "stale_base_version":
+            # Carried here too: a submission that turned frozen underneath
+            # the visitor (drafted or discarded in another tab) must not eat
+            # what they typed.
             return _submission_response(
                 services,
                 submission_id,
@@ -188,6 +210,7 @@ async def submission_edit(
                 notice=exc.message,
                 notice_kind="error",
                 status_code=exc.status_code,
+                attempted=attempted,
             )
         # Recomputed against the record's actual current version, not
         # `exc.extra`: a save landing between the conflict and this handler
@@ -201,7 +224,7 @@ async def submission_edit(
             notice_kind="conflict",
             status_code=409,
             conflict_diff=services.store.submission_diff_between(submission_id, base_version),
-            attempted={"brief": brief, "materials": [m.model_dump() for m in materials]},
+            attempted=attempted,
         )
     return _submission_response(services, submission_id, request, notice="saved", notice_kind="ok")
 

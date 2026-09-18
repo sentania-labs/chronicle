@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from chronicle.api.models import Material
-from chronicle.api.store import Store
+from chronicle.api.store import Store, check_frontmatter
 
 from .conftest import auth, png_bytes
 
@@ -203,3 +203,90 @@ def test_crlf_and_bom_material_still_seeds_title_frontmatter_and_body(store: Sto
     assert draft.body == "\n# Real Post\n\nbody text\n"
     assert "\r" not in draft.body
     assert warnings == []
+
+
+def test_frontmatter_material_beats_an_earlier_material_that_merely_starts_with_a_hash(
+    store: Store,
+) -> None:
+    submission_id = make_claimed(
+        store,
+        [
+            Material(name="run log", text="# usage: foo\nls -l\n"),
+            Material(name="the post", text="---\ntitle: Real\n---\nreal body\n"),
+        ],
+    )
+
+    draft, warnings = store.create_draft("scott", from_submission=submission_id)
+
+    assert draft.title == "Real"
+    assert draft.body == "real body\n"
+    assert warnings == []
+    assert [entry.text for entry in store.list_feedback(draft.id)] == [
+        "Material: run log\n\n# usage: foo\nls -l\n"
+    ]
+
+
+def test_a_heading_material_still_beats_plain_text_when_no_material_has_frontmatter(
+    store: Store,
+) -> None:
+    submission_id = make_claimed(
+        store,
+        [
+            Material(name="plain", text="no heading here"),
+            Material(name="headed", text="# Headed\n\nbody\n"),
+        ],
+    )
+
+    draft, _ = store.create_draft("scott", from_submission=submission_id)
+
+    assert draft.title == "Headed"
+
+
+def test_seeded_frontmatter_of_the_wrong_type_is_dropped_with_a_warning_never_a_422(
+    store: Store,
+) -> None:
+    text = (
+        "---\n"
+        "title: Typed\n"
+        "tags: foo\n"
+        "categories: {a: 1}\n"
+        "draft: maybe\n"
+        "description: fine\n"
+        "---\n"
+        "body\n"
+    )
+    submission_id = make_claimed(store, [Material(name="post", text=text)])
+
+    draft, warnings = store.create_draft("scott", from_submission=submission_id)
+
+    assert draft.frontmatter == {"title": "Typed", "description": "fine"}
+    assert sorted(warnings) == [
+        "dropped frontmatter key 'categories': it must be a list of strings (got dict)",
+        "dropped frontmatter key 'draft': it must be true or false (got str)",
+        "dropped frontmatter key 'tags': it must be a list of strings (got str)",
+    ]
+    # What was seeded is what the save path accepts.
+    check_frontmatter(store.get_draft(draft.id).frontmatter)
+
+
+def test_a_non_string_title_is_dropped_and_the_heading_supplies_it(store: Store) -> None:
+    text = "---\ntitle: [a, b]\n---\n# Real Title\n\nbody\n"
+    submission_id = make_claimed(store, [Material(name="post", text=text)])
+
+    draft, warnings = store.create_draft("scott", from_submission=submission_id)
+
+    assert draft.title == "Real Title"
+    assert draft.frontmatter == {"title": "Real Title"}
+    assert warnings == ["dropped frontmatter key 'title': it must be a string (got list)"]
+
+
+def test_an_unquoted_yaml_date_is_dropped_because_it_is_not_a_string(store: Store) -> None:
+    text = "---\ntitle: Dated\ndate: 2026-09-18\n---\nbody\n"
+    submission_id = make_claimed(store, [Material(name="post", text=text)])
+
+    draft, warnings = store.create_draft("scott", from_submission=submission_id)
+
+    assert "date" not in draft.frontmatter
+    assert warnings == ["dropped frontmatter key 'date': it must be a string (got date)"]
+    assert "date" not in store.get_draft(draft.id).frontmatter
+    check_frontmatter(store.get_draft(draft.id).frontmatter)

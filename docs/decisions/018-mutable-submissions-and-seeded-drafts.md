@@ -52,3 +52,8 @@ lives in `transitions.py` next to the rest of the lifecycle.
 - Backup needs no change: `backup.py` collects `repo/` with `rglob`, so the
   version files travel in the bundle, and the reindex a restore runs reads
   only the top-level `submissions/*.json` records.
+- Rollback: a release without `version_no` drops the field from any
+  submission it rewrites (a claim or discard), and rolling forward again
+  reads it as version 1 while the `versions/<n>.json` files remain, so the
+  next revision overwrites them. Forward compatibility is unaffected; only a
+  rollback followed by a roll forward loses the version counter.
