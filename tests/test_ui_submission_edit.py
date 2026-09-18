@@ -65,6 +65,21 @@ def test_detail_page_renders_created_as_local_time_not_the_raw_stamp(
     assert re.search(r"created: (\d{4}-\d\d-\d\d )?\d\d:\d\d C[SD]T,", page.text)
 
 
+def test_list_page_renders_created_as_local_time_matching_the_detail_page(
+    client: TestClient, agent_token: str
+) -> None:
+    submission_id = make_submission(client, agent_token)
+    stamp = client.get(f"/v1/submissions/{submission_id}", headers=auth(agent_token)).json()[
+        "created_at"
+    ]
+    listing = client.get("/content/submissions").text
+    detail = client.get(f"/content/submissions/{submission_id}").text
+    assert stamp not in listing
+    match = re.search(r"<td>((?:\d{4}-\d\d-\d\d )?\d\d:\d\d C[SD]T)</td>", listing)
+    assert match is not None
+    assert f"created: {match.group(1)}," in detail
+
+
 def test_edit_form_saves_through_the_ui_consumer_and_normalises_line_breaks(
     client: TestClient, agent_token: str, services: Services
 ) -> None:

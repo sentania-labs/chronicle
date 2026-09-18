@@ -199,3 +199,21 @@ def test_run_log_and_preview_list_render_stamps_as_local_time() -> None:
     ]
     listing = tpl.preview_list_page(rows, banner=False)
     _assert_local(listing, BUILT_STAMP, "<td>2020-06-07 03:09 CDT</td>")
+
+
+def test_submissions_list_renders_created_as_local_time(services: Services) -> None:
+    from chronicle.api import ui_templates as tpl
+    from chronicle.api.pagination import paginate
+
+    stamp = "2020-08-09T10:11:12+00:00"
+    row: dict[str, Any] = {
+        "id": "s1",
+        "brief": "a brief",
+        "status": "new",
+        "from_": "agent",
+        "created_at": stamp,
+        "image_ids": [],
+        "claimed_by": None,
+    }
+    html = tpl.submissions_list_page(paginate([row], 1), banner=False)
+    _assert_local(html, stamp, "<td>2020-08-09 05:11 CDT</td>")
