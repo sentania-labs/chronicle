@@ -230,7 +230,7 @@ def submission_detail_page(
 """
     body = f"""
 <p class="muted">status: {escape(submission["status"])}, version: {submission["version_no"]}, from: {escape(submission["from_"])},
-created: {escape(submission["created_at"])}, claimed by: {escape(submission["claimed_by"] or "-")}</p>
+created: {escape(local_time(submission["created_at"]))}, claimed by: {escape(submission["claimed_by"] or "-")}</p>
 <h2>Brief</h2>
 <p>{escape(submission["brief"])}</p>
 <h2>Materials</h2>

@@ -53,6 +53,18 @@ def test_detail_page_shows_the_edit_form_at_the_current_version(
     assert "original brief" in page.text
 
 
+def test_detail_page_renders_created_as_local_time_not_the_raw_stamp(
+    client: TestClient, agent_token: str
+) -> None:
+    submission_id = make_submission(client, agent_token)
+    stamp = client.get(f"/v1/submissions/{submission_id}", headers=auth(agent_token)).json()[
+        "created_at"
+    ]
+    page = client.get(f"/content/submissions/{submission_id}")
+    assert stamp not in page.text
+    assert re.search(r"created: (\d{4}-\d\d-\d\d )?\d\d:\d\d C[SD]T,", page.text)
+
+
 def test_edit_form_saves_through_the_ui_consumer_and_normalises_line_breaks(
     client: TestClient, agent_token: str, services: Services
 ) -> None:
