@@ -199,6 +199,10 @@ class Index:
         )
         self.conn.commit()
 
+    def remove_image(self, image_id: str) -> None:
+        self.conn.execute("DELETE FROM images WHERE image_id = ?", (image_id,))
+        self.conn.commit()
+
     def add_event(self, record: Event) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO events (seq, payload) VALUES (?, ?)",

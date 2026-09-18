@@ -638,10 +638,9 @@ async def draft_image_upload(
     """
     try:
         raw = _read_capped(file)
-        record, created = services.store.put_image(
-            raw, safe_upload_filename(file.filename or "upload")
+        record, created = services.store.put_and_attach_image(
+            draft_id, raw, safe_upload_filename(file.filename or "upload", raw), role, consumer.name
         )
-        services.store.attach_image(draft_id, record.image_id, role, consumer.name)
     except ApiError as exc:
         if _wants_json(request):
             return JSONResponse(

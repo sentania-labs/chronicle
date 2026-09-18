@@ -10,7 +10,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from chronicle.api.deps import Services
-from chronicle.api.images import alt_text_for, safe_upload_filename
+from chronicle.api.images import alt_text_for, is_plain_filename, normalise, safe_upload_filename
 
 from .conftest import png_bytes
 from .test_ui import make_draft
@@ -141,6 +141,72 @@ def test_filename_helpers() -> None:
     assert safe_upload_filename("../../etc/passwd") == "passwd"
     assert safe_upload_filename("C:\\pics\\a b.png") == "a-b.png"
     assert safe_upload_filename("...") == "upload"
+    # Nothing to derive a stem from: the extension survives and the stem is a
+    # short hash of the content, so distinct images stay distinct.
+    first = safe_upload_filename("写真.png", b"one")
+    second = safe_upload_filename("猫.png", b"two")
+    assert first.endswith(".png") and len(first) > len(".png")
+    assert second.endswith(".png") and first != second
+    assert safe_upload_filename("写真.png", b"one") == first
+    assert safe_upload_filename(".png", b"one") == first
+    assert safe_upload_filename("写真 a.png", b"one") == "a.png"
+    assert is_plain_filename("rack-photo_2.png")
+    assert not is_plain_filename("my photo (1).png")
+    assert not is_plain_filename("")
     assert alt_text_for("rack-photo_2.png") == "rack photo 2"
     assert alt_text_for("[x].png") == "x"
     assert alt_text_for(".png") == "image"
+
+
+def test_a_non_ascii_filename_keeps_its_extension_and_two_of_them_do_not_collide(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "drafting")
+    first = upload(client, draft_id, "写真.png", png_bytes((1, 2, 3)))
+    second = upload(client, draft_id, "猫.png", png_bytes((4, 5, 6)))
+    assert first.status_code == 200 and second.status_code == 200
+    one, two = first.json(), second.json()
+    assert one["filename"].endswith(".png") and two["filename"].endswith(".png")
+    assert one["filename"] != two["filename"]
+    assert one["markdown"] == f"![{one['filename'][:-4]}]({one['filename']})"
+    assert len(services.store.get_draft(draft_id).images) == 2
+
+
+def test_a_refused_attach_leaves_no_orphan_image_record(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "drafting")
+    assert upload(client, draft_id, "a b.png", png_bytes((1, 2, 3))).status_code == 200
+    # A different image that cleans to the same name: the attach is refused,
+    # and the blob and record `put_image` had already written must go too.
+    other = png_bytes((9, 9, 9))
+    refused = upload(client, draft_id, "a-b.png", other)
+    assert refused.status_code == 409
+    assert refused.json()["code"] == "image_filename_conflict"
+    sha = normalise(other).sha256
+    assert services.store.index.image_id_for_sha(sha) is None
+    assert not list(services.store.images_dir.rglob("*" + sha[:12] + "*"))
+    # The same refusal on an image that already existed must not delete it.
+    existing, _ = services.store.put_image(png_bytes((7, 7, 7)), "keep.png")
+    other_draft = make_draft(services, "drafting")
+    upload(client, other_draft, "keep.png", png_bytes((5, 5, 5)))
+    clash = upload(client, other_draft, "keep.png", png_bytes((7, 7, 7)))
+    assert clash.status_code == 409
+    assert services.store.get_image(existing.image_id).filename == "keep.png"
+
+
+def test_a_dedup_onto_an_unreferenceable_name_refuses_inline_only(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "drafting")
+    raw = png_bytes((2, 4, 6))
+    services.store.put_image(raw, "my photo (1).png")
+    refused = upload(client, draft_id, "clean.png", raw)
+    assert refused.status_code == 409
+    body = refused.json()
+    assert body["ok"] is False and body["code"] == "image_filename_unreferenceable"
+    assert "my photo (1).png" in body["message"]
+    assert services.store.get_draft(draft_id).images == []
+    # A feature image is never referenced from the body, so it still attaches.
+    feature = upload(client, draft_id, "clean.png", raw, role="feature")
+    assert feature.status_code == 200 and feature.json()["markdown"] is None

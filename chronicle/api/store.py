@@ -32,7 +32,7 @@ from . import convert, gitrepo
 from . import digest as digest_mod
 from .atomic import write_atomic
 from .errors import ApiError
-from .images import normalise
+from .images import is_plain_filename, normalise
 from .index import Index, index_path
 from .models import (
     FRONTMATTER_ALLOWLIST,
@@ -1251,7 +1251,49 @@ class Store:
         return Image.model_validate(self._read_json(sidecar))
 
     @locked
+    def put_and_attach_image(
+        self, draft_id: str, raw: bytes, filename: str, role: str, actor: str
+    ) -> tuple[Image, bool]:
+        """`put_image` then `attach_image`, as one step that leaves nothing behind.
+
+        The editor's upload. If the attach is refused (a name already on the
+        draft, an unknown draft or role) and this call is what created the
+        image, its blob, sidecar and index row are removed again, so a refused
+        upload does not leave an orphan image record. An image that already
+        existed is never touched. An inline reference to an already-stored
+        image is refused when its stored name is not one a markdown reference
+        can carry (`images.is_plain_filename`): an earlier `/v1` upload or an
+        import can have named it anything, and the editor would otherwise
+        insert text that does not parse.
+        """
+        record, created = self._put_image_unlocked(raw, filename)
+        try:
+            if role == "inline" and not is_plain_filename(record.filename):
+                raise ApiError(
+                    409,
+                    "image_filename_unreferenceable",
+                    f"this image is already stored as {record.filename!r}, a name a markdown "
+                    "reference cannot carry (spaces, parentheses or other punctuation); "
+                    "attach it as the feature image, or upload a different copy",
+                )
+            self._attach_image_unlocked(draft_id, record.image_id, role, actor)
+        except ApiError:
+            if created:
+                self._discard_image_unlocked(record)
+            raise
+        return record, created
+
+    def _discard_image_unlocked(self, record: Image) -> None:
+        directory = self.images_dir / record.image_id[:2]
+        for path in directory.glob(f"{record.image_id}.*"):
+            path.unlink()
+        self.index.remove_image(record.image_id)
+
+    @locked
     def attach_image(self, draft_id: str, image_id: str, role: str, actor: str) -> Draft:
+        return self._attach_image_unlocked(draft_id, image_id, role, actor)
+
+    def _attach_image_unlocked(self, draft_id: str, image_id: str, role: str, actor: str) -> Draft:
         if role not in IMAGE_ROLES:
             raise ApiError(
                 422, "image_role_unknown", f"role must be one of {', '.join(IMAGE_ROLES)}"
