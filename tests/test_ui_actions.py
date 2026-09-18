@@ -122,7 +122,9 @@ def test_rejected_and_unpublished_offer_restore_not_publish(status: str) -> None
 
 
 def test_publish_is_absent_while_a_publish_pr_or_run_is_in_flight() -> None:
-    assert "approve" not in by_action(offers_for("approved", has_preview=True, publish_pr_open=True))
+    assert "approve" not in by_action(
+        offers_for("approved", has_preview=True, publish_pr_open=True)
+    )
     assert "approve" not in by_action(
         offers_for("approved", has_preview=True, publish_run_active=True)
     )
@@ -225,9 +227,7 @@ def test_the_preview_gate_is_presentation_and_the_route_stays_a_table_lookup(
     # person could POST one at a time (submit, then approve), and an action
     # with no path at all is refused untouched.
     draft_id = make_draft(services, "drafting")
-    refused = client.post(
-        f"/content/drafts/{draft_id}/actions/reject", data={"feedback": "no"}
-    )
+    refused = client.post(f"/content/drafts/{draft_id}/actions/reject", data={"feedback": "no"})
     assert refused.status_code == 409
     assert services.store.get_draft(draft_id).status == "drafting"
 

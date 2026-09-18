@@ -84,7 +84,8 @@ def safe_upload_filename(name: str) -> str:
     so what it inserts at the cursor is what the conversion later resolves.
     Only the UI route calls this: the API stores the name it is given.
     """
-    cleaned = _UNSAFE_FILENAME_CHARS.sub("-", basename(name.replace("\\", "/"))).strip(".-")
+    cleaned = _UNSAFE_FILENAME_CHARS.sub("-", basename(name.replace("\\", "/")))
+    cleaned = cleaned.replace("-.", ".").strip(".-")
     return cleaned or "upload"
 
 
