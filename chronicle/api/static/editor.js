@@ -50,6 +50,18 @@ function backupVerdict(backup, server, serverVersion) {
   };
 }
 
+// What a backup write should do right now. While an earlier backup is still
+// on offer (the banner is showing and the visitor has chosen neither Restore
+// nor Discard) the stored copy is the only copy of their work, so nothing
+// may overwrite or clear it: leaving the page unanswered used to clear it,
+// because the editor then matched the server.
+function backupWriteAction(now, saved, offerPending) {
+  if (offerPending) {
+    return "skip";
+  }
+  return sameState(now, saved) ? "clear" : "write";
+}
+
 function backupMessage(verdict, whenText) {
   var text = "Unsaved edits from " + whenText + " are stored in this browser.";
   if (verdict.serverMoved) {
@@ -294,6 +306,10 @@ function saveStateText(state, detail) {
     }
   }
 
+  // True while a stored backup is on offer and unanswered (see
+  // backupWriteAction).
+  var offerPending = false;
+
   function clearBackup() {
     try {
       window.localStorage.removeItem(backupKey);
@@ -304,7 +320,11 @@ function saveStateText(state, detail) {
 
   function writeBackup() {
     var now = currentState();
-    if (sameState(now, saved)) {
+    var action = backupWriteAction(now, saved, offerPending);
+    if (action === "skip") {
+      return;
+    }
+    if (action === "clear") {
       clearBackup();
       return;
     }
@@ -338,6 +358,7 @@ function saveStateText(state, detail) {
     }
     bannerText.textContent = backupMessage(verdict, when);
     banner.hidden = false;
+    offerPending = true;
   }
 
   function hideBanner() {
@@ -353,6 +374,7 @@ function saveStateText(state, detail) {
       if (!pending) {
         return;
       }
+      offerPending = false;
       setBody(pending.body);
       writeFields(pending.fields);
       // Restoring puts the text back at the version it was written against,
@@ -367,6 +389,7 @@ function saveStateText(state, detail) {
   }
   if (discardBtn) {
     discardBtn.addEventListener("click", function () {
+      offerPending = false;
       clearBackup();
       pending = null;
       hideBanner();
@@ -461,7 +484,9 @@ function saveStateText(state, detail) {
           refreshRegions(doc);
           saved = sent;
           if (sameState(currentState(), saved)) {
-            clearBackup();
+            if (!offerPending) {
+              clearBackup();
+            }
             setState("saved", timeText());
           } else {
             writeBackup();
@@ -711,6 +736,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     sameState: sameState,
     backupVerdict: backupVerdict,
+    backupWriteAction: backupWriteAction,
     backupMessage: backupMessage,
     uploadOutcome: uploadOutcome,
     lookupImageSrc: lookupImageSrc,

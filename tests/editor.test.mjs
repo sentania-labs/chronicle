@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { sameState, backupVerdict, backupMessage, uploadOutcome, lookupImageSrc, saveStateText } =
+const { sameState, backupVerdict, backupWriteAction, backupMessage, uploadOutcome, lookupImageSrc, saveStateText } =
   require("../chronicle/api/static/editor.js");
 
 test("sameState compares the body and every field, missing and empty alike", () => {
@@ -97,4 +97,15 @@ test("every save state has its own text, and unknown states read as idle", () =>
   assert.equal(saveStateText("error", "nope"), "Not saved: nope");
   assert.equal(saveStateText("idle"), "No unsaved changes");
   assert.equal(saveStateText("whatever"), "No unsaved changes");
+});
+
+test("an unanswered backup offer is never overwritten or cleared", () => {
+  const server = { body: "server", fields: {} };
+  const typed = { body: "typed", fields: {} };
+  // Leaving the page with the banner up, the editor matches the server: that
+  // must not clear the stored copy the banner is offering.
+  assert.equal(backupWriteAction(server, server, true), "skip");
+  assert.equal(backupWriteAction(typed, server, true), "skip");
+  assert.equal(backupWriteAction(server, server, false), "clear");
+  assert.equal(backupWriteAction(typed, server, false), "write");
 });
