@@ -256,6 +256,35 @@ def test_board_lists_newest_first_within_each_section(
     assert _card_titles(archive) == ["Pub 2026", "Pub 2005"]
 
 
+def test_archive_orders_by_post_date_not_by_when_the_record_was_touched(
+    client: TestClient, services: Services
+) -> None:
+    """A digest stamps hundreds of records within seconds, so `updated_at`
+    says nothing about which post is newest. The archive follows the date the
+    post carries; a record with no post date falls back to `updated_at`."""
+    store = services.store
+    ids = {}
+    for title, post_date in (
+        ("Post 2011", "2011-10-12"),
+        ("Post 2019", "2019-04-14 01:57:37+00:00"),
+        ("Post 2026", "2026-07-24T12:00:37-05:00"),
+    ):
+        ids[title] = make_draft(services, "published", title=title, with_publish=True)
+        draft = store.get_draft(ids[title])
+        assert draft.published is not None
+        draft.published["date"] = post_date
+        store._write_json(store._draft_path(draft.id), draft.model_dump(mode="json"))
+        store.index.upsert_draft(draft)
+    # Touched in the opposite order to the post dates, one second apart.
+    _retag(services, ids["Post 2026"], updated_at="2026-09-18T16:01:43+00:00")
+    _retag(services, ids["Post 2019"], updated_at="2026-09-18T16:01:44+00:00")
+    _retag(services, ids["Post 2011"], updated_at="2026-09-18T16:01:45+00:00")
+
+    html = client.get("/content/drafts").text
+    _, _, archive = html.partition('<details id="published"')
+    assert _card_titles(archive) == ["Post 2026", "Post 2019", "Post 2011"]
+
+
 def test_board_orders_by_instant_not_by_offset_text(client: TestClient, services: Services) -> None:
     """`2026-09-18T01:00:00-05:00` is 06:00 UTC, later than
     `2026-09-18T03:00:00+00:00`, though it sorts earlier as a string."""

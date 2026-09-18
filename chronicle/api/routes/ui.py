@@ -166,6 +166,11 @@ def _board_row(
     }
 
 
+def _archive_sort_key(draft: Draft) -> tuple[datetime, datetime]:
+    post_date = (draft.published or {}).get("date")
+    return (sort_key(post_date or draft.updated_at), sort_key(draft.updated_at))
+
+
 @router.get("/content/drafts", response_class=HTMLResponse)
 def drafts_board(
     request: Request,
@@ -193,6 +198,12 @@ def drafts_board(
     drafts.sort(key=lambda d: sort_key(d.updated_at), reverse=True)
     active = [d for d in drafts if d.status != "published"]
     archive = [d for d in drafts if d.status == "published"]
+    # The archive is ordered by the date the post itself carries, not by when
+    # its record was last touched: a digest stamps hundreds of records within
+    # seconds of each other, so `updated_at` alone left a freshly loaded
+    # archive in processing order (2026, 2026, then 2011 ascending). Found in
+    # the live pass. A record with no post date falls back to `updated_at`.
+    archive.sort(key=_archive_sort_key, reverse=True)
     # Only the archive is paged, and its rows (versions, last preview run) are
     # only loaded for the visible page: after a digest the archive is hundreds
     # of records and the board should not read every one to show fifty.
