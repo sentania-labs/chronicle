@@ -989,3 +989,54 @@ def test_feature_image_select_prefers_exact_match_over_basename_collision(
     assert '<option value="featured.png" selected>featured.png</option>' in editor.text
     assert '<option value="hero.png">hero.png</option>' in editor.text
     assert editor.text.count(" selected") == 1
+
+
+# --- New post ---------------------------------------------------------------
+
+
+def test_board_offers_a_new_post_button_that_posts(client: TestClient) -> None:
+    response = client.get("/content/drafts")
+    assert '<form method="post" action="/content/drafts/new">' in response.text
+    assert "New post" in response.text
+
+
+def test_new_post_creates_a_blank_draft_and_redirects_into_the_editor(
+    client: TestClient, services: Services
+) -> None:
+    assert services.store.list_drafts() == []
+    response = client.post("/content/drafts/new", follow_redirects=False)
+    assert response.status_code == 303
+    drafts = services.store.list_drafts()
+    assert len(drafts) == 1
+    assert response.headers["location"] == f"/content/drafts/{drafts[0].id}"
+    assert drafts[0].status == "drafting"
+    assert drafts[0].title == ""
+    # Acts as the ui consumer's mapped identity, like every other UI write.
+    events, _cursor = services.store.events_since(0)
+    assert [(e.type, e.actor, e.draft_id) for e in events if e.draft_id == drafts[0].id] == [
+        ("draft.created", "scott", drafts[0].id)
+    ]
+
+    editor = client.get(response.headers["location"])
+    assert editor.status_code == 200
+    assert 'name="title"' in editor.text
+
+
+def test_new_post_get_creates_nothing(client: TestClient, services: Services) -> None:
+    response = client.get("/content/drafts/new")
+    assert response.status_code == 404
+    assert services.store.list_drafts() == []
+
+
+@pytest.mark.parametrize("origin", ["https://evil.example", "null", ""])
+def test_new_post_is_origin_guarded(client: TestClient, services: Services, origin: str) -> None:
+    response = client.post("/content/drafts/new", headers={"Origin": origin})
+    assert response.status_code == 403
+    assert services.store.list_drafts() == []
+
+
+def test_new_post_needs_a_live_ui_token(client: TestClient, services: Services) -> None:
+    services.tokens.ui_token_path.unlink()
+    response = client.post("/content/drafts/new")
+    assert response.status_code == 503
+    assert services.store.list_drafts() == []

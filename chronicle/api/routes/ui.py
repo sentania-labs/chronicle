@@ -135,6 +135,18 @@ def submission_discard(
 # --- Drafts board -------------------------------------------------------
 
 
+@router.post("/content/drafts/new")
+def draft_new(
+    _origin: None = Depends(check_same_origin),
+    consumer: Consumer = Depends(require_ui_consumer),
+    services: Services = Depends(get_services),
+) -> RedirectResponse:
+    """Start a post from nothing. POST only: a GET on this path is the
+    editor route with `new` as a draft id, which 404s and creates nothing."""
+    draft, warnings = services.store.create_draft(consumer.name)
+    return _redirect_to_draft(draft.id, warnings)
+
+
 @router.get("/content/drafts", response_class=HTMLResponse)
 def drafts_board(
     request: Request,

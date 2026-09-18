@@ -229,6 +229,9 @@ def drafts_board_page(pg: Page[dict[str, Any]], *, status_filter: str | None, ba
     )
     extra = f"&status={escape(status_filter)}" if status_filter else ""
     body = f"""
+<form method="post" action="/content/drafts/new">
+<button type="submit">New post</button>
+</form>
 <form method="get" action="/content/drafts">
 <label for="status">Filter by status</label>
 <select id="status" name="status">{_status_options(status_filter)}</select>
