@@ -746,7 +746,6 @@ def editor_page(
 <input type="text" id="title" name="title" value="{escape(title_value)}" required>
 <label for="body">Body (markdown)</label>
 <textarea id="body" name="body" data-editor="markdown">{escape(draft["body"])}</textarea>
-<div id="preview-pane" class="card fallback-preview"></div>
 </form>
 </div>
 <aside class="editor-side">

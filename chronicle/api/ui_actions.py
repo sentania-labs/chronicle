@@ -82,7 +82,7 @@ def offers_for(
         offers.append(
             Offer(
                 action,
-                action.replace("_", " "),
+                action.replace("_", " ").capitalize(),
                 feedback_required=transition.feedback_required,
                 reserved=action in RESERVED_ACTIONS,
                 steps=(action,),
