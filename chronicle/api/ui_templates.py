@@ -274,8 +274,33 @@ def drafts_board_page(
 
 
 def import_page(
-    pg: Page[dict[str, Any]], q: str, *, banner: bool, notice: str | None = None
+    pg: Page[dict[str, Any]],
+    q: str,
+    *,
+    banner: bool,
+    posts_total: int,
+    untracked_total: int,
+    notice: str | None = None,
 ) -> str:
+    """`posts_total` is every post the store knows; `untracked_total` is those
+    no draft record tracks yet, the only ones this tab lists. With none left
+    it says so plainly instead of drawing an empty table, and says why."""
+    if untracked_total == 0:
+        if posts_total == 0:
+            reason = "No posts have been digested from the blog yet, so there is nothing to import."
+        else:
+            reason = (
+                f"All {posts_total} posts from the blog are already on the "
+                '<a href="/content/drafts">Posts tab</a>, so there is nothing to import. '
+                "This tab only lists a post that has no record here yet."
+            )
+        return page(
+            "Import published post",
+            f"<p>{reason}</p>",
+            banner=banner,
+            notice=notice,
+            notice_kind="error",
+        )
     rows = "".join(
         "<tr>"
         f"<td>{escape(p['slug'])}</td>"
@@ -287,8 +312,9 @@ def import_page(
         "</tr>"
         for p in pg.items
     )
-    extra = f"&q={escape(q)}" if q else ""
+    extra = f"&q={quote(q)}" if q else ""
     body = f"""
+<p class="muted">Posts with no record here yet: {untracked_total}.</p>
 <form method="get" action="/content/import">
 <label for="q">Search published posts</label>
 <input type="text" id="q" name="q" value="{escape(q)}" placeholder="title or slug">
@@ -305,7 +331,7 @@ def import_page(
         body,
         banner=banner,
         notice=notice,
-        notice_kind="ok" if notice else "error",
+        notice_kind="error",
     )
 
 

@@ -1166,3 +1166,144 @@ def test_new_post_needs_a_live_ui_token(client: TestClient, services: Services) 
     response = client.post("/content/drafts/new")
     assert response.status_code == 503
     assert services.store.list_drafts() == []
+
+
+# --- Import filter ----------------------------------------------------------
+
+
+def _set_fields(services: Services, draft_id: str, **fields: Any) -> None:
+    store = services.store
+    draft = store.get_draft(draft_id)
+    for key, value in fields.items():
+        setattr(draft, key, value)
+    store._write_json(store._draft_path(draft.id), draft.model_dump(mode="json"))
+    store.index.upsert_draft(draft)
+
+
+def _digest_posts(services: Services, *slugs: str) -> None:
+    services.store.apply_digest(
+        "scott",
+        [
+            Post(
+                slug=slug,
+                path=f"content/posts/{slug}.md",
+                title=f"Title of {slug}",
+                date="2026-01-01",
+                sha=f"sha-{slug}",
+            )
+            for slug in slugs
+        ],
+    )
+
+
+def test_import_lists_only_posts_no_draft_tracks(client: TestClient, services: Services) -> None:
+    _digest_posts(services, "by-slug", "by-source-path", "by-published-path", "loose")
+    slug_draft = make_draft(services, "published", title="t1")
+    _set_fields(services, slug_draft, slug="by-slug")
+    source_draft = make_draft(services, "published", title="t2")
+    _set_fields(
+        services,
+        source_draft,
+        slug="renamed-since",
+        source_post={"slug": "by-source-path", "path": "content/posts/by-source-path.md"},
+    )
+    published_draft = make_draft(services, "published", title="t3")
+    _set_fields(
+        services,
+        published_draft,
+        slug="also-renamed",
+        published={"post_path": "content/posts/by-published-path.md"},
+    )
+
+    html = client.get("/content/import").text
+    assert 'value="loose"' in html
+    for tracked in ("by-slug", "by-source-path", "by-published-path"):
+        assert f'value="{tracked}"' not in html
+    assert "Import as post" in html
+    assert "Posts with no record here yet: 1." in html
+
+
+def test_import_search_only_searches_the_untracked_posts(
+    client: TestClient, services: Services
+) -> None:
+    _digest_posts(services, "tracked-race", "loose-race")
+    tracked = make_draft(services, "published")
+    _set_fields(services, tracked, slug="tracked-race")
+
+    html = client.get("/content/import?q=race").text
+    assert 'value="loose-race"' in html
+    assert 'value="tracked-race"' not in html
+
+
+def test_import_says_so_plainly_when_every_post_is_tracked(
+    client: TestClient, services: Services
+) -> None:
+    _digest_posts(services, "one", "two")
+    for slug in ("one", "two"):
+        _set_fields(services, make_draft(services, "published"), slug=slug)
+
+    response = client.get("/content/import")
+    assert response.status_code == 200
+    assert "All 2 posts from the blog are already on the" in response.text
+    assert 'href="/content/drafts"' in response.text
+    assert "nothing to import" in response.text
+    assert "<table>" not in response.text
+    assert "Import as post" not in response.text
+
+
+def test_import_says_so_when_nothing_has_been_digested(client: TestClient) -> None:
+    response = client.get("/content/import")
+    assert response.status_code == 200
+    assert "No posts have been digested" in response.text
+    assert "<table>" not in response.text
+
+
+def test_import_post_for_an_already_tracked_post_explains_itself(
+    client: TestClient, services: Services
+) -> None:
+    _digest_posts(services, "already-here")
+    tracked = make_draft(services, "published")
+    _set_fields(services, tracked, slug="already-here")
+    before = len(services.store.list_drafts())
+
+    response = client.post("/content/import", data={"slug": "already-here"})
+    assert response.status_code == 409
+    assert "already a post on the Posts tab" in response.text
+    assert "image_dir_collision" not in response.text
+    assert "already pinned by another draft" not in response.text
+    assert len(services.store.list_drafts()) == before
+
+
+def test_import_image_folder_collision_reads_as_an_explanation(
+    client: TestClient, services: Services
+) -> None:
+    """The recovery path still runs, and its one remaining 409 (another post
+    owns the image folder this import would claim) no longer surfaces the raw
+    collision text."""
+    _digest_posts(services, "clash")
+    site_posts = services.store.site_dir / "content" / "posts"
+    site_posts.mkdir(parents=True, exist_ok=True)
+    (site_posts / "clash.md").write_text("---\ntitle: Clash\n---\nbody\n", encoding="utf-8")
+    owner = make_draft(services, "published", title="Owner")
+    _set_fields(services, owner, slug="someone-else", image_dir="clash")
+
+    response = client.post("/content/import", data={"slug": "clash"})
+    assert response.status_code == 409
+    assert "Could not import clash" in response.text
+    assert "static/images/clash/" in response.text
+    assert "belongs to another post on this board" in response.text
+    assert "already pinned by another draft" not in response.text
+    assert 'class="notice error"' in response.text
+
+
+def test_import_still_creates_a_post_for_an_untracked_one(
+    client: TestClient, services: Services
+) -> None:
+    _digest_posts(services, "recover-me")
+    site_posts = services.store.site_dir / "content" / "posts"
+    site_posts.mkdir(parents=True, exist_ok=True)
+    (site_posts / "recover-me.md").write_text("---\ntitle: Recover\n---\nbody\n", encoding="utf-8")
+
+    response = client.post("/content/import", data={"slug": "recover-me"}, follow_redirects=False)
+    assert response.status_code == 303
+    assert [d.slug for d in services.store.list_drafts()] == ["recover-me"]
