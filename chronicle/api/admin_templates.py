@@ -234,13 +234,19 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
             conventions_rows += row("fallback reason", conventions["fallback_reason"])
     else:
         conventions_rows = row("conventions", "no digest has run yet")
+    # The state sentence embeds a raw ISO stamp that /readyz must keep, so the
+    # stamp travels separately and the page rebuilds the same wording from it.
+    verified_at = status.get("github_app_verified_at")
+    app_state = (
+        f"verified at {local_time(verified_at)}" if verified_at else status["github_app_state"]
+    )
     # last backup and last digest go through `_stamp`: the words "never" survive
     # and a bare YYYY-MM-DD stays a date (no instant to shift).
     body = f"""
 {nav()}
 <h2>GitHub App</h2>
 <table>
-{row("state", status["github_app_state"])}
+{row("state", app_state)}
 {row("repo", status["github_repo"] or "none chosen")}
 {row("default branch", status["github_default_branch"] or "-")}
 </table>

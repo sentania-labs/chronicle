@@ -154,3 +154,59 @@ def test_heartbeat_at_key_with_no_value_renders_as_before() -> None:
         lambda k, v: f"<tr><td>{k}</td><td>{v}</td></tr>", {"last_loop_at": None}, "builder"
     )
     assert "<td>last_loop_at</td><td>None</td>" in html
+
+
+VERIFIED = "2020-12-13T14:15:16+00:00"  # 2020-12-13 08:15 CST
+
+
+def _github_store(admin_client: TestClient) -> Any:
+    services: Any = admin_client.app.state.admin_services  # type: ignore[attr-defined]
+    services.github_store.store_new_app(
+        app_id="1",
+        slug="s",
+        client_id="c",
+        client_secret="cs",
+        webhook_secret="ws",
+        pem="not-a-real-key",
+        html_url="https://github.com/apps/s",
+    )
+    return services.github_store
+
+
+def test_status_page_renders_github_verified_at_as_local_time(
+    admin_client: TestClient,
+) -> None:
+    store = _github_store(admin_client)
+    store.record_verification({"contents": "read"})
+    record = store.load()
+    record.last_verified_at = VERIFIED
+    store._save(record)
+    html = admin_client.get("/admin").text
+    assert "<td>state</td><td>verified at 2020-12-13 08:15 CST</td>" in html
+    _absent(html, VERIFIED)
+    assert admin_client.get("/admin/api/status").json()["github_app_verified_at"] == VERIFIED
+
+
+def test_readyz_still_reports_the_raw_iso_verified_at_stamp(admin_client: TestClient) -> None:
+    """Machine readable: do not "simplify" by localizing `readiness_state`."""
+    store = _github_store(admin_client)
+    store.record_verification({"contents": "read"})
+    record = store.load()
+    record.last_verified_at = VERIFIED
+    store._save(record)
+    check = admin_client.get("/readyz").json()["checks"][3]
+    assert check["name"] == "github_app"
+    assert check["detail"] == f"verified at {VERIFIED}"
+
+
+def test_status_page_other_github_readiness_states_render_unchanged(
+    admin_client: TestClient,
+) -> None:
+    assert "<td>state</td><td>not configured</td>" in admin_client.get("/admin").text
+    store = _github_store(admin_client)
+    assert "<td>state</td><td>configured but unverified</td>" in admin_client.get("/admin").text
+    store.record_verification({"contents": "read"})
+    store.record_error("list_repositories_failed")
+    html = admin_client.get("/admin").text
+    assert "<td>state</td><td>failing: list_repositories_failed</td>" in html
+    assert admin_client.get("/admin/api/status").json()["github_app_verified_at"] is None
