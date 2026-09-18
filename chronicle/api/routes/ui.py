@@ -16,12 +16,12 @@ from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from .. import ui_templates as tpl
 from ..deps import Consumer, Services
 from ..errors import ApiError
-from ..images import MAX_IMAGE_BYTES
+from ..images import MAX_IMAGE_BYTES, alt_text_for, safe_upload_filename
 from ..models import Draft, Material, Post, Submission
 from ..pagination import Page, paginate
 from ..store import Store
@@ -59,6 +59,17 @@ def _preview_url(run: Any) -> str | None:
         return None
     url = (run.result or {}).get("preview_url")
     return url if isinstance(url, str) else None
+
+
+def _has_current_preview(run: Any, version_no: int) -> bool:
+    """A preview of the draft's current text exists: the last preview run
+    succeeded and built the version the draft is at now (a run with no
+    recorded `built_version` predates the field and counts). A save after the
+    build makes it stale, which is what keeps Publish behind "Preview first"
+    after an edit to a `previewed` draft, where a save leaves the status alone."""
+    if _preview_url(run) is None:
+        return False
+    return run.built_version is None or run.built_version == version_no
 
 
 # `create_draft` reports dropped frontmatter keys and failed image imports
@@ -367,7 +378,8 @@ def _editor_response(
     versions = [_dump(v) for v in store.list_versions(draft_id)]
     feedback = [_dump(f) for f in store.list_feedback(draft_id)]
     last_run = store.last_run(draft_id)
-    preview_url = _preview_url(store.last_run(draft_id, kind="preview"))
+    preview_run = store.last_run(draft_id, kind="preview")
+    preview_url = _preview_url(preview_run)
     watch = store.get_watch(draft_id)
     publish_run = store.last_run(draft_id, kind="publish")
     html = tpl.editor_page(
@@ -377,6 +389,7 @@ def _editor_response(
         _dump(last_run) if last_run else None,
         preview_url,
         banner=banner,
+        has_preview=_has_current_preview(preview_run, draft.version_no),
         publish_pr_open=watch is not None and watch.kind == "publish",
         # `Store.act_on_draft` separately refuses a re-approve while a
         # publish run is still queued or building (409
@@ -567,7 +580,12 @@ async def draft_action(
     form_data = await request.form()
     feedback = str(form_data.get("feedback") or "") or None
     try:
-        services.store.act_on_draft(draft_id, action, consumer.name, consumer.is_ui, feedback)
+        # Staged: the editor offers Preview on a published post and Publish
+        # on a previewed one, and the store runs the steps
+        # `transitions.plan_action` says make that legal (nothing decided here).
+        services.store.act_on_draft_staged(
+            draft_id, action, consumer.name, consumer.is_ui, feedback
+        )
     except ApiError as exc:
         return _editor_response(
             services,
@@ -594,6 +612,10 @@ def draft_diff(
     )
 
 
+def _wants_json(request: Request) -> bool:
+    return "application/json" in request.headers.get("accept", "")
+
+
 @router.post("/content/drafts/{draft_id}/images", response_class=HTMLResponse)
 async def draft_image_upload(
     draft_id: str,
@@ -603,12 +625,29 @@ async def draft_image_upload(
     services: Services = Depends(get_services),
     file: UploadFile = File(...),
     role: str = Form("inline"),
-) -> HTMLResponse:
+) -> Any:
+    """Upload and attach an image.
+
+    A plain form post gets the editor page back, as ever. `editor.js` asks for
+    `Accept: application/json` instead and gets what it needs to put the
+    reference in the body without re-rendering anything: the attached image's
+    stored `filename` (the reference is by filename, and a dedup can keep an
+    earlier upload's name), the `markdown` to insert at the cursor (None for a
+    `feature` image, which the body does not reference), and the `url` the live
+    render loads the bytes from.
+    """
     try:
         raw = _read_capped(file)
-        record, _created = services.store.put_image(raw, file.filename or "upload")
+        record, created = services.store.put_image(
+            raw, safe_upload_filename(file.filename or "upload")
+        )
         services.store.attach_image(draft_id, record.image_id, role, consumer.name)
     except ApiError as exc:
+        if _wants_json(request):
+            return JSONResponse(
+                {"ok": False, "code": exc.code, "message": exc.message},
+                status_code=exc.status_code,
+            )
         return _editor_response(
             services,
             draft_id,
@@ -617,7 +656,42 @@ async def draft_image_upload(
             notice_kind="error",
             status_code=exc.status_code,
         )
+    if _wants_json(request):
+        return JSONResponse(
+            {
+                "ok": True,
+                "image_id": record.image_id,
+                "filename": record.filename,
+                "role": role,
+                "created": created,
+                "markdown": (
+                    f"![{alt_text_for(record.filename)}]({record.filename})"
+                    if role == "inline"
+                    else None
+                ),
+                "url": tpl.image_url(draft_id, record.image_id),
+            }
+        )
     return _editor_response(services, draft_id, banner=banner_enabled(request))
+
+
+@router.get("/content/drafts/{draft_id}/images/{image_id}/file")
+def draft_image_file(
+    draft_id: str, image_id: str, services: Services = Depends(get_services)
+) -> FileResponse:
+    """The bytes of an image attached to this draft, for the editor's live
+    render (the body refers to it by bare filename, which no page can load).
+    Only an image the draft has attached, and only the four decoded types the
+    store ever keeps (no SVG), served inline with no sniffing."""
+    draft = services.store.get_draft(draft_id)
+    if not any(item.image_id == image_id for item in draft.images):
+        raise ApiError(404, "image_not_attached", f"draft {draft_id} has no image {image_id}")
+    record = services.store.get_image(image_id)
+    return FileResponse(
+        services.store.image_blob(image_id),
+        media_type=record.mime,
+        headers={"X-Content-Type-Options": "nosniff", "Content-Disposition": "inline"},
+    )
 
 
 @router.post("/content/drafts/{draft_id}/images/{image_id}/detach")

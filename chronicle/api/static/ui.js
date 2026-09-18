@@ -1,13 +1,13 @@
 // Chronicle UI: minimal hand-written client-side behaviour.
-// Not vendored: this file is original to Chronicle. The only vendored asset
-// is /static/vendor/marked.min.js (see THIRD_PARTY.md).
+// Not vendored: this file is original to Chronicle. The vendored assets are
+// /static/vendor/marked.min.js and the EasyMDE pair (see THIRD_PARTY.md); the
+// editor page's own behaviour is in editor.js, which calls sanitize below.
 //
 // isSafeUrl and sanitize are declared outside the DOM-guarded IIFE below,
 // not because they run outside the browser, but so tests/ui_sanitize.test.mjs
-// can `require` this same file under `node --test` (a global `document` with
-// no `getElementById("body")` makes the IIFE's own guard return immediately,
-// leaving only these two function declarations, which node's own `URL` and
-// (in the sanitize case) a jsdom-free DOMParser stub can exercise directly).
+// can `require` this same file under `node --test` (no global `document`
+// makes the IIFE's own guard return immediately, leaving only these two
+// function declarations, which node's own `URL` can exercise directly).
 // A literal-string check against "javascript:" is not enough: a browser
 // strips ASCII whitespace (including a literal newline written as the
 // entity `&#x0A;`) while parsing a URL before deciding its scheme, so
@@ -39,7 +39,7 @@ function isSafeUrl(value) {
   );
 }
 
-function sanitize(html) {
+function sanitize(html, resolveImageSrc) {
   var doc = new DOMParser().parseFromString(html, "text/html");
   // marked renders raw HTML in the markdown source through unchanged (that
   // is standard GFM behaviour, not a bug in marked); a draft's body is not
@@ -63,28 +63,17 @@ function sanitize(html) {
       var isUrlAttr = name === "href" || name === "src" || name === "xlink:href";
       if (name.indexOf("on") === 0 || (isUrlAttr && !isSafeUrl(attr.value))) {
         el.removeAttribute(attr.name);
+      } else if (name === "src" && el.tagName === "IMG" && resolveImageSrc) {
+        // Applied after the safety check, on the same parsed document, so the
+        // one parse that was sanitised is the one that is serialised. The
+        // resolver only ever returns the original value or a URL the server
+        // built for an image attached to this draft.
+        el.setAttribute("src", resolveImageSrc(attr.value));
       }
     });
   });
   return doc.body.innerHTML;
 }
-
-(function () {
-  if (typeof document === "undefined") {
-    return;
-  }
-  var textarea = document.getElementById("body");
-  var preview = document.getElementById("preview-pane");
-  if (!textarea || !preview || typeof marked === "undefined") {
-    return;
-  }
-
-  function render() {
-    preview.innerHTML = sanitize(marked.parse(textarea.value || ""));
-  }
-  textarea.addEventListener("input", render);
-  render();
-})();
 
 (function () {
   if (typeof document === "undefined") {

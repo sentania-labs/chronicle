@@ -17,12 +17,22 @@ from typing import Any
 from urllib.parse import quote
 
 from .pagination import Page
-from .transitions import DRAFT_TRANSITIONS, RESERVED_ACTIONS
+from .ui_actions import DISABLED, Offer, offers_for
+from .ui_status import status_label
 from .ui_time import local_time
 
 STYLE_LINKS = (
     '<link rel="stylesheet" href="/static/style.css">'
     '<script src="/static/vendor/marked.min.js"></script>'
+)
+
+# Only the editor page loads EasyMDE (and its stylesheet); every asset is
+# vendored under /static/vendor and none reaches a CDN (THIRD_PARTY.md).
+EDITOR_HEAD = '<link rel="stylesheet" href="/static/vendor/easymde.min.css">'
+EDITOR_SCRIPTS = (
+    '<script src="/static/vendor/easymde.min.js"></script>'
+    '<script src="/static/ui.js"></script>'
+    '<script src="/static/editor.js"></script>'
 )
 
 # User-facing label only: "Drafts" reads "Posts" everywhere Scott sees it
@@ -49,19 +59,36 @@ def _nav() -> str:
 
 
 def page(
-    title: str, body: str, *, banner: bool, notice: str | None = None, notice_kind: str = "error"
+    title: str,
+    body: str,
+    *,
+    banner: bool,
+    notice: str | None = None,
+    notice_kind: str = "error",
+    editor: bool = False,
+    editor_backup: bool = False,
 ) -> str:
+    """`editor` is the full editor page (EasyMDE and editor.js); `editor_backup`
+    is the conflict page, which only needs editor.js to keep the visitor's
+    attempted text in the browser."""
     banner_html = f'<p class="banner">{escape(BANNER_TEXT)}</p>' if banner else ""
     notice_html = f'<p class="notice {notice_kind}">{escape(notice)}</p>' if notice else ""
+    head = STYLE_LINKS + (EDITOR_HEAD if editor else "")
+    if editor:
+        scripts = EDITOR_SCRIPTS
+    elif editor_backup:
+        scripts = '<script src="/static/ui.js"></script><script src="/static/editor.js"></script>'
+    else:
+        scripts = '<script src="/static/ui.js"></script>'
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>{escape(title)}</title>{STYLE_LINKS}</head>
-<body>
+<html><head><meta charset="utf-8"><title>{escape(title)}</title>{head}</head>
+<body{' class="wide"' if editor else ""}>
 {banner_html}
 {_nav()}
 <h1>{escape(title)}</h1>
 {notice_html}
 {body}
-<script src="/static/ui.js"></script>
+{scripts}
 </body></html>"""
 
 
@@ -95,7 +122,9 @@ def _status_options(current: str | None) -> str:
     options = ['<option value="">all</option>']
     for status in DRAFT_STATUSES:
         selected = " selected" if status == current else ""
-        options.append(f'<option value="{status}"{selected}>{escape(status)}</option>')
+        options.append(
+            f'<option value="{status}"{selected}>{escape(status_label(status))}</option>'
+        )
     return "".join(options)
 
 
@@ -278,7 +307,7 @@ def _draft_card(
     return f"""
 <div class="card">
 <h3><a href="/content/drafts/{escape(draft["id"])}">{escape(draft["title"] or "(untitled)")}</a></h3>
-<p class="muted">slug: {escape(draft["slug"] or "-")} | status: {escape(draft["status"])} |
+<p class="muted">slug: {escape(draft["slug"] or "-")} | status: {escape(status_label(draft["status"]))} |
 author: {escape(last_author)} | updated: {escape(local_time(draft["updated_at"]))} | claim: {claim_text}</p>
 <p class="muted">PR: {pr_link} | preview: {preview_link} {_flag_badges(flags)}</p>
 </div>
@@ -401,10 +430,23 @@ def import_page(
 
 # --- Editor ---------------------------------------------------------------
 
+# The edit form is `<form id="edit-form">` and everything that belongs to it
+# but sits beside the editor (the frontmatter panel in the sidebar, the sticky
+# Save button) joins it with `form="edit-form"`. The sidebar's own forms
+# (claim, detach, upload) cannot nest inside it, so the sidebar is a sibling.
+EDIT_FORM_ID = "edit-form"
+
 
 def _frontmatter_fields(
-    frontmatter: dict[str, Any], images: list[dict[str, Any]], slug: str | None
+    frontmatter: dict[str, Any],
+    images: list[dict[str, Any]],
+    slug: str | None,
+    *,
+    include_title: bool = True,
+    form_id: str | None = None,
 ) -> str:
+    join = f' form="{form_id}"' if form_id else ""
+
     def val(key: str) -> str:
         value = frontmatter.get(key, "")
         return escape(value if isinstance(value, str) else "")
@@ -414,9 +456,9 @@ def _frontmatter_fields(
         return escape(", ".join(str(v) for v in value))
 
     url_field = (
-        f'<input type="text" id="url" name="url" value="{val("url")}" readonly>'
+        f'<input type="text" id="url" name="url" value="{val("url")}" readonly{join}>'
         if slug
-        else f'<input type="text" id="url" name="url" value="{val("url")}">'
+        else f'<input type="text" id="url" name="url" value="{val("url")}"{join}>'
     )
     stored_feature = frontmatter.get("featureImage")
     stored_feature = stored_feature if isinstance(stored_feature, str) else ""
@@ -467,29 +509,41 @@ def _frontmatter_fields(
         feature_options += (
             f'<option value="{escape(stored_feature)}" selected>{escape(stored_feature)}</option>'
         )
-    return f"""
-<label for="title">Title</label>
-<input type="text" id="title" name="title" value="{val("title")}" required>
-<label for="date">Date</label>
-<input type="text" id="date" name="date" value="{val("date")}" placeholder="YYYY-MM-DD">
+    title_field = (
+        f'<label for="title">Title</label>\n'
+        f'<input type="text" id="title" name="title" value="{val("title")}" required{join}>\n'
+        if include_title
+        else ""
+    )
+    return f"""{title_field}<label for="date">Date</label>
+<input type="text" id="date" name="date" value="{val("date")}" placeholder="YYYY-MM-DD"{join}>
 <label for="categories">Categories (comma-separated)</label>
-<input type="text" id="categories" name="categories" value="{list_val("categories")}">
+<input type="text" id="categories" name="categories" value="{list_val("categories")}"{join}>
 <label for="tags">Tags (comma-separated)</label>
-<input type="text" id="tags" name="tags" value="{list_val("tags")}">
+<input type="text" id="tags" name="tags" value="{list_val("tags")}"{join}>
 <label for="summary">Summary / description</label>
-<input type="text" id="summary" name="summary" value="{val("summary") or val("description")}">
+<input type="text" id="summary" name="summary" value="{val("summary") or val("description")}"{join}>
 <label for="url">URL{" (read-only, slug is pinned)" if slug else ""}</label>
 {url_field}
 <label for="featureImage">Feature image</label>
-<select id="featureImage" name="featureImage"><option value="">none</option>{feature_options}</select>
+<select id="featureImage" name="featureImage"{join}><option value="">none</option>{feature_options}</select>
 """
+
+
+def image_url(draft_id: str, image_id: str) -> str:
+    return f"/content/drafts/{quote(draft_id, safe='')}/images/{quote(image_id, safe='')}/file"
 
 
 def _image_list(draft_id: str, images: list[dict[str, Any]]) -> str:
     if not images:
         return "<p>no attached images.</p>"
+    # data-image-filename / data-image-src are how the editor's live render
+    # finds the bytes for a body reference like `![](feature.png)`: the
+    # reference is a bare filename (what convert.py rewrites), which is not a
+    # URL this page can load.
     rows = "".join(
-        "<tr>"
+        f'<tr data-image-filename="{escape(img["filename"])}" '
+        f'data-image-src="{escape(image_url(draft_id, img["image_id"]))}">'
         f"<td>{escape(img['filename'])}</td>"
         f"<td>{escape(img['role'])}</td>"
         f'<td><form method="post" action="/content/drafts/{escape(draft_id)}/images/{escape(img["image_id"])}/detach">'
@@ -500,48 +554,42 @@ def _image_list(draft_id: str, images: list[dict[str, Any]]) -> str:
     return f"<table><tr><th>filename</th><th>role</th><th></th></tr>{rows}</table>"
 
 
-def _action_buttons(
-    draft_id: str,
-    status: str,
-    published: dict[str, Any] | None,
-    publish_pr_open: bool,
-    publish_run_active: bool = False,
-) -> str:
-    buttons = []
-    for (from_status, action), transition in DRAFT_TRANSITIONS.items():
-        if from_status != status or action == "revise":
-            continue
-        if action == "approve" and status == "approved" and publish_pr_open:
-            # `Store.act_on_draft` itself refuses a re-approve while a
-            # publish PR is already open (409 publish_pr_open); the table
-            # alone can't see that, so a round C5 review found this button
-            # rendering and then 409ing on every click until the PR closes.
-            continue
-        if action == "approve" and status == "approved" and publish_run_active:
-            # The narrower window before that PR exists: a publish run
-            # already `queued` or `building` for this draft (409
-            # publish_run_in_progress). A round C5 review found the button
-            # still rendered and 409ed on every click through this gap.
-            continue
-        label = action.replace("_", " ")
-        if action == "approve" and published:
-            label = "republish"
-        reserved = (
-            ' <span class="reserved">(Scott only)</span>' if action in RESERVED_ACTIONS else ""
+STAGE_HINTS = {
+    "revise": "moves it back to Draft first",
+    "submit": "submits it for review first",
+}
+
+
+def _offer_button(draft_id: str, offer: Offer) -> str:
+    if offer.state == DISABLED:
+        return (
+            f'<span class="offer"><button type="button" class="offer-{escape(offer.action)}" '
+            f'disabled title="{escape(offer.reason)}">{escape(offer.label)}</button> '
+            f'<small class="offer-reason">{escape(offer.reason)}</small></span>'
         )
-        if transition.feedback_required:
-            buttons.append(
-                f'<form method="post" action="/content/drafts/{escape(draft_id)}/actions/{action}">'
-                f"<label>{label}{reserved}</label>"
-                '<textarea name="feedback" required placeholder="feedback text (required)"></textarea>'
-                f'<button type="submit">{escape(label)}</button></form>'
-            )
-        else:
-            buttons.append(
-                f'<form method="post" action="/content/drafts/{escape(draft_id)}/actions/{action}">'
-                f'<button type="submit">{escape(label)}{reserved}</button></form>'
-            )
-    return "".join(buttons) or "<p>no actions available from this status.</p>"
+    reserved = ' <span class="reserved">(Scott only)</span>' if offer.reserved else ""
+    action_url = f"/content/drafts/{escape(draft_id)}/actions/{offer.action}"
+    css = "primary" if offer.primary else "secondary"
+    # Steps the click runs beyond the action itself (a revise before a
+    # preview, a submit before an approve) are said out loud, not hidden.
+    staged = [STAGE_HINTS.get(step, step) for step in offer.steps[:-1]]
+    hint = f' <small class="offer-reason">{escape("; ".join(staged))}</small>' if staged else ""
+    if offer.feedback_required:
+        return (
+            f'<form method="post" action="{action_url}" class="action-form">'
+            f"<label>{escape(offer.label)}{reserved}</label>"
+            '<textarea name="feedback" required placeholder="feedback text (required)"></textarea>'
+            f'<button type="submit" class="{css}">{escape(offer.label)}</button></form>'
+        )
+    return (
+        f'<form method="post" action="{action_url}" class="action-form">'
+        f'<button type="submit" class="{css} offer-{escape(offer.action)}">'
+        f"{escape(offer.label)}{reserved}</button>{hint}</form>"
+    )
+
+
+def _action_buttons(draft_id: str, offers: list[Offer]) -> str:
+    return "".join(_offer_button(draft_id, offer) for offer in offers)
 
 
 def _feedback_log(entries: list[dict[str, Any]]) -> str:
@@ -577,6 +625,73 @@ def _run_status(run: dict[str, Any] | None) -> str:
     )
 
 
+def _status_pill(status: str) -> str:
+    return (
+        f'<span id="status-pill" data-refresh class="status-pill status-{escape(status)}">'
+        f"{escape(status_label(status))}</span>"
+    )
+
+
+def _post_info(
+    draft: dict[str, Any], last_run: dict[str, Any] | None, preview_url: str | None
+) -> str:
+    claim = draft.get("claim")
+    if claim:
+        claim_html = (
+            f"<p>Claimed by {escape(claim['author'])} since {escape(local_time(claim['since']))}. "
+            f'<form class="inline" method="post" action="/content/drafts/{escape(draft["id"])}/release">'
+            '<button type="submit">Release claim</button></form></p>'
+        )
+    else:
+        claim_html = (
+            "<p>Unclaimed. "
+            f'<form class="inline" method="post" action="/content/drafts/{escape(draft["id"])}/claim">'
+            '<button type="submit">Claim</button></form></p>'
+        )
+    preview_link = (
+        f'<p><a href="{escape(preview_url)}">Last built preview</a></p>' if preview_url else ""
+    )
+    return (
+        '<section id="post-info" data-refresh class="panel">'
+        f"{claim_html}{preview_link}{_run_status(last_run)}</section>"
+    )
+
+
+def _panel(
+    panel_id: str,
+    title: str,
+    inner: str,
+    *,
+    open_: bool,
+    count: int | None = None,
+    refresh: bool = True,
+) -> str:
+    """A collapsible sidebar panel. `data-refresh` marks it as one the editor
+    swaps for the server's fresh copy after a save or an upload, so what the
+    panel shows never lags the record. The frontmatter panel opts out: it
+    holds form fields the visitor may be typing into."""
+    badge = f' <span class="count">{count}</span>' if count is not None else ""
+    marker = " data-refresh" if refresh else ""
+    return (
+        f'<details id="{panel_id}"{marker} class="panel"{" open" if open_ else ""}>'
+        f"<summary>{escape(title)}{badge}</summary>{inner}</details>"
+    )
+
+
+def _image_upload_form(draft_id: str, images: list[dict[str, Any]]) -> str:
+    # Works with no script at all (a plain multipart post that re-renders the
+    # page); editor.js upgrades it to upload-in-place and insert-at-cursor.
+    return f"""{_image_list(draft_id, images)}
+<form id="image-form" method="post" action="/content/drafts/{escape(draft_id)}/images" enctype="multipart/form-data">
+<div id="dropzone" class="dropzone">Drop an image on the editor or here, or choose one.</div>
+<label for="file">Upload image</label>
+<input type="file" id="file" name="file" accept="image/png,image/jpeg,image/gif,image/webp" required>
+<label for="role">Role</label>
+<select id="role" name="role"><option value="inline">inline (insert in body)</option><option value="feature">feature</option></select>
+<button type="submit" id="upload-btn">Upload and attach</button>
+</form>"""
+
+
 def editor_page(
     draft: dict[str, Any],
     versions: list[dict[str, Any]],
@@ -585,70 +700,64 @@ def editor_page(
     preview_url: str | None,
     *,
     banner: bool,
+    has_preview: bool = False,
     publish_pr_open: bool = False,
     publish_run_active: bool = False,
     notice: str | None = None,
     notice_kind: str = "error",
 ) -> str:
-    claim = draft.get("claim")
-    if claim:
-        claim_html = (
-            f"<p>Claimed by {escape(claim['author'])} since {escape(local_time(claim['since']))}. "
-            f'<form style="display:inline" method="post" action="/content/drafts/{escape(draft["id"])}/release">'
-            '<button type="submit">Release claim</button></form></p>'
-        )
-    else:
-        claim_html = (
-            "<p>Unclaimed. "
-            f'<form style="display:inline" method="post" action="/content/drafts/{escape(draft["id"])}/claim">'
-            '<button type="submit">Claim</button></form></p>'
-        )
-    preview_link = (
-        f'<p><a href="{escape(preview_url)}">Last built preview</a></p>' if preview_url else ""
-    )
-    body_text = escape(draft["body"])
+    draft_id = escape(draft["id"])
     pr_open_notice = (
-        '<p class="notice conflict">This post has an open publish pull request; '
-        "saving is refused until it merges or closes.</p>"
+        '<p id="pr-open-notice" data-refresh class="notice conflict">This post has an open '
+        "publish pull request; saving is refused until it merges or closes.</p>"
         if publish_pr_open
-        else ""
+        else '<p id="pr-open-notice" data-refresh hidden></p>'
     )
+    offers = offers_for(
+        draft["status"],
+        has_preview=has_preview,
+        republish=bool(draft.get("published")),
+        publish_pr_open=publish_pr_open,
+        publish_run_active=publish_run_active,
+    )
+    frontmatter = draft["frontmatter"]
+    title_value = frontmatter.get("title", "")
+    title_value = title_value if isinstance(title_value, str) else ""
     body = f"""
-{claim_html}
-{preview_link}
-{_run_status(last_run)}
+<div id="editor-app" data-draft-id="{draft_id}" data-version="{draft["version_no"]}" data-updated-at="{escape(draft["updated_at"])}">
+<div id="backup-banner" class="backup-banner" role="alert" hidden>
+<span id="backup-banner-text"></span>
+<button type="button" id="backup-restore">Restore</button>
+<button type="button" id="backup-discard">Discard</button>
+</div>
 {pr_open_notice}
-<h2>Edit</h2>
-<form method="post" action="/content/drafts/{escape(draft["id"])}/save">
-<input type="hidden" name="base_version" value="{draft["version_no"]}">
-{_frontmatter_fields(draft["frontmatter"], draft["images"], draft["slug"])}
-<div class="columns">
-<div>
+<div class="editor-bar" id="editor-bar">
+{_status_pill(draft["status"])}
+<button type="submit" id="save-btn" class="primary" form="{EDIT_FORM_ID}">Save</button>
+<span id="save-state" class="save-state" data-state="idle" role="status" aria-live="polite">No unsaved changes</span>
+<span id="upload-state" class="upload-state" role="status" aria-live="polite"></span>
+</div>
+<div class="editor-layout">
+<div class="editor-main">
+<div id="action-panel" data-refresh class="actions">{_action_buttons(draft["id"], offers)}</div>
+<form id="{EDIT_FORM_ID}" method="post" action="/content/drafts/{draft_id}/save">
+<input type="hidden" id="base_version" name="base_version" value="{draft["version_no"]}">
+<label for="title">Title</label>
+<input type="text" id="title" name="title" value="{escape(title_value)}" required>
 <label for="body">Body (markdown)</label>
-<textarea id="body" name="body">{body_text}</textarea>
-</div>
-<div>
-<label>Live preview</label>
-<div id="preview-pane" class="card"></div>
-</div>
-</div>
-<button type="submit">Save</button>
+<textarea id="body" name="body" data-editor="markdown">{escape(draft["body"])}</textarea>
+<div id="preview-pane" class="card fallback-preview"></div>
 </form>
-<h2>Images</h2>
-{_image_list(draft["id"], draft["images"])}
-<form method="post" action="/content/drafts/{escape(draft["id"])}/images" enctype="multipart/form-data">
-<label for="file">Upload image</label>
-<input type="file" id="file" name="file" required>
-<label for="role">Role</label>
-<select id="role" name="role"><option value="inline">inline</option><option value="feature">feature</option></select>
-<button type="submit">Upload and attach</button>
-</form>
-<h2>Actions</h2>
-<div class="actions">{_action_buttons(draft["id"], draft["status"], draft.get("published"), publish_pr_open, publish_run_active)}</div>
-<h2>Version history</h2>
-{_version_history(draft["id"], versions)}
-<h2>Feedback</h2>
-{_feedback_log(feedback)}
+</div>
+<aside class="editor-side">
+{_post_info(draft, last_run, preview_url)}
+{_panel("frontmatter-panel", "Frontmatter", _frontmatter_fields(frontmatter, draft["images"], draft["slug"], include_title=False, form_id=EDIT_FORM_ID), open_=False, refresh=False)}
+{_panel("feedback-panel", "Feedback", _feedback_log(feedback), open_=True, count=len(feedback))}
+{_panel("images-panel", "Images", _image_upload_form(draft["id"], draft["images"]), open_=True, count=len(draft["images"]))}
+{_panel("versions-panel", "Version history", _version_history(draft["id"], versions), open_=False, count=len(versions))}
+</aside>
+</div>
+</div>
 """
     return page(
         f"Post: {draft['title'] or '(untitled)'}",
@@ -656,6 +765,7 @@ def editor_page(
         banner=banner,
         notice=notice,
         notice_kind=notice_kind,
+        editor=True,
     )
 
 
@@ -668,12 +778,18 @@ def conflict_page(
 ) -> str:
     """A stale save: never overwrites. Shows the current server version in a
     form ready to reapply on top of, and the visitor's own attempted text in
-    a second, read-only pane so nothing they wrote is silently lost."""
+    a second, read-only pane so nothing they wrote is silently lost.
+
+    The attempted text is also the one copy of it that survives a reload:
+    `editor.js` reads `#attempted-body` on this page and writes it to the
+    browser's local backup, so the editor's restore banner offers it back the
+    next time the post is opened."""
     body = f"""
 <p class="notice conflict">Someone else saved post {escape(draft["id"])} to version
 {draft["version_no"]} while you were editing version {attempted["base_version"]}. Nothing was
 overwritten. Review the diff below, then use the reloaded form (now at the current version) to
-reapply anything from your attempted text on the right.</p>
+reapply anything from your attempted text on the right. Your text is also kept in this browser:
+open the post again and choose Restore.</p>
 <h2>What changed underneath you</h2>
 <pre>{escape(diff_summary) or "(no diff available)"}</pre>
 <div class="columns">
@@ -690,11 +806,11 @@ reapply anything from your attempted text on the right.</p>
 <div>
 <h2>Your attempted text (not saved, for manual merging)</h2>
 {_attempted_frontmatter_summary(attempted.get("frontmatter", {}))}
-<pre>{escape(attempted.get("body", ""))}</pre>
+<pre id="attempted-body" data-draft-id="{escape(draft["id"])}" data-base-version="{attempted["base_version"]}">{escape(attempted.get("body", ""))}</pre>
 </div>
 </div>
 """
-    return page("Save conflict", body, banner=banner, notice_kind="conflict")
+    return page("Save conflict", body, banner=banner, notice_kind="conflict", editor_backup=True)
 
 
 def _attempted_frontmatter_summary(frontmatter: dict[str, Any]) -> str:

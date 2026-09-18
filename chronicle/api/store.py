@@ -60,6 +60,7 @@ from .transitions import (
     PREVIEW_SUCCEEDED,
     PUBLISH_RUN_FAILED,
     RECONCILE_STATUS,
+    plan_action,
     resolve_draft,
     resolve_run_outcome,
     resolve_save,
@@ -1089,6 +1090,44 @@ class Store:
 
     @locked
     def act_on_draft(
+        self,
+        draft_id: str,
+        action: str,
+        actor: str,
+        actor_is_ui: bool,
+        feedback: str | None = None,
+    ) -> tuple[Draft, Run | None]:
+        return self._act_on_draft_unlocked(draft_id, action, actor, actor_is_ui, feedback)
+
+    @locked
+    def act_on_draft_staged(
+        self,
+        draft_id: str,
+        action: str,
+        actor: str,
+        actor_is_ui: bool,
+        feedback: str | None = None,
+    ) -> tuple[Draft, Run | None]:
+        """`act_on_draft`, first running whatever staging steps
+        `transitions.plan_action` says stand between the draft's status and
+        `action` (a `revise` before a preview of a published post, a `submit`
+        before approving a previewed one). Each step is an ordinary
+        transition with its own event and commit, and all of them run under
+        one lock so no other writer lands between them. With no plan it is
+        exactly `act_on_draft`, refusal included; the `/v1` routes never call
+        this, only the editor's own buttons do."""
+        draft = self.get_draft(draft_id)
+        steps = plan_action(draft.status, action, actor_is_ui) or (action,)
+        if len(steps) > 1 and action in ("preview", "approve") and draft.slug is None:
+            # The one refusal the final step can raise that a staging step
+            # cannot: find it out before anything is written, on a copy that
+            # is never saved, so a refused click leaves the status alone.
+            self._pin_slug(draft)
+        for step in steps[:-1]:
+            self._act_on_draft_unlocked(draft_id, step, actor, actor_is_ui)
+        return self._act_on_draft_unlocked(draft_id, action, actor, actor_is_ui, feedback)
+
+    def _act_on_draft_unlocked(
         self,
         draft_id: str,
         action: str,

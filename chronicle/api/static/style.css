@@ -43,3 +43,87 @@ nav a { margin-right: 1rem; text-decoration: none; font-weight: 600; }
 .diff-hunk { background: #f1f8ff; display: block; color: #555; }
 .actions form { display: inline-block; margin-right: 0.4rem; }
 .muted { color: #666; font-size: 0.85rem; }
+
+/* --- Editor page (plain and structural; no design system) ------------------ */
+
+body.wide { max-width: 96rem; }
+.inline { display: inline; margin: 0; }
+.status-pill {
+  display: inline-block; padding: 0.15rem 0.6rem; border-radius: 999px;
+  background: #e8e8e8; font-size: 0.85rem; font-weight: 600;
+}
+.status-pill.status-published { background: #dcefdc; }
+.status-pill.status-approved,
+.status-pill.status-previewed { background: #dde9f7; }
+.status-pill.status-revision_requested,
+.status-pill.status-rejected { background: #f6e0d6; }
+
+/* The bar stays reachable while the editor scrolls. */
+.editor-bar {
+  position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 0.8rem;
+  background: #fff; border-bottom: 1px solid #ccc; padding: 0.4rem 0; margin-bottom: 0.6rem;
+}
+.editor-bar button { margin-top: 0; }
+.save-state { font-size: 0.9rem; color: #555; }
+.save-state[data-state="dirty"] { color: #8a5a00; font-weight: 600; }
+.save-state[data-state="saving"] { color: #1a4f8a; font-weight: 600; }
+.save-state[data-state="saved"] { color: #1d6b2a; font-weight: 600; }
+.save-state[data-state="error"],
+.save-state[data-state="conflict"] { color: #9b1c1c; font-weight: 600; }
+.upload-state { font-size: 0.85rem; color: #555; }
+.upload-state[data-error="1"] { color: #9b1c1c; font-weight: 600; }
+
+.backup-banner {
+  background: #fff3cd; border: 1px solid #e0c46c; border-radius: 4px;
+  padding: 0.6rem 0.8rem; margin-bottom: 0.8rem;
+}
+.backup-banner[hidden] { display: none; }
+
+.editor-layout { display: grid; grid-template-columns: minmax(0, 1fr) 22rem; gap: 1.2rem; align-items: start; }
+.editor-side .panel { border: 1px solid #ccc; border-radius: 6px; padding: 0.5rem 0.75rem; margin-bottom: 0.8rem; }
+.editor-side summary { cursor: pointer; font-weight: 600; }
+.editor-side .count {
+  display: inline-block; background: #eee; border-radius: 999px; padding: 0 0.5rem;
+  font-size: 0.8rem; font-weight: 400;
+}
+.editor-side ul { padding-left: 1.1rem; }
+.editor-side table { font-size: 0.8rem; }
+.dropzone {
+  border: 2px dashed #aaa; border-radius: 6px; padding: 0.8rem; text-align: center;
+  color: #555; font-size: 0.9rem;
+}
+.dropzone.drop-active,
+.EasyMDEContainer.drop-active { outline: 3px dashed #1a4f8a; outline-offset: 2px; }
+.js #upload-btn { display: none; }
+
+.offer { display: inline-block; margin-right: 0.6rem; }
+.offer-reason { color: #666; margin-left: 0.3rem; }
+button.primary { background: #1a4f8a; color: #fff; border: 1px solid #123a68; border-radius: 4px; }
+button.primary:disabled, .offer button:disabled { opacity: 0.55; cursor: not-allowed; }
+.actions { margin-bottom: 0.8rem; }
+
+/* EasyMDE draws its toolbar glyphs with FontAwesome, which Chronicle does not
+   load (nothing comes from a CDN). Each icon element is given a plain-text
+   glyph here instead, so the toolbar reads with no network at all. */
+.editor-toolbar button { min-width: 2rem; font-family: system-ui, sans-serif; }
+.editor-toolbar button i.fa { font-style: normal; font-weight: 700; }
+.editor-toolbar i.fa-bold::before { content: "B"; }
+.editor-toolbar i.fa-italic::before { content: "I"; font-style: italic; }
+.editor-toolbar i.fa-heading::before { content: "H"; }
+.editor-toolbar i.fa-quote-left::before { content: "\201C"; }
+.editor-toolbar i.fa-list-ul::before { content: "\2022\2261"; }
+.editor-toolbar i.fa-list-ol::before { content: "1."; }
+.editor-toolbar i.fa-link::before { content: "Link"; font-weight: 400; font-size: 0.8rem; }
+.editor-toolbar i.fa-image::before { content: "Img"; font-weight: 400; font-size: 0.8rem; }
+.editor-toolbar i.fa-code::before { content: "</>"; font-family: ui-monospace, monospace; font-size: 0.8rem; }
+.editor-toolbar i.fa-minus::before { content: "HR"; font-weight: 400; font-size: 0.8rem; }
+.editor-toolbar i.fa-table::before { content: "Tbl"; font-weight: 400; font-size: 0.8rem; }
+.editor-toolbar i.fa-eye::before { content: "Preview"; font-weight: 400; font-size: 0.8rem; }
+.editor-toolbar i.fa-columns::before { content: "Side by side"; font-weight: 400; font-size: 0.8rem; }
+.editor-toolbar i.fa-arrows-alt::before { content: "Full"; font-weight: 400; font-size: 0.8rem; }
+.editor-toolbar i.fa-undo::before { content: "Undo"; font-weight: 400; font-size: 0.8rem; }
+.editor-toolbar i.fa-redo::before { content: "Redo"; font-weight: 400; font-size: 0.8rem; }
+.editor-toolbar i.fa-question-circle::before { content: "?"; }
+.EasyMDEContainer .CodeMirror { font-family: ui-monospace, monospace; }
+.editor-preview-side, .editor-preview { font-family: system-ui, sans-serif; }
+.editor-preview-side img, .editor-preview img { max-width: 100%; }
