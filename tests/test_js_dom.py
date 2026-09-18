@@ -81,7 +81,7 @@ def sanitize_all(tmp_path: Path, cases: list[str]) -> list[str]:
     text = result.stdout[start : result.stdout.index("</pre>", start)]
     import html
 
-    return json.loads(html.unescape(text))  # type: ignore[no-any-return]
+    return json.loads(html.unescape(text))
 
 
 # A payload, and what must not survive it.

@@ -15,9 +15,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from chronicle.api.deps import Services
-from chronicle.api.models import DRAFT_STATUSES
+from chronicle.api.models import DRAFT_STATUSES, WatchEntry
 from chronicle.api.transitions import DRAFT_TRANSITIONS, plan_action, resolve_draft
-from chronicle.api.models import WatchEntry
 from chronicle.api.ui_actions import AVAILABLE, DISABLED, Offer, offers_for, staged_refusal
 
 from .test_ui import make_draft
