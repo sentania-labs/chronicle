@@ -11,6 +11,7 @@ from here either.
 from __future__ import annotations
 
 from datetime import datetime
+from itertools import zip_longest
 from typing import Any
 from urllib.parse import urlencode
 
@@ -21,7 +22,7 @@ from .. import ui_templates as tpl
 from ..deps import Consumer, Services
 from ..errors import ApiError
 from ..images import MAX_IMAGE_BYTES
-from ..models import Draft, Post
+from ..models import Draft, Material, Post
 from ..pagination import Page, paginate
 from ..store import Store
 from ..ui_deps import banner_enabled, check_same_origin, get_services, require_ui_consumer
@@ -95,15 +96,104 @@ def submissions_list(
     return HTMLResponse(tpl.submissions_list_page(pg, banner=banner_enabled(request)))
 
 
+def _submission_response(
+    services: Services,
+    submission_id: str,
+    request: Request,
+    *,
+    notice: str | None = None,
+    notice_kind: str | None = None,
+    status_code: int = 200,
+    conflict_diff: str | None = None,
+    attempted: dict[str, Any] | None = None,
+) -> HTMLResponse:
+    submission = services.store.get_submission(submission_id)
+    images = [_dump(services.store.get_image(image_id)) for image_id in submission.image_ids]
+    html = tpl.submission_detail_page(
+        _dump(submission),
+        images,
+        banner=banner_enabled(request),
+        notice=notice,
+        notice_kind=notice_kind,
+        conflict_diff=conflict_diff,
+        attempted=attempted,
+    )
+    return HTMLResponse(html, status_code=status_code)
+
+
 @router.get("/content/submissions/{submission_id}", response_class=HTMLResponse)
 def submission_detail(
     submission_id: str, request: Request, services: Services = Depends(get_services)
 ) -> HTMLResponse:
-    submission = services.store.get_submission(submission_id)
-    images = [_dump(services.store.get_image(image_id)) for image_id in submission.image_ids]
-    return HTMLResponse(
-        tpl.submission_detail_page(_dump(submission), images, banner=banner_enabled(request))
+    return _submission_response(services, submission_id, request)
+
+
+def _crlf_to_lf(value: str) -> str:
+    # A browser submits every textarea line break as CRLF. Left alone, that
+    # would rewrite every line of a pasted post in the submission's diff and
+    # stop a `---` frontmatter fence from matching when the draft is seeded.
+    return value.replace("\r\n", "\n")
+
+
+@router.post("/content/submissions/{submission_id}/edit", response_class=HTMLResponse)
+async def submission_edit(
+    submission_id: str,
+    request: Request,
+    _origin: None = Depends(check_same_origin),
+    consumer: Consumer = Depends(require_ui_consumer),
+    services: Services = Depends(get_services),
+) -> HTMLResponse:
+    form = await request.form()
+    base_version = int(str(form.get("base_version", "0")) or "0")
+    brief = _crlf_to_lf(str(form.get("brief", "")))
+    materials: list[Material] = []
+    rows = zip_longest(
+        form.getlist("material_name"),
+        form.getlist("material_url"),
+        form.getlist("material_text"),
+        fillvalue="",
     )
+    for number, (raw_name, raw_url, raw_text) in enumerate(rows, start=1):
+        name, url, text = (
+            str(raw_name).strip(),
+            str(raw_url).strip(),
+            _crlf_to_lf(str(raw_text)),
+        )
+        if not (name or url or text.strip()):
+            continue
+        materials.append(
+            Material(name=name or f"material {number}", url=url or None, text=text or None)
+        )
+    image_ids = [str(value) for value in form.getlist("image_id")]
+    try:
+        services.store.revise_submission(
+            submission_id, consumer.name, base_version, brief, materials, image_ids
+        )
+    except ApiError as exc:
+        if exc.code != "stale_base_version":
+            return _submission_response(
+                services,
+                submission_id,
+                request,
+                notice=exc.message,
+                notice_kind="error",
+                status_code=exc.status_code,
+            )
+        # Recomputed against the record's actual current version, not
+        # `exc.extra`: a save landing between the conflict and this handler
+        # would leave that summary describing an older version (the same
+        # reasoning as `draft_save`).
+        return _submission_response(
+            services,
+            submission_id,
+            request,
+            notice=exc.message,
+            notice_kind="conflict",
+            status_code=409,
+            conflict_diff=services.store.submission_diff_between(submission_id, base_version),
+            attempted={"brief": brief, "materials": [m.model_dump() for m in materials]},
+        )
+    return _submission_response(services, submission_id, request, notice="saved", notice_kind="ok")
 
 
 @router.post("/content/submissions/{submission_id}/draft")

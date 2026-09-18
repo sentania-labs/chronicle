@@ -15,6 +15,7 @@ history, and the index is a cache (ADRs 001 and 006).
 data/
   repo/                          internal git repository, no remote, never pushed
     submissions/<id>.json
+    submissions/<id>/versions/<n>.json   one per revision of a submission (ADR 018)
     drafts/<id>/draft.json       current draft
     drafts/<id>/versions/<n>.json
     feedback/<draft_id>.jsonl    the feedback record the API reads, one entry per line

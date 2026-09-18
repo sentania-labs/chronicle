@@ -15,6 +15,7 @@ these top-level entries:
 manifest.json
 repo/
   submissions/<id>.json
+  submissions/<id>/versions/<n>.json
   drafts/<id>/draft.json
   drafts/<id>/versions/<n>.json
   feedback/<draft_id>.jsonl
@@ -91,12 +92,15 @@ optional and may be omitted (the model's default applies).
   "image_ids": [],
   "status": "new",
   "claimed_by": null,
-  "draft_id": null
+  "draft_id": null,
+  "version_no": 1
 }
 ```
 
 Required: `id`, `created_at`, `from`, `brief`, `status` (one of `new`,
-`claimed`, `drafted`, `discarded`).
+`claimed`, `drafted`, `discarded`). `version_no` is optional and defaults to
+1, so a submission written before submissions could be revised (ADR 018)
+restores unchanged.
 
 ### Draft: `repo/drafts/<id>/draft.json`
 

@@ -91,6 +91,27 @@ class Submission(BaseModel):
     status: str = "new"
     claimed_by: str | None = None
     draft_id: str | None = None
+    # The submission as first posted is version 1, so a record written before
+    # submissions were mutable (no field on disk) reads back as version 1 and
+    # the first revision is version 2. Deliberately not 0: unlike a draft, a
+    # submission never exists without content.
+    version_no: int = 1
+
+
+class SubmissionVersion(BaseModel):
+    """One revision of a submission's editable content (brief, materials,
+    image ids), stored beside the record so a stale write can be shown what
+    moved underneath it. The internal git history carries the same diffs."""
+
+    submission_id: str
+    version_no: int
+    author: str
+    created_at: str
+    base_version: int
+    message: str = ""
+    brief: str = ""
+    materials: list[Material] = []
+    image_ids: list[str] = []
 
 
 class DraftImage(BaseModel):
@@ -268,6 +289,20 @@ class Event(BaseModel):
     submission_id: str | None = None
     from_status: str | None = None
     to_status: str | None = None
+
+
+def render_submission_content(brief: str, materials: list[Material], image_ids: list[str]) -> str:
+    """Render a submission version as text for diffing."""
+    lines = ["brief:", brief, ""]
+    for number, material in enumerate(materials, start=1):
+        lines.append(f"material {number}: {material.name}")
+        if material.url:
+            lines.append(f"url: {material.url}")
+        if material.text:
+            lines.extend(["text:", material.text])
+        lines.append("")
+    lines.extend(f"image: {image_id}" for image_id in image_ids)
+    return "\n".join(lines) + "\n"
 
 
 def render_content(frontmatter: dict[str, Any], body: str) -> str:

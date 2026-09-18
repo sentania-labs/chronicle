@@ -116,6 +116,7 @@ the image store. An index is derived from the files and rebuildable.
 ```
 submission: new -> claimed -> drafted
                           -> discarded
+            (new and claimed can also be revised in place, no status change)
 
 draft:      drafting -> in_review -> revision_requested -> drafting
                                   -> rejected -> (restore) -> drafting
@@ -150,6 +151,10 @@ The UI uses the same API through a session (see section 11).
 - `GET /v1/submissions?status=new`
 - `POST /v1/submissions/{id}/claim` sets `claimed` and `claimed_by`.
 - `POST /v1/submissions/{id}/discard`
+- `PUT /v1/submissions/{id}` revise brief, materials and image ids while the
+  submission is `new` or `claimed`; requires `base_version`, 409 with a diff
+  if stale, and a `submission_frozen` 409 once it is `drafted` or
+  `discarded` (ADR 018).
 
 **Drafts**
 

@@ -85,8 +85,24 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   A `from_post` import can drop frontmatter keys the allowlist does not have
   (an existing post on main may predate Chronicle) and can fail to import an
   individual image; both are reported as warnings in the response, never a
-  422, because the import itself still succeeded. Every other caller
-  (`from_submission`, blank) gets an empty warnings list.
+  422, because the import itself still succeeded. `from_submission` reports
+  the same way (a dropped frontmatter key, unparseable frontmatter, an image
+  id not in the store, a filename collision); a blank draft, or a submission
+  with no materials, gets an empty list.
+- **`from_submission` seeds the draft; the other materials never touch the
+  body.** `_seed_draft_from_submission` takes the first material that looks
+  like a post (frontmatter block or leading heading) as the body, else the
+  first with any text; every other material becomes a `material` feedback
+  entry authored by the creating consumer. It runs inside the create lock,
+  so it uses `_append_feedback` and `get_image`, never a `@locked` method.
+  See [docs/decisions/018-mutable-submissions-and-seeded-drafts.md](docs/decisions/018-mutable-submissions-and-seeded-drafts.md).
+- **A submission is version 1 until revised, and only `new` or `claimed`
+  ones can be.** `Submission.version_no` defaults to 1 so records written
+  before versioning load unchanged; `Store.revise_submission` writes
+  `submissions/<id>/versions/<n>.json` (backfilling version 1 for a legacy
+  record in the same commit) and a `submission.revise` event. The frozen
+  states are decided in `transitions.resolve_submission_revise`, not in the
+  route. The index has no version column on purpose (ADR 006).
 - **`_put_image_unlocked` exists so `from_post` import can reuse image
   ingestion from inside an already-`@locked` method.** `Store`'s lock
   (`threading.Lock`) is not reentrant; calling the public, `@locked`

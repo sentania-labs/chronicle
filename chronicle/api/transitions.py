@@ -118,6 +118,12 @@ SUBMISSION_TRANSITIONS: dict[tuple[str, str], Transition] = {
     ("new", "discard"): Transition("discarded"),
     ("claimed", "discard"): Transition("discarded"),
     ("claimed", "draft"): Transition("drafted"),
+    # A revision of the submission's own content (brief, materials, images).
+    # It changes no status: like a draft save it is an action so that the
+    # frozen states (`drafted`, `discarded`) are decided here, in the table,
+    # and not in a route handler.
+    ("new", "revise"): Transition("new"),
+    ("claimed", "revise"): Transition("claimed"),
 }
 
 
@@ -150,6 +156,21 @@ def resolve_submission(status: str, action: str) -> Transition:
             f"a submission in status {status!r} cannot {action}",
             status=status,
             action=action,
+        )
+    return transition
+
+
+def resolve_submission_revise(status: str, submission_id: str) -> Transition:
+    """A submission is editable while `new` or `claimed`; after that its
+    content belongs to the draft made from it (or is gone with the discard)."""
+    transition = SUBMISSION_TRANSITIONS.get((status, "revise"))
+    if transition is None:
+        raise ApiError(
+            409,
+            "submission_frozen",
+            f"submission {submission_id} is {status} and can no longer be edited:"
+            " once a draft exists from a submission, edit the draft instead",
+            status=status,
         )
     return transition
 
