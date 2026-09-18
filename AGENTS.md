@@ -227,9 +227,14 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
 - **The image upload route answers JSON to `Accept: application/json`.**
   `editor.js` gets the stored filename (a dedup can keep an earlier upload's
   name), the markdown to insert, and a per-draft image URL for the live render.
-  The UI names uploads with `images.safe_upload_filename`, so the reference the
-  editor inserts is one `convert.py` resolves; the `/v1` route still stores the
-  name it is given.
+  The UI names uploads with `images.safe_upload_filename` (a stem with nothing
+  ASCII left keeps its extension and takes a short content hash), so the
+  reference the editor inserts is one `convert.py` resolves; the `/v1` route
+  still stores the name it is given. `Store.put_and_attach_image` does the
+  upload and the attach as one step, removes what it created if the attach is
+  refused, and refuses an inline reference to an already-stored image whose name
+  is not `images.is_plain_filename` (a dedup can land on a `/v1` or imported
+  name with spaces, which `convert.py`'s reference match cannot carry).
 - **`ui_deps.check_same_origin` treats an `Origin` header that does not
   resolve to this host as cross-origin, including the literal string
   `"null"` a sandboxed iframe sends.** A round C5 review found that
