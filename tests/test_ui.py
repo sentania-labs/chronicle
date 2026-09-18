@@ -10,6 +10,7 @@ internal network would use it.
 from __future__ import annotations
 
 import io
+import re
 from pathlib import Path
 from typing import Any
 
@@ -173,28 +174,182 @@ def test_reserved_actions_are_labelled_scott_only(client: TestClient, services: 
     assert "reject" in response.text.lower()
 
 
-def test_drafts_board_paginates_at_fifty_with_next_and_previous(
+def _retag(
+    services: Services, draft_id: str, *, updated_at: str | None = None, slug: str | None = None
+) -> None:
+    store = services.store
+    draft = store.get_draft(draft_id)
+    if updated_at is not None:
+        draft.updated_at = updated_at
+    if slug is not None:
+        draft.slug = slug
+    store._write_json(store._draft_path(draft.id), draft.model_dump(mode="json"))
+    store.index.upsert_draft(draft)
+
+
+def _card_titles(html: str) -> list[str]:
+    return re.findall(r'<h3><a href="/content/drafts/[^"]+">([^<]*)</a></h3>', html)
+
+
+def test_drafts_board_paginates_the_published_archive_at_fifty(
     client: TestClient, services: Services
 ) -> None:
     for i in range(55):
-        make_draft(services, "drafting", title=f"Draft {i}")
+        make_draft(services, "published", title=f"Post {i}")
 
     first = client.get("/content/drafts")
     assert first.status_code == 200
+    assert "Published archive (55)" in first.text
     assert "page 1 of 2" in first.text
     assert "(55 total)" in first.text
     assert "&laquo; previous</span>" in first.text  # no link: already first page
-    assert 'href="/content/drafts?page=2"' in first.text
+    assert 'href="/content/drafts?page=2#published"' in first.text
+    assert len(_card_titles(first.text)) == 50
 
     second = client.get("/content/drafts?page=2")
     assert second.status_code == 200
     assert "page 2 of 2" in second.text
     assert "next &raquo;</span>" in second.text  # no link: already last page
-    assert 'href="/content/drafts?page=1"' in second.text
+    assert 'href="/content/drafts?page=1#published"' in second.text
+    assert len(_card_titles(second.text)) == 5
+    assert '<details id="published" open>' in second.text  # paging means looking at it
 
     beyond = client.get("/content/drafts?page=99")
     assert beyond.status_code == 200
     assert "page 2 of 2" in beyond.text  # clamped to the last real page
+
+
+def test_board_splits_work_in_flight_from_the_published_archive(
+    client: TestClient, services: Services
+) -> None:
+    make_draft(services, "drafting", title="Mid edit")
+    make_draft(services, "in_review", title="Awaiting Scott")
+    make_draft(services, "revision_requested", title="Sent back")
+    make_draft(services, "published", title="Old race report")
+    make_draft(services, "published", title="Another old one")
+
+    html = client.get("/content/drafts").text
+    in_flight, _, archive = html.partition('<details id="published"')
+    assert "In flight (3)" in in_flight
+    assert "Published archive (2)" in archive
+    assert set(_card_titles(in_flight)) == {"Mid edit", "Awaiting Scott", "Sent back"}
+    assert set(_card_titles(archive)) == {"Old race report", "Another old one"}
+    # Collapsed by default: nothing asked for the archive.
+    assert '<details id="published">' in html
+
+
+def test_board_lists_newest_first_within_each_section(
+    client: TestClient, services: Services
+) -> None:
+    old_live = make_draft(services, "drafting", title="Live old")
+    new_live = make_draft(services, "drafting", title="Live new")
+    old_pub = make_draft(services, "published", title="Pub 2005")
+    new_pub = make_draft(services, "published", title="Pub 2026")
+    _retag(services, old_live, updated_at="2026-09-10T08:00:00-05:00")
+    _retag(services, new_live, updated_at="2026-09-18T08:00:00-05:00")
+    _retag(services, old_pub, updated_at="2005-06-01T08:00:00-05:00")
+    _retag(services, new_pub, updated_at="2026-09-01T08:00:00-05:00")
+
+    html = client.get("/content/drafts").text
+    in_flight, _, archive = html.partition('<details id="published"')
+    assert _card_titles(in_flight) == ["Live new", "Live old"]
+    assert _card_titles(archive) == ["Pub 2026", "Pub 2005"]
+
+
+def test_archive_orders_by_post_date_not_by_when_the_record_was_touched(
+    client: TestClient, services: Services
+) -> None:
+    """A digest stamps hundreds of records within seconds, so `updated_at`
+    says nothing about which post is newest. The archive follows the date the
+    post carries; a record with no post date falls back to `updated_at`."""
+    store = services.store
+    ids = {}
+    for title, post_date in (
+        ("Post 2011", "2011-10-12"),
+        ("Post 2019", "2019-04-14 01:57:37+00:00"),
+        ("Post 2026", "2026-07-24T12:00:37-05:00"),
+    ):
+        ids[title] = make_draft(services, "published", title=title, with_publish=True)
+        draft = store.get_draft(ids[title])
+        assert draft.published is not None
+        draft.published["date"] = post_date
+        store._write_json(store._draft_path(draft.id), draft.model_dump(mode="json"))
+        store.index.upsert_draft(draft)
+    # Touched in the opposite order to the post dates, one second apart.
+    _retag(services, ids["Post 2026"], updated_at="2026-09-18T16:01:43+00:00")
+    _retag(services, ids["Post 2019"], updated_at="2026-09-18T16:01:44+00:00")
+    _retag(services, ids["Post 2011"], updated_at="2026-09-18T16:01:45+00:00")
+
+    html = client.get("/content/drafts").text
+    _, _, archive = html.partition('<details id="published"')
+    assert _card_titles(archive) == ["Post 2026", "Post 2019", "Post 2011"]
+
+
+def test_board_orders_by_instant_not_by_offset_text(client: TestClient, services: Services) -> None:
+    """`2026-09-18T01:00:00-05:00` is 06:00 UTC, later than
+    `2026-09-18T03:00:00+00:00`, though it sorts earlier as a string."""
+    earlier = make_draft(services, "drafting", title="Earlier")
+    later = make_draft(services, "drafting", title="Later")
+    _retag(services, earlier, updated_at="2026-09-18T03:00:00+00:00")
+    _retag(services, later, updated_at="2026-09-18T01:00:00-05:00")
+    assert _card_titles(client.get("/content/drafts").text) == ["Later", "Earlier"]
+
+
+def test_live_work_stays_on_screen_when_the_archive_is_on_a_later_page(
+    client: TestClient, services: Services
+) -> None:
+    make_draft(services, "drafting", title="Live one")
+    for i in range(60):
+        make_draft(services, "published", title=f"Archived {i}")
+    second = client.get("/content/drafts?page=2").text
+    assert "In flight (1)" in second
+    assert "Live one" in second
+
+
+def test_board_search_matches_title_and_slug_case_insensitively(
+    client: TestClient, services: Services
+) -> None:
+    by_title = make_draft(services, "drafting", title="Bonneville Salt Flats")
+    by_slug = make_draft(services, "published", title="Unrelated title")
+    make_draft(services, "published", title="Nothing to see")
+    _retag(services, by_slug, slug="bonneville-2011-recap")
+    _retag(services, by_title, slug="salt-flats")
+
+    html = client.get("/content/drafts?q=BONNEVILLE").text
+    in_flight, _, archive = html.partition('<details id="published"')
+    assert _card_titles(in_flight) == ["Bonneville Salt Flats"]
+    assert _card_titles(archive) == ["Unrelated title"]
+    assert "In flight (1)" in html
+    assert "Published archive (1)" in html
+    assert '<details id="published" open>' in html  # searching opens the archive
+    assert 'value="BONNEVILLE"' in html
+
+    assert "nothing in flight." in client.get("/content/drafts?q=zzz-no-such").text
+
+
+def test_board_search_and_status_filter_and_paging_combine(
+    client: TestClient, services: Services
+) -> None:
+    for i in range(55):
+        make_draft(services, "published", title=f"Race report {i}")
+    make_draft(services, "published", title="Something else")
+    make_draft(services, "drafting", title="Race prep")
+
+    both = client.get("/content/drafts?status=published&q=race").text
+    assert "In flight (0)" in both
+    assert "Published archive (55)" in both
+    assert "Race prep" not in both
+    assert "Something else" not in both
+    assert 'href="/content/drafts?page=2&status=published&q=race#published"' in both
+
+    drafting_only = client.get("/content/drafts?status=drafting&q=race").text
+    assert _card_titles(drafting_only) == ["Race prep"]
+    assert "Published archive (0)" in drafting_only
+
+
+def test_board_search_term_is_escaped(client: TestClient) -> None:
+    html = client.get('/content/drafts?q="><script>alert(1)</script>').text
+    assert "<script>alert(1)</script>" not in html
 
 
 def test_drafts_board_status_filter_has_no_inline_handler(client: TestClient) -> None:
@@ -989,3 +1144,226 @@ def test_feature_image_select_prefers_exact_match_over_basename_collision(
     assert '<option value="featured.png" selected>featured.png</option>' in editor.text
     assert '<option value="hero.png">hero.png</option>' in editor.text
     assert editor.text.count(" selected") == 1
+
+
+# --- New post ---------------------------------------------------------------
+
+
+def test_board_offers_a_new_post_button_that_posts(client: TestClient) -> None:
+    response = client.get("/content/drafts")
+    assert '<form method="post" action="/content/drafts/new">' in response.text
+    assert "New post" in response.text
+
+
+def test_new_post_creates_a_blank_draft_and_redirects_into_the_editor(
+    client: TestClient, services: Services
+) -> None:
+    assert services.store.list_drafts() == []
+    response = client.post("/content/drafts/new", follow_redirects=False)
+    assert response.status_code == 303
+    drafts = services.store.list_drafts()
+    assert len(drafts) == 1
+    assert response.headers["location"] == f"/content/drafts/{drafts[0].id}"
+    assert drafts[0].status == "drafting"
+    assert drafts[0].title == ""
+    # Acts as the ui consumer's mapped identity, like every other UI write.
+    events, _cursor = services.store.events_since(0)
+    assert [(e.type, e.actor, e.draft_id) for e in events if e.draft_id == drafts[0].id] == [
+        ("draft.created", "scott", drafts[0].id)
+    ]
+
+    editor = client.get(response.headers["location"])
+    assert editor.status_code == 200
+    assert 'name="title"' in editor.text
+
+
+def test_new_post_get_creates_nothing(client: TestClient, services: Services) -> None:
+    response = client.get("/content/drafts/new")
+    assert response.status_code == 404
+    assert services.store.list_drafts() == []
+
+
+@pytest.mark.parametrize("origin", ["https://evil.example", "null", ""])
+def test_new_post_is_origin_guarded(client: TestClient, services: Services, origin: str) -> None:
+    response = client.post("/content/drafts/new", headers={"Origin": origin})
+    assert response.status_code == 403
+    assert services.store.list_drafts() == []
+
+
+def test_new_post_needs_a_live_ui_token(client: TestClient, services: Services) -> None:
+    services.tokens.ui_token_path.unlink()
+    response = client.post("/content/drafts/new")
+    assert response.status_code == 503
+    assert services.store.list_drafts() == []
+
+
+# --- Import filter ----------------------------------------------------------
+
+
+def _set_fields(services: Services, draft_id: str, **fields: Any) -> None:
+    store = services.store
+    draft = store.get_draft(draft_id)
+    for key, value in fields.items():
+        setattr(draft, key, value)
+    store._write_json(store._draft_path(draft.id), draft.model_dump(mode="json"))
+    store.index.upsert_draft(draft)
+
+
+def _digest_posts(services: Services, *slugs: str) -> None:
+    services.store.apply_digest(
+        "scott",
+        [
+            Post(
+                slug=slug,
+                path=f"content/posts/{slug}.md",
+                title=f"Title of {slug}",
+                date="2026-01-01",
+                sha=f"sha-{slug}",
+            )
+            for slug in slugs
+        ],
+    )
+
+
+def test_import_lists_only_posts_no_draft_tracks(client: TestClient, services: Services) -> None:
+    _digest_posts(services, "by-slug", "by-source-path", "by-published-path", "loose")
+    slug_draft = make_draft(services, "published", title="t1")
+    _set_fields(services, slug_draft, slug="by-slug")
+    source_draft = make_draft(services, "published", title="t2")
+    _set_fields(
+        services,
+        source_draft,
+        slug="renamed-since",
+        source_post={"slug": "by-source-path", "path": "content/posts/by-source-path.md"},
+    )
+    published_draft = make_draft(services, "published", title="t3")
+    _set_fields(
+        services,
+        published_draft,
+        slug="also-renamed",
+        published={"post_path": "content/posts/by-published-path.md"},
+    )
+
+    html = client.get("/content/import").text
+    assert 'value="loose"' in html
+    for tracked in ("by-slug", "by-source-path", "by-published-path"):
+        assert f'value="{tracked}"' not in html
+    assert "Import as post" in html
+    assert "Posts with no record here yet: 1." in html
+
+
+def test_import_search_only_searches_the_untracked_posts(
+    client: TestClient, services: Services
+) -> None:
+    _digest_posts(services, "tracked-race", "loose-race")
+    tracked = make_draft(services, "published")
+    _set_fields(services, tracked, slug="tracked-race")
+
+    html = client.get("/content/import?q=race").text
+    assert 'value="loose-race"' in html
+    assert 'value="tracked-race"' not in html
+
+
+def test_import_says_so_plainly_when_every_post_is_tracked(
+    client: TestClient, services: Services
+) -> None:
+    _digest_posts(services, "one", "two")
+    for slug in ("one", "two"):
+        _set_fields(services, make_draft(services, "published"), slug=slug)
+
+    response = client.get("/content/import")
+    assert response.status_code == 200
+    assert "All 2 posts from the blog are already on the" in response.text
+    assert 'href="/content/drafts"' in response.text
+    assert "nothing to import" in response.text
+    assert "<table>" not in response.text
+    assert "Import as post" not in response.text
+
+
+def test_import_says_so_when_nothing_has_been_digested(client: TestClient) -> None:
+    response = client.get("/content/import")
+    assert response.status_code == 200
+    assert "No posts have been digested" in response.text
+    assert "<table>" not in response.text
+
+
+def test_import_post_for_an_already_tracked_post_explains_itself(
+    client: TestClient, services: Services
+) -> None:
+    _digest_posts(services, "already-here")
+    tracked = make_draft(services, "published")
+    _set_fields(services, tracked, slug="already-here")
+    before = len(services.store.list_drafts())
+
+    response = client.post("/content/import", data={"slug": "already-here"})
+    assert response.status_code == 409
+    assert "already a post on the Posts tab" in response.text
+    assert "image_dir_collision" not in response.text
+    assert "already pinned by another draft" not in response.text
+    assert len(services.store.list_drafts()) == before
+
+
+def test_import_image_folder_collision_reads_as_an_explanation(
+    client: TestClient, services: Services
+) -> None:
+    """The recovery path still runs, and its one remaining 409 (another post
+    owns the image folder this import would claim) no longer surfaces the raw
+    collision text."""
+    _digest_posts(services, "clash")
+    site_posts = services.store.site_dir / "content" / "posts"
+    site_posts.mkdir(parents=True, exist_ok=True)
+    (site_posts / "clash.md").write_text("---\ntitle: Clash\n---\nbody\n", encoding="utf-8")
+    owner = make_draft(services, "published", title="Owner")
+    _set_fields(services, owner, slug="someone-else", image_dir="clash")
+
+    response = client.post("/content/import", data={"slug": "clash"})
+    assert response.status_code == 409
+    assert "Could not import clash" in response.text
+    assert "static/images/clash/" in response.text
+    assert "belongs to another post on this board" in response.text
+    assert "already pinned by another draft" not in response.text
+    assert 'class="notice error"' in response.text
+
+
+def test_import_still_creates_a_post_for_an_untracked_one(
+    client: TestClient, services: Services
+) -> None:
+    _digest_posts(services, "recover-me")
+    site_posts = services.store.site_dir / "content" / "posts"
+    site_posts.mkdir(parents=True, exist_ok=True)
+    (site_posts / "recover-me.md").write_text("---\ntitle: Recover\n---\nbody\n", encoding="utf-8")
+
+    response = client.post("/content/import", data={"slug": "recover-me"}, follow_redirects=False)
+    assert response.status_code == 303
+    assert [d.slug for d in services.store.list_drafts()] == ["recover-me"]
+
+
+def test_import_refusal_keeps_the_visitors_search_and_page(
+    client: TestClient, services: Services
+) -> None:
+    """A refused import re-renders the list the visitor was on, not page one
+    of an unfiltered list, and the listing's own forms carry both values."""
+    _digest_posts(services, "already-here", "other-race", "second-race")
+    _set_fields(services, make_draft(services, "published"), slug="already-here")
+
+    listed = client.get("/content/import?q=race").text
+    assert 'name="q" value="race"' in listed
+    assert 'name="page" value="1"' in listed
+
+    response = client.post(
+        "/content/import", data={"slug": "already-here", "q": "race", "page": "1"}
+    )
+    assert response.status_code == 409
+    assert 'value="race"' in response.text
+    assert 'value="other-race"' in response.text
+    assert "Title of already-here" not in response.text
+
+
+def test_import_refusal_tolerates_a_garbage_page(client: TestClient, services: Services) -> None:
+    _digest_posts(services, "already-here", "loose")
+    _set_fields(services, make_draft(services, "published"), slug="already-here")
+    response = client.post(
+        "/content/import", data={"slug": "already-here", "q": "", "page": "banana"}
+    )
+    assert response.status_code == 409
+    assert 'value="loose"' in response.text

@@ -21,8 +21,11 @@ from .. import ui_templates as tpl
 from ..deps import Consumer, Services
 from ..errors import ApiError
 from ..images import MAX_IMAGE_BYTES
-from ..pagination import paginate
+from ..models import Draft, Post
+from ..pagination import Page, paginate
+from ..store import Store
 from ..ui_deps import banner_enabled, check_same_origin, get_services, require_ui_consumer
+from ..ui_time import sort_key
 
 router = APIRouter(tags=["ui"])
 
@@ -135,10 +138,44 @@ def submission_discard(
 # --- Drafts board -------------------------------------------------------
 
 
+@router.post("/content/drafts/new")
+def draft_new(
+    _origin: None = Depends(check_same_origin),
+    consumer: Consumer = Depends(require_ui_consumer),
+    services: Services = Depends(get_services),
+) -> RedirectResponse:
+    """Start a post from nothing. POST only: a GET on this path is the
+    editor route with `new` as a draft id, which 404s and creates nothing."""
+    draft, warnings = services.store.create_draft(consumer.name)
+    return _redirect_to_draft(draft.id, warnings)
+
+
+def _board_row(
+    services: Services, draft: Draft, flags_by_draft: dict[str, list[dict[str, Any]]]
+) -> dict[str, Any]:
+    store = services.store
+    versions = store.list_versions(draft.id)
+    last_author = versions[-1].author if versions else "-"
+    last_preview = store.last_run(draft.id, kind="preview")
+    run_info = {"preview_url": _preview_url(last_preview)} if last_preview else None
+    return {
+        "draft": _dump(draft),
+        "last_author": last_author,
+        "run_info": run_info,
+        "flags": flags_by_draft.get(draft.id, []),
+    }
+
+
+def _archive_sort_key(draft: Draft) -> tuple[datetime, datetime]:
+    post_date = (draft.published or {}).get("date")
+    return (sort_key(post_date or draft.updated_at), sort_key(draft.updated_at))
+
+
 @router.get("/content/drafts", response_class=HTMLResponse)
 def drafts_board(
     request: Request,
     status: str | None = None,
+    q: str = "",
     page: int = Query(1, ge=1),
     services: Services = Depends(get_services),
 ) -> HTMLResponse:
@@ -148,23 +185,40 @@ def drafts_board(
         if flag.draft_id:
             flags_by_draft.setdefault(flag.draft_id, []).append(_dump(flag))
 
-    rows = []
-    for draft in store.list_drafts(status or None):
-        versions = store.list_versions(draft.id)
-        last_author = versions[-1].author if versions else "-"
-        last_preview = store.last_run(draft.id, kind="preview")
-        run_info = {"preview_url": _preview_url(last_preview)} if last_preview else None
-        rows.append(
-            {
-                "draft": _dump(draft),
-                "last_author": last_author,
-                "run_info": run_info,
-                "flags": flags_by_draft.get(draft.id, []),
-            }
-        )
-    pg = paginate(rows, page)
+    drafts = store.list_drafts(status or None)
+    needle = q.strip().lower()
+    if needle:
+        drafts = [
+            d
+            for d in drafts
+            if needle in (d.title or "").lower() or needle in (d.slug or "").lower()
+        ]
+    # Newest first, here and not in `Index.draft_ids`: that ordering is the
+    # API's own list contract (oldest first) and must not move under it.
+    drafts.sort(key=lambda d: sort_key(d.updated_at), reverse=True)
+    active = [d for d in drafts if d.status != "published"]
+    archive = [d for d in drafts if d.status == "published"]
+    # The archive is ordered by the date the post itself carries, not by when
+    # its record was last touched: a digest stamps hundreds of records within
+    # seconds of each other, so `updated_at` alone left a freshly loaded
+    # archive in processing order (2026, 2026, then 2011 ascending). Found in
+    # the live pass. A record with no post date falls back to `updated_at`.
+    archive.sort(key=_archive_sort_key, reverse=True)
+    # Only the archive is paged, and its rows (versions, last preview run) are
+    # only loaded for the visible page: after a digest the archive is hundreds
+    # of records and the board should not read every one to show fifty.
+    visible = paginate(archive, page)
+    active_rows = [_board_row(services, d, flags_by_draft) for d in active]
+    archive_pg = Page(
+        items=[_board_row(services, d, flags_by_draft) for d in visible.items],
+        page=visible.page,
+        page_size=visible.page_size,
+        total=visible.total,
+    )
     return HTMLResponse(
-        tpl.drafts_board_page(pg, status_filter=status, banner=banner_enabled(request))
+        tpl.drafts_board_page(
+            active_rows, archive_pg, status_filter=status, q=q, banner=banner_enabled(request)
+        )
     )
 
 
@@ -450,6 +504,38 @@ def draft_image_detach(
 # --- Import ---------------------------------------------------------------
 
 
+def _untracked_posts(store: Store) -> tuple[list[Post], list[Post]]:
+    """(every post, the posts no draft record tracks yet).
+
+    Same rule as `Store._create_published_drafts_from_digest`, which holds
+    the other copy of it (store.py is owned elsewhere, so the two are kept in
+    step by hand: change one, change both). A post is tracked when its slug is
+    some draft's slug, or its path is some draft's `source_post` path or
+    `published` post path. Digest lands a record for each post it sees, so on
+    a digested blog this is usually empty; what is left is the recovery case
+    (a post digest could not import).
+    """
+    posts = store.list_posts()
+    drafts = store.list_drafts()
+    tracked_slugs = {d.slug for d in drafts if d.slug}
+    tracked_paths = {(d.source_post or {}).get("path") for d in drafts if d.source_post} | {
+        (d.published or {}).get("post_path") for d in drafts if d.published
+    }
+    untracked = [p for p in posts if p.slug not in tracked_slugs and p.path not in tracked_paths]
+    return posts, untracked
+
+
+def _import_listing(services: Services, q: str, page: int) -> tuple[Page[dict[str, Any]], int, int]:
+    """(the page to render, how many posts exist, how many are untracked)."""
+    posts, untracked = _untracked_posts(services.store)
+    needle = q.strip().lower()
+    shown = untracked
+    if needle:
+        shown = [p for p in shown if needle in p.slug.lower() or needle in p.title.lower()]
+    posts_dump = [_dump(p) for p in sorted(shown, key=lambda p: p.date, reverse=True)]
+    return paginate(posts_dump, page), len(posts), len(untracked)
+
+
 @router.get("/content/import", response_class=HTMLResponse)
 def import_search(
     request: Request,
@@ -457,13 +543,33 @@ def import_search(
     page: int = Query(1, ge=1),
     services: Services = Depends(get_services),
 ) -> HTMLResponse:
-    posts = services.store.list_posts()
-    needle = q.strip().lower()
-    if needle:
-        posts = [p for p in posts if needle in p.slug.lower() or needle in p.title.lower()]
-    posts_dump = [_dump(p) for p in sorted(posts, key=lambda p: p.date, reverse=True)]
-    pg = paginate(posts_dump, page)
-    return HTMLResponse(tpl.import_page(pg, q, banner=banner_enabled(request)))
+    pg, posts_total, untracked_total = _import_listing(services, q, page)
+    return HTMLResponse(
+        tpl.import_page(
+            pg,
+            q,
+            banner=banner_enabled(request),
+            posts_total=posts_total,
+            untracked_total=untracked_total,
+        )
+    )
+
+
+def _import_refusal(
+    services: Services, request: Request, message: str, status_code: int, q: str, page: int
+) -> Any:
+    pg, posts_total, untracked_total = _import_listing(services, q, page)
+    return HTMLResponse(
+        tpl.import_page(
+            pg,
+            q,
+            banner=banner_enabled(request),
+            notice=message,
+            posts_total=posts_total,
+            untracked_total=untracked_total,
+        ),
+        status_code=status_code,
+    )
 
 
 @router.post("/content/import")
@@ -475,15 +581,36 @@ async def import_create(
 ) -> Any:
     form = await request.form()
     slug = str(form.get("slug", ""))
+    q = str(form.get("q", ""))
+    try:
+        page = max(1, int(str(form.get("page", "1"))))
+    except ValueError:
+        page = 1
+    posts, untracked = _untracked_posts(services.store)
+    if any(p.slug == slug for p in posts) and not any(p.slug == slug for p in untracked):
+        # A stale tab or a hand-built POST: the list no longer offers this
+        # post, because a record for it already exists.
+        return _import_refusal(
+            services,
+            request,
+            f"{slug} is already a post on the Posts tab, so there is nothing to import. "
+            "Open it from there.",
+            409,
+            q,
+            page,
+        )
     try:
         draft, warnings = services.store.create_draft(consumer.name, from_post=slug)
     except ApiError as exc:
-        return HTMLResponse(
-            tpl.import_page(
-                paginate([], 1), slug, banner=banner_enabled(request), notice=exc.message
-            ),
-            status_code=exc.status_code,
-        )
+        message = exc.message
+        if exc.code == "image_dir_collision":
+            folder = exc.extra.get("image_dir") or slug
+            message = (
+                f"Could not import {slug}: its image folder (static/images/{folder}/) belongs "
+                "to another post on this board. Nothing was created. If that post is this "
+                "one, it is already on the Posts tab."
+            )
+        return _import_refusal(services, request, message, exc.status_code, q, page)
     return _redirect_to_draft(draft.id, warnings)
 
 

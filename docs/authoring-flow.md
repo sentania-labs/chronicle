@@ -193,14 +193,30 @@ who can reach it on the network can create, edit, and act on content." It
 is on by default; `CHRONICLE_UI_BANNER=0` turns it off for an operator who
 has already put the whole thing behind their own auth proxy.
 
+Every timestamp the content and preview pages show is local clock time,
+`America/Chicago` by default (`CHRONICLE_UI_TIMEZONE` overrides it with any
+tz database name): `14:52 CDT` for today, `2026-09-17 14:52 CDT` for another
+day. The API's JSON and the records on disk keep their ISO stamps unchanged.
+
 - **Submissions** (`/content/submissions`): the intake queue, with a detail
   page per submission (materials, attached images, "create draft from it",
   "discard").
-- **Drafts board** (`/content/drafts`): filterable by status, one card per
-  draft (title, slug, last author, updated, claim holder, open PR link,
-  preview link, open reconciliation flags).
-- **Import** (`/content/import`): a searchable list of `/v1/posts`, each
-  row a one-click `from_post` import.
+- **Posts board** (`/content/drafts`): a "New post" button (POST
+  `/content/drafts/new`, a blank draft straight into the editor), then work
+  in flight (every status but `published`, newest first, never paged) above
+  a collapsed "Published archive" (newest first, 50 per page, each section
+  with its own count). Filterable by status and searchable by title or slug
+  (`q`, case-insensitive substring); a search, a `published` filter, or a
+  page past the first opens the archive. One card per post (title, slug,
+  last author, updated, claim holder, open PR link, preview link, open
+  reconciliation flags).
+- **Import** (`/content/import`): a searchable list of the posts no draft
+  record tracks yet (a post is tracked when its slug is some draft's slug,
+  or its path is some draft's `source_post` or `published` path, the same
+  rule digest uses), each row a one-click `from_post` import. Digest
+  already creates a record for every post it can, so on a digested blog
+  this is usually empty and the page says so; it is the recovery path for a
+  post digest could not import.
 - **Editor** (`/content/drafts/{id}`): frontmatter fields, a body textarea
   with a client-side live markdown preview pane (vendored `marked`, see
   [THIRD_PARTY.md](../THIRD_PARTY.md)), image upload and detach, a claim

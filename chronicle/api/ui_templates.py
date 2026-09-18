@@ -14,9 +14,11 @@ from __future__ import annotations
 from html import escape
 from posixpath import basename
 from typing import Any
+from urllib.parse import quote
 
 from .pagination import Page
 from .transitions import DRAFT_TRANSITIONS, RESERVED_ACTIONS
+from .ui_time import local_time
 
 STYLE_LINKS = (
     '<link rel="stylesheet" href="/static/style.css">'
@@ -63,17 +65,20 @@ def page(
 </body></html>"""
 
 
-def _pagination_links(pg: Page[Any], base_url: str, *, extra: str = "") -> str:
+def _pagination_links(pg: Page[Any], base_url: str, *, extra: str = "", anchor: str = "") -> str:
     """Previous/next links and the total count, `?page=N` on `base_url`,
     with whatever other query string (`extra`, already a leading `&...`)
-    the current listing carries (a status filter, a search term)."""
+    the current listing carries (a status filter, a search term), and an
+    optional `#anchor` so a listing that shares a page with other sections
+    lands back on itself."""
+    suffix = f"#{anchor}" if anchor else ""
     prev_html = (
-        f'<a href="{base_url}?page={pg.page - 1}{extra}">&laquo; previous</a>'
+        f'<a href="{base_url}?page={pg.page - 1}{extra}{suffix}">&laquo; previous</a>'
         if pg.has_previous
         else "<span>&laquo; previous</span>"
     )
     next_html = (
-        f'<a href="{base_url}?page={pg.page + 1}{extra}">next &raquo;</a>'
+        f'<a href="{base_url}?page={pg.page + 1}{extra}{suffix}">next &raquo;</a>'
         if pg.has_next
         else "<span>next &raquo;</span>"
     )
@@ -212,29 +217,55 @@ def _draft_card(
 <div class="card">
 <h3><a href="/content/drafts/{escape(draft["id"])}">{escape(draft["title"] or "(untitled)")}</a></h3>
 <p class="muted">slug: {escape(draft["slug"] or "-")} | status: {escape(draft["status"])} |
-author: {escape(last_author)} | updated: {escape(draft["updated_at"])} | claim: {claim_text}</p>
+author: {escape(last_author)} | updated: {escape(local_time(draft["updated_at"]))} | claim: {claim_text}</p>
 <p class="muted">PR: {pr_link} | preview: {preview_link} {_flag_badges(flags)}</p>
 </div>
 """
 
 
-def drafts_board_page(pg: Page[dict[str, Any]], *, status_filter: str | None, banner: bool) -> str:
-    cards = (
-        "".join(
-            _draft_card(row["draft"], row["last_author"], row["run_info"], row["flags"])
-            for row in pg.items
-        )
-        or "<p>no posts.</p>"
+def _cards(rows: list[dict[str, Any]]) -> str:
+    return "".join(
+        _draft_card(row["draft"], row["last_author"], row["run_info"], row["flags"]) for row in rows
     )
-    extra = f"&status={escape(status_filter)}" if status_filter else ""
+
+
+def drafts_board_page(
+    active: list[dict[str, Any]],
+    archive: Page[dict[str, Any]],
+    *,
+    status_filter: str | None,
+    q: str,
+    banner: bool,
+) -> str:
+    """Work in flight (every status but `published`) in full above, then the
+    published archive in its own collapsed section. Only the archive is paged:
+    live work is never pushed off screen by a long archive, and the archive's
+    own count and page links say how much is folded away."""
+    filters = {"status": status_filter or "", "q": q}
+    extra = "".join(f"&{k}={quote(v)}" for k, v in filters.items() if v)
+    # A search, a status filter of `published`, or a page past the first all
+    # mean the visitor is looking for something in the archive, so it opens.
+    archive_open = " open" if (q or status_filter == "published" or archive.page > 1) else ""
+    active_html = _cards(active) or "<p>nothing in flight.</p>"
+    archive_html = _cards(archive.items) or "<p>no published posts.</p>"
     body = f"""
+<form method="post" action="/content/drafts/new">
+<button type="submit">New post</button>
+</form>
 <form method="get" action="/content/drafts">
 <label for="status">Filter by status</label>
 <select id="status" name="status">{_status_options(status_filter)}</select>
+<label for="q">Search</label>
+<input type="text" id="q" name="q" value="{escape(q)}" placeholder="title or slug">
 <button type="submit">Filter</button>
 </form>
-{cards}
-{_pagination_links(pg, "/content/drafts", extra=extra)}
+<h2>In flight ({len(active)})</h2>
+{active_html}
+<details id="published"{archive_open}>
+<summary>Published archive ({archive.total})</summary>
+{archive_html}
+{_pagination_links(archive, "/content/drafts", extra=extra, anchor="published")}
+</details>
 """
     return page("Posts", body, banner=banner)
 
@@ -243,8 +274,33 @@ def drafts_board_page(pg: Page[dict[str, Any]], *, status_filter: str | None, ba
 
 
 def import_page(
-    pg: Page[dict[str, Any]], q: str, *, banner: bool, notice: str | None = None
+    pg: Page[dict[str, Any]],
+    q: str,
+    *,
+    banner: bool,
+    posts_total: int,
+    untracked_total: int,
+    notice: str | None = None,
 ) -> str:
+    """`posts_total` is every post the store knows; `untracked_total` is those
+    no draft record tracks yet, the only ones this tab lists. With none left
+    it says so plainly instead of drawing an empty table, and says why."""
+    if untracked_total == 0:
+        if posts_total == 0:
+            reason = "No posts have been digested from the blog yet, so there is nothing to import."
+        else:
+            reason = (
+                f"All {posts_total} posts from the blog are already on the "
+                '<a href="/content/drafts">Posts tab</a>, so there is nothing to import. '
+                "This tab only lists a post that has no record here yet."
+            )
+        return page(
+            "Import published post",
+            f"<p>{reason}</p>",
+            banner=banner,
+            notice=notice,
+            notice_kind="error",
+        )
     rows = "".join(
         "<tr>"
         f"<td>{escape(p['slug'])}</td>"
@@ -252,12 +308,15 @@ def import_page(
         f"<td>{escape(p['date'])}</td>"
         '<td><form method="post" action="/content/import">'
         f'<input type="hidden" name="slug" value="{escape(p["slug"])}">'
+        f'<input type="hidden" name="q" value="{escape(q)}">'
+        f'<input type="hidden" name="page" value="{pg.page}">'
         '<button type="submit">Import as post</button></form></td>'
         "</tr>"
         for p in pg.items
     )
-    extra = f"&q={escape(q)}" if q else ""
+    extra = f"&q={quote(q)}" if q else ""
     body = f"""
+<p class="muted">Posts with no record here yet: {untracked_total}.</p>
 <form method="get" action="/content/import">
 <label for="q">Search published posts</label>
 <input type="text" id="q" name="q" value="{escape(q)}" placeholder="title or slug">
@@ -274,7 +333,7 @@ def import_page(
         body,
         banner=banner,
         notice=notice,
-        notice_kind="ok" if notice else "error",
+        notice_kind="error",
     )
 
 
@@ -428,7 +487,7 @@ def _feedback_log(entries: list[dict[str, Any]]) -> str:
         return "<p>no feedback yet.</p>"
     rows = "".join(
         f"<li><strong>v{e['version_no']} {escape(e['action'])}</strong> by {escape(e['author'])} "
-        f"at {escape(e['created_at'])}: {escape(e['text'])}</li>"
+        f"at {escape(local_time(e['created_at']))}: {escape(e['text'])}</li>"
         for e in entries
     )
     return f"<ul>{rows}</ul>"
@@ -438,7 +497,7 @@ def _version_history(draft_id: str, versions: list[dict[str, Any]]) -> str:
     if not versions:
         return "<p>no versions yet.</p>"
     rows = "".join(
-        f"<li>v{v['version_no']} by {escape(v['author'])} at {escape(v['created_at'])}"
+        f"<li>v{v['version_no']} by {escape(v['author'])} at {escape(local_time(v['created_at']))}"
         + (f": {escape(v['message'])}" if v.get("message") else "")
         + f' (<a href="/content/drafts/{escape(draft_id)}/diff?from={v["version_no"] - 1}&to={v["version_no"]}">diff vs previous</a>)</li>'
         for v in versions
@@ -451,7 +510,7 @@ def _run_status(run: dict[str, Any] | None) -> str:
         return "<p>no runs yet.</p>"
     return (
         f"<p>last run: {escape(run['kind'])}: {escape(run['status'])} at "
-        f"{escape(run.get('finished_at') or run.get('started_at') or run['created_at'])} "
+        f"{escape(local_time(run.get('finished_at') or run.get('started_at') or run['created_at']))} "
         f'(<a href="/runs/{escape(run["id"])}">log</a>)</p>'
     )
 
@@ -472,7 +531,7 @@ def editor_page(
     claim = draft.get("claim")
     if claim:
         claim_html = (
-            f"<p>Claimed by {escape(claim['author'])} since {escape(claim['since'])}. "
+            f"<p>Claimed by {escape(claim['author'])} since {escape(local_time(claim['since']))}. "
             f'<form style="display:inline" method="post" action="/content/drafts/{escape(draft["id"])}/release">'
             '<button type="submit">Release claim</button></form></p>'
         )
@@ -623,7 +682,7 @@ def preview_list_page(rows: list[dict[str, Any]], *, banner: bool) -> str:
             "<tr>"
             f'<td><a href="/content/drafts/{escape(r["draft_id"])}">{escape(r["title"])}</a></td>'
             f'<td><a href="{escape(r["preview_url"])}">{escape(r["preview_url"])}</a></td>'
-            f"<td>{escape(r['built_at'] or '-')}</td>"
+            f"<td>{escape(local_time(r['built_at']))}</td>"
             f"<td>{escape(str(r['wall_seconds']) if r['wall_seconds'] is not None else '-')}</td>"
             f"<td>{'drift' if r['toolchain_drift'] else 'match'}</td>"
             f'<td><form method="post" action="/content/previews/{escape(r["draft_id"])}/rebuild">'
@@ -643,7 +702,7 @@ def preview_list_page(rows: list[dict[str, Any]], *, banner: bool) -> str:
 def run_log_page(run: dict[str, Any], log_text: str, *, banner: bool) -> str:
     body = f"""
 <p class="muted">kind: {escape(run["kind"])} | status: {escape(run["status"])} |
-started: {escape(run.get("started_at") or "-")} | finished: {escape(run.get("finished_at") or "-")} |
+started: {escape(local_time(run.get("started_at")))} | finished: {escape(local_time(run.get("finished_at")))} |
 builder: {escape(run.get("builder_id") or "-")} | hugo: {escape(run.get("hugo_version") or "-")} |
 toolchain drift: {run.get("toolchain_drift")}</p>
 <pre>{escape(log_text) or "(no log captured yet)"}</pre>
