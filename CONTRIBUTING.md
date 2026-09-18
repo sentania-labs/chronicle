@@ -80,7 +80,7 @@ curl -sf https://ghcr.io/token?scope="repository:sentania-labs/chronicle-api:pul
 
 A 200 with the new tag listed, fetched with no login, means the package is
 public. A 401 or 403 means it is not, and the fix is the one-time manual
-flip on GitHub described above, never a workflow change. A brand-new image
+flip on GitHub described below, never a workflow change. A brand-new image
 target needs this flip once, the first time it is ever published; an
 existing, already-public target does not need it again.
 
