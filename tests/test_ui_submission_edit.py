@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import re
+from typing import Any
+
+import pytest
 from fastapi.testclient import TestClient
 
 from chronicle.api.deps import Services
+from chronicle.api.models import Submission
 
 from .conftest import auth
 
@@ -106,6 +111,49 @@ def test_stale_edit_renders_409_with_diff_and_the_attempted_text(
     assert "edited brief" in response.text  # the attempted text survives
     assert '<input type="hidden" name="base_version" value="2">' in response.text
     assert services.store.get_submission(submission_id).brief == "someone else's brief"
+
+
+def test_conflict_page_diff_and_form_come_from_the_same_snapshot(
+    client: TestClient,
+    agent_token: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    submission_id = make_submission(client, agent_token)
+    store = client.app.state.services.store  # type: ignore[attr-defined]
+    store.revise_submission(submission_id, "ghostwriter", 1, "second brief", [], [])
+
+    real_get = store.get_submission
+    real_revise = store.revise_submission
+    state = {"armed": False}
+
+    def get_then_land_a_revision(sid: str) -> Submission:
+        record = real_get(sid)
+        if state["armed"]:
+            # Every read the handler makes after the conflict is followed by
+            # another revision landing, so two reads can never agree.
+            state["armed"] = False
+            latest = real_get(sid)
+            n = latest.version_no
+            real_revise(sid, "ghostwriter", n, f"brief {n + 1}", [], [])
+            state["armed"] = True
+        return record
+
+    def revise_then_arm(*args: Any, **kwargs: Any) -> Submission:
+        try:
+            return real_revise(*args, **kwargs)
+        finally:
+            state["armed"] = True
+
+    monkeypatch.setattr(store, "get_submission", get_then_land_a_revision)
+    monkeypatch.setattr(store, "revise_submission", revise_then_arm)
+
+    response = client.post(f"/content/submissions/{submission_id}/edit", data=form(1))
+
+    assert response.status_code == 409
+    form_version = re.search(r'name="base_version" value="(\d+)"', response.text)
+    diff_end = re.search(r"\+\+\+ v(\d+)", response.text)
+    assert form_version is not None and diff_end is not None
+    assert form_version.group(1) == diff_end.group(1)
 
 
 def test_a_drafted_submission_shows_no_form_and_refuses_the_post_by_name(

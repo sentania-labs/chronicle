@@ -22,7 +22,7 @@ from .. import ui_templates as tpl
 from ..deps import Consumer, Services
 from ..errors import ApiError
 from ..images import MAX_IMAGE_BYTES
-from ..models import Draft, Material, Post
+from ..models import Draft, Material, Post, Submission
 from ..pagination import Page, paginate
 from ..store import Store
 from ..ui_deps import banner_enabled, check_same_origin, get_services, require_ui_consumer
@@ -106,8 +106,12 @@ def _submission_response(
     status_code: int = 200,
     conflict_diff: str | None = None,
     attempted: dict[str, Any] | None = None,
+    submission: Submission | None = None,
 ) -> HTMLResponse:
-    submission = services.store.get_submission(submission_id)
+    # A caller that already read the record passes it in, so the page renders
+    # the same snapshot it computed anything else from.
+    if submission is None:
+        submission = services.store.get_submission(submission_id)
     images = [_dump(services.store.get_image(image_id)) for image_id in submission.image_ids]
     html = tpl.submission_detail_page(
         _dump(submission),
@@ -215,7 +219,10 @@ async def submission_edit(
         # Recomputed against the record's actual current version, not
         # `exc.extra`: a save landing between the conflict and this handler
         # would leave that summary describing an older version (the same
-        # reasoning as `draft_save`).
+        # reasoning as `draft_save`). The record is read once and both the
+        # diff and the rendered form come from that snapshot, so a revision
+        # landing mid-handler cannot leave the form newer than the diff.
+        current = services.store.get_submission(submission_id)
         return _submission_response(
             services,
             submission_id,
@@ -223,8 +230,9 @@ async def submission_edit(
             notice=exc.message,
             notice_kind="conflict",
             status_code=409,
-            conflict_diff=services.store.submission_diff_between(submission_id, base_version),
+            conflict_diff=services.store.submission_diff(current, base_version),
             attempted=attempted,
+            submission=current,
         )
     return _submission_response(services, submission_id, request, notice="saved", notice_kind="ok")
 

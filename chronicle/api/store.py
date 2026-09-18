@@ -388,7 +388,12 @@ class Store:
         version = self.get_submission_version(record.id, version_no)
         return render_submission_content(version.brief, version.materials, version.image_ids)
 
-    def _submission_diff(self, record: Submission, from_version: int) -> str:
+    def submission_diff(self, record: Submission, from_version: int) -> str:
+        """A unified diff from `from_version` to `record`'s own version.
+
+        Takes the record rather than an id so a caller that also renders that
+        record diffs the very snapshot it shows, never a second read.
+        """
         before = self._submission_content_at(record, from_version)
         if before is None:
             return f"base_version {from_version} does not exist, no diff available"
@@ -401,10 +406,6 @@ class Store:
                 tofile=f"v{record.version_no}",
             )
         )
-
-    def submission_diff_between(self, submission_id: str, from_version: int) -> str:
-        """A unified diff from `from_version` to the current one, for the UI."""
-        return self._submission_diff(self.get_submission(submission_id), from_version)
 
     @locked
     def revise_submission(
@@ -444,7 +445,7 @@ class Store:
                 f"submission {submission_id} is at version {record.version_no}, not {base_version}",
                 current_version=record.version_no,
                 base_version=base_version,
-                diff_summary=self._submission_diff(record, base_version),
+                diff_summary=self.submission_diff(record, base_version),
             )
         if not self._submission_version_path(record.id, record.version_no).exists():
             # Written before submissions were versioned: record what version
