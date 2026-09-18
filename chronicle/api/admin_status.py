@@ -131,6 +131,23 @@ def github_app_state(admin: AdminServices) -> str:
     return readiness_state(admin.github_store.load())
 
 
+def github_app_verified_at(admin: AdminServices) -> str | None:
+    """The raw stamp inside `readiness_state`'s "verified at ..." sentence.
+
+    Carried separately so the admin page can render it as local time without
+    parsing the sentence apart; `/readyz` keeps the sentence, ISO stamp and
+    all, because it is machine readable. Mirrors `readiness_state`'s own
+    precedence: only a record with no error and a stamp is "verified", and
+    test-token mode never is.
+    """
+    if admin.settings.test_token_mode:
+        return None
+    record = admin.github_store.load()
+    if record is None or record.last_error:
+        return None
+    return record.last_verified_at or None
+
+
 def preview_run_counts(services: Services) -> dict[str, int]:
     counts = services.store.run_counts("preview")
     return {status: counts.get(status, 0) for status in RUN_STATUSES}
@@ -163,6 +180,7 @@ def build_status(admin: AdminServices, services: Services) -> dict[str, Any]:
 
     return {
         "github_app_state": github_app_state(admin),
+        "github_app_verified_at": github_app_verified_at(admin),
         "github_repo": app_record.owner_repo if app_record else admin.settings.github_test_repo,
         "github_default_branch": app_record.default_branch if app_record else None,
         "last_digest_at": digest_status.get("finished_at") if digest_status else None,
