@@ -84,7 +84,18 @@ ok "fixture repo built at $fixture_dir"
 
 step "fresh volumes: down -v, then up -d --build"
 compose down -v || true
-compose up -d --build
+# One service at a time, deliberately. docker-compose.yml mounts `preview` at
+# /data/preview, inside the `data` volume, so creating a container makes the
+# daemon mkdir directories inside the shared, freshly created `data` volume.
+# A plain `up` creates all three containers concurrently, two of them race on
+# the same mkdir, and the loser fails with "failed to mkdir ...: file exists"
+# (issue #31). COMPOSE_PARALLEL_LIMIT=1 and --parallel 1 do NOT prevent this
+# on compose v2.38: `up` still creates every container in one burst. Do not
+# collapse this back into one `up`, and do not parallelise the loop.
+compose build
+for svc in $(compose config --services); do
+    compose up -d --no-deps "$svc"
+done
 ok "stack started against fresh named volumes"
 
 step "wait for health"
