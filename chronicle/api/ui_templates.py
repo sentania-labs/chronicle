@@ -127,12 +127,48 @@ def submissions_list_page(pg: Page[dict[str, Any]], *, banner: bool) -> str:
     return page("Submissions", body, banner=banner)
 
 
+def _submission_edit_form(submission: dict[str, Any]) -> str:
+    """Plain edit form for a `new` or `claimed` submission: the brief, and one
+    row per material plus a blank row to add one. Clearing a row's three
+    fields removes that material. Image ids ride along hidden so a save
+    keeps them; `base_version` is what makes a stale save a 409."""
+    rows = list(submission["materials"]) + [{"name": "", "url": None, "text": None}]
+    material_rows = "".join(
+        "<fieldset>"
+        f'<label>Name <input name="material_name" value="{escape(m["name"])}"></label> '
+        f'<label>URL <input name="material_url" value="{escape(m.get("url") or "")}"></label>'
+        f'<br><label>Text<br><textarea name="material_text" rows="6" cols="80">\n'
+        f"{escape(m.get('text') or '')}</textarea></label>"
+        "</fieldset>"
+        for m in rows
+    )
+    image_fields = "".join(
+        f'<input type="hidden" name="image_id" value="{escape(image_id)}">'
+        for image_id in submission["image_ids"]
+    )
+    return f"""
+<h2>Edit</h2>
+<form method="post" action="/content/submissions/{escape(submission["id"])}/edit">
+<input type="hidden" name="base_version" value="{submission["version_no"]}">
+{image_fields}
+<label for="brief">Brief</label><br>
+<textarea id="brief" name="brief" rows="4" cols="80">
+{escape(submission["brief"])}</textarea>
+{material_rows}
+<button type="submit">Save changes (version {submission["version_no"]})</button>
+</form>
+"""
+
+
 def submission_detail_page(
     submission: dict[str, Any],
     images: list[dict[str, Any]],
     *,
     banner: bool,
     notice: str | None = None,
+    notice_kind: str | None = None,
+    conflict_diff: str | None = None,
+    attempted: dict[str, Any] | None = None,
 ) -> str:
     def material_link(url: str) -> str:
         # A submission's material url is unvalidated input (chronicle.api.
@@ -168,9 +204,33 @@ def submission_detail_page(
             f'<form method="post" action="/content/submissions/{escape(submission["id"])}/discard">'
             '<button type="submit">Discard</button></form>'
         )
+    conflict_html = ""
+    if conflict_diff is not None:
+        # A stale edit: nothing was overwritten. The form below is already
+        # reloaded at the current version, and what the visitor tried to save
+        # is shown below so nothing they wrote is lost.
+        conflict_html += f"""
+<h2>What changed underneath you</h2>
+<pre>{escape(conflict_diff) or "(no diff available)"}</pre>
+"""
+    if attempted is not None:
+        # Also shown when the edit was refused for another reason (the
+        # submission was drafted or discarded in another tab).
+        attempted_materials = "".join(
+            f"<li><strong>{escape(m['name'])}</strong>"
+            + (f" ({escape(m['url'])})" if m.get("url") else "")
+            + (f"<pre>{escape(m['text'])}</pre>" if m.get("text") else "")
+            + "</li>"
+            for m in attempted.get("materials", [])
+        )
+        conflict_html += f"""
+<h2>Your attempted text (not saved, for manual merging)</h2>
+<pre>{escape(attempted.get("brief", ""))}</pre>
+<ul>{attempted_materials}</ul>
+"""
     body = f"""
-<p class="muted">status: {escape(submission["status"])}, from: {escape(submission["from_"])},
-created: {escape(submission["created_at"])}, claimed by: {escape(submission["claimed_by"] or "-")}</p>
+<p class="muted">status: {escape(submission["status"])}, version: {submission["version_no"]}, from: {escape(submission["from_"])},
+created: {escape(local_time(submission["created_at"]))}, claimed by: {escape(submission["claimed_by"] or "-")}</p>
 <h2>Brief</h2>
 <p>{escape(submission["brief"])}</p>
 <h2>Materials</h2>
@@ -178,13 +238,15 @@ created: {escape(submission["created_at"])}, claimed by: {escape(submission["cla
 <h2>Images ({len(images)})</h2>
 <ul>{image_rows or "<li>none</li>"}</ul>
 <div class="actions">{"".join(actions)}</div>
+{conflict_html}
+{_submission_edit_form(submission) if can_draft else ""}
 """
     return page(
         f"Submission {submission['id']}",
         body,
         banner=banner,
         notice=notice,
-        notice_kind="ok" if notice else "error",
+        notice_kind=notice_kind or ("ok" if notice else "error"),
     )
 
 

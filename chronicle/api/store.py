@@ -26,6 +26,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, cast
 
+import yaml
+
 from . import convert, gitrepo
 from . import digest as digest_mod
 from .atomic import write_atomic
@@ -45,11 +47,13 @@ from .models import (
     ReconcileFlag,
     Run,
     Submission,
+    SubmissionVersion,
     Version,
     WatchEntry,
     is_valid_slug,
     now_stamp,
     render_content,
+    render_submission_content,
     slugify,
 )
 from .transitions import (
@@ -60,6 +64,7 @@ from .transitions import (
     resolve_run_outcome,
     resolve_save,
     resolve_submission,
+    resolve_submission_revise,
     resolve_watch,
 )
 
@@ -89,6 +94,14 @@ FRONTMATTER_STRING_KEYS = (
     "shareImage",
 )
 FRONTMATTER_STRING_LIST_KEYS = ("tags", "categories")
+
+# Seeding a draft from a submission (`_seed_draft_from_submission`): a material
+# "looks like a post" when it opens with a frontmatter block (preferred) or a
+# markdown heading. The frontmatter pattern mirrors what `digest.parse_frontmatter`
+# will actually split, so detection and parsing cannot disagree.
+_FRONTMATTER_BLOCK = re.compile(r"\A(---|\+\+\+)\n.*?\n\1\n", re.DOTALL)
+_IMAGE_ID = re.compile(r"[0-9a-f]{64}")
+_LEADING_HEADING = re.compile(r"\s*#{1,6}[ \t]+(\S[^\n]*)")
 
 log = logging.getLogger("chronicle.api.store")
 
@@ -235,6 +248,9 @@ class Store:
     def _submission_path(self, submission_id: str) -> Path:
         return self.submissions_dir / f"{submission_id}.json"
 
+    def _submission_version_path(self, submission_id: str, version_no: int) -> Path:
+        return self.submissions_dir / submission_id / "versions" / f"{version_no}.json"
+
     def _draft_path(self, draft_id: str) -> Path:
         return self.drafts_dir / draft_id / "draft.json"
 
@@ -304,6 +320,7 @@ class Store:
         self._write_json(
             self._submission_path(record.id), record.model_dump(mode="json", by_alias=True)
         )
+        self._write_submission_version(record, actor, base_version=0)
         self._append_event(
             type="submission.created", actor=actor, submission_id=record.id, to_status=record.status
         )
@@ -316,6 +333,143 @@ class Store:
         if not path.exists():
             raise ApiError(404, "submission_not_found", f"no submission {submission_id}")
         return Submission.model_validate(self._read_json(path))
+
+    def _write_submission_version(
+        self, record: Submission, author: str, base_version: int, message: str = ""
+    ) -> SubmissionVersion:
+        version = SubmissionVersion(
+            submission_id=record.id,
+            version_no=record.version_no,
+            author=author,
+            created_at=now_stamp(),
+            base_version=base_version,
+            message=message,
+            brief=record.brief,
+            materials=record.materials,
+            image_ids=record.image_ids,
+        )
+        self._write_json(
+            self._submission_version_path(record.id, record.version_no),
+            version.model_dump(mode="json"),
+        )
+        return version
+
+    def get_submission_version(self, submission_id: str, version_no: int) -> SubmissionVersion:
+        path = self._submission_version_path(submission_id, version_no)
+        if not path.exists():
+            raise ApiError(
+                404,
+                "version_not_found",
+                f"no version {version_no} of submission {submission_id}",
+            )
+        return SubmissionVersion.model_validate(self._read_json(path))
+
+    def list_submission_versions(self, submission_id: str) -> list[SubmissionVersion]:
+        record = self.get_submission(submission_id)
+        return [
+            self.get_submission_version(submission_id, n)
+            for n in range(1, record.version_no + 1)
+            if self._submission_version_path(submission_id, n).exists()
+        ]
+
+    def _submission_content_at(self, record: Submission, version_no: int) -> str | None:
+        """Rendered content of one version, None when it was never recorded.
+
+        The record itself is authoritative for its current version; older
+        ones come from their version files. A submission written before
+        versioning has no file for its version 1 until its first revision
+        writes one, which is why this can legitimately be None.
+        """
+        if version_no == record.version_no:
+            return render_submission_content(record.brief, record.materials, record.image_ids)
+        path = self._submission_version_path(record.id, version_no)
+        if version_no < 1 or not path.exists():
+            return None
+        version = self.get_submission_version(record.id, version_no)
+        return render_submission_content(version.brief, version.materials, version.image_ids)
+
+    def submission_diff(self, record: Submission, from_version: int) -> str:
+        """A unified diff from `from_version` to `record`'s own version.
+
+        Takes the record rather than an id so a caller that also renders that
+        record diffs the very snapshot it shows, never a second read.
+        """
+        before = self._submission_content_at(record, from_version)
+        if before is None:
+            return f"base_version {from_version} does not exist, no diff available"
+        after = self._submission_content_at(record, record.version_no) or ""
+        return "".join(
+            difflib.unified_diff(
+                before.splitlines(keepends=True),
+                after.splitlines(keepends=True),
+                fromfile=f"v{from_version}",
+                tofile=f"v{record.version_no}",
+            )
+        )
+
+    @locked
+    def revise_submission(
+        self,
+        submission_id: str,
+        actor: str,
+        base_version: int,
+        brief: str,
+        materials: list[Material],
+        image_ids: list[str],
+        message: str = "",
+    ) -> Submission:
+        """Replace a submission's brief, materials and images, guarded by
+        `base_version` the way `save_draft` guards a draft save.
+
+        Only a `new` or `claimed` submission can be revised (transitions.py);
+        the history is one version file per revision plus the ordinary
+        internal git commit authored by `actor`.
+        """
+        record = self.get_submission(submission_id)
+        resolve_submission_revise(record.status, submission_id)
+        for image_id in image_ids:
+            if not _IMAGE_ID.fullmatch(image_id) or not self._image_sidecar_path(image_id).exists():
+                # The detail page loads every listed image, so an id that
+                # names nothing would make the page (and its edit form)
+                # answer 404 for good.
+                raise ApiError(
+                    422,
+                    "image_not_found",
+                    f"image {image_id} is not in the image store; upload it first",
+                    image_id=image_id,
+                )
+        if base_version != record.version_no:
+            raise ApiError(
+                409,
+                "stale_base_version",
+                f"submission {submission_id} is at version {record.version_no}, not {base_version}",
+                current_version=record.version_no,
+                base_version=base_version,
+                diff_summary=self.submission_diff(record, base_version),
+            )
+        if not self._submission_version_path(record.id, record.version_no).exists():
+            # Written before submissions were versioned: record what version
+            # 1 was, in this same commit, so the history has a starting point.
+            self._write_submission_version(record, record.from_, base_version=0)
+
+        record.brief = brief
+        record.materials = materials
+        record.image_ids = image_ids
+        record.version_no += 1
+        self._write_json(
+            self._submission_path(record.id), record.model_dump(mode="json", by_alias=True)
+        )
+        self._write_submission_version(record, actor, base_version, message)
+        self._append_event(
+            type="submission.revise",
+            actor=actor,
+            submission_id=record.id,
+            from_status=record.status,
+            to_status=record.status,
+        )
+        self._commit(f"submission {record.id}: version {record.version_no} by {actor}", actor)
+        self.index.upsert_submission(record)
+        return record
 
     def list_submissions(self, status: str | None = None) -> list[Submission]:
         # A mutation writes its file before its index row (ADR 006's cache is
@@ -391,6 +545,8 @@ class Store:
 
         if from_post is not None:
             draft, warnings = self._fill_from_post(draft, from_post)
+        if submission is not None:
+            warnings = self._seed_draft_from_submission(draft, submission, actor, stamp)
 
         self._write_json(self._draft_path(draft.id), draft.model_dump(mode="json"))
         self._append_event(
@@ -423,6 +579,89 @@ class Store:
         if submission is not None:
             self.index.upsert_submission(submission)
         return draft, warnings
+
+    def _seed_draft_from_submission(
+        self, draft: Draft, submission: Submission, actor: str, stamp: str
+    ) -> list[str]:
+        """Give a new draft the writing a submission already carries.
+
+        The primary material (the first with frontmatter, else the first
+        opening with a heading, else the first with any text) becomes the
+        body; its frontmatter, if any, is parsed the way an import parses a
+        post, then allowlisted and type-checked with a drop-and-warn rule (a
+        key the save path would 422 is dropped, never a 422 here). Every
+        other material is reference for the writer, so it goes to the
+        feedback log and never into the body. Runs inside
+        `_create_draft_unlocked`'s lock: only `_unlocked` helpers here.
+        """
+        warnings: list[str] = []
+        primary = _primary_material(submission.materials)
+        if primary is not None and primary.text is not None:
+            frontmatter, body, parse_error = _split_material(_clean_material_text(primary.text))
+            if parse_error is not None:
+                warnings.append(f"material {primary.name!r}: {parse_error}")
+            allowed: dict[str, Any] = {}
+            for key, value in (frontmatter or {}).items():
+                if key not in FRONTMATTER_ALLOWLIST:
+                    warnings.append(f"dropped unknown frontmatter key {key!r}")
+                    continue
+                expected = _frontmatter_type_problem(key, value)
+                if expected is not None:
+                    # The save path would 422 this value; the seed itself
+                    # succeeded, so drop the key and say why instead.
+                    warnings.append(
+                        f"dropped frontmatter key {key!r}: it must be {expected}"
+                        f" (got {type(value).__name__})"
+                    )
+                    continue
+                allowed[key] = value
+            title = allowed.get("title")
+            if not title:
+                heading = _LEADING_HEADING.match(body)
+                title = heading.group(1).strip() if heading else ""
+                if title:
+                    allowed["title"] = title
+            draft.title = str(title)
+            draft.frontmatter = allowed
+            draft.body = body
+
+        for material in submission.materials:
+            if material is primary:
+                continue
+            parts = [f"Material: {material.name}"]
+            if material.url:
+                parts.append(f"URL: {material.url}")
+            if material.text:
+                parts.extend(["", material.text])
+            self._append_feedback(
+                FeedbackEntry(
+                    draft_id=draft.id,
+                    author=actor,
+                    created_at=stamp,
+                    action="material",
+                    version_no=0,
+                    text="\n".join(parts),
+                )
+            )
+
+        for image_id in submission.image_ids:
+            try:
+                image = self.get_image(image_id)
+            except ApiError:
+                warnings.append(f"could not attach image {image_id}: it is not in the image store")
+                continue
+            if any(item.image_id == image_id for item in draft.images):
+                continue
+            if any(item.filename == image.filename for item in draft.images):
+                warnings.append(
+                    f"could not attach image {image_id}: another attached image"
+                    f" is already named {image.filename!r}"
+                )
+                continue
+            draft.images.append(
+                DraftImage(image_id=image_id, filename=image.filename, role="inline")
+            )
+        return warnings
 
     def _fill_from_post(self, draft: Draft, slug: str) -> tuple[Draft, list[str]]:
         """Populate a new draft from a published post record and its file on main.
@@ -1859,6 +2098,57 @@ class Store:
         return counts
 
 
+def _clean_material_text(text: str) -> str:
+    """A submitter's text as the seeding heuristics should see it: no byte
+    order mark and LF line endings, or a CRLF post's frontmatter fence would
+    never match and the whole block would land in the body unannounced."""
+    return text.removeprefix("\ufeff").replace("\r\n", "\n")
+
+
+def _primary_material(materials: list[Material]) -> Material | None:
+    """The material a draft body is seeded from: the first with a frontmatter
+    block, else the first that opens with a heading, else the first with any
+    text at all, else None. A frontmatter block outranks a heading because a
+    run log or script that merely starts with `# ` is common, and a real post
+    with frontmatter must not be demoted behind it."""
+    with_text = [
+        (material, _clean_material_text(material.text)) for material in materials if material.text
+    ]
+    for pattern in (_FRONTMATTER_BLOCK, _LEADING_HEADING):
+        for material, text in with_text:
+            if pattern.match(text):
+                return material
+    return with_text[0][0] if with_text else None
+
+
+def _split_material(text: str) -> tuple[dict[str, Any] | None, str, str | None]:
+    """(frontmatter, body, warning). Frontmatter is None when the text has no
+    block, or a block that does not parse; then the whole text stays the body
+    and the warning says why, rather than losing the writing to a 500."""
+    try:
+        frontmatter, body = digest_mod.parse_frontmatter(text)
+    except (yaml.YAMLError, ValueError, TypeError) as exc:
+        return None, text, f"frontmatter did not parse ({exc}); kept the whole text as the body"
+    if body == text and not frontmatter:
+        return None, text, None
+    return frontmatter, body, None
+
+
+def _frontmatter_type_problem(key: str, value: Any) -> str | None:
+    """What `key` must be when `value` is the wrong type, else None. The one
+    definition of the type rules, shared by the save path (which 422s) and
+    the submission seed (which drops the key and warns)."""
+    if key in FRONTMATTER_STRING_KEYS and not isinstance(value, str):
+        return "a string"
+    if key in FRONTMATTER_STRING_LIST_KEYS and (
+        not isinstance(value, list) or not all(isinstance(item, str) for item in value)
+    ):
+        return "a list of strings"
+    if key == "draft" and not isinstance(value, bool):
+        return "true or false"
+    return None
+
+
 def check_frontmatter(frontmatter: dict[str, Any]) -> None:
     unknown = sorted(key for key in frontmatter if key not in FRONTMATTER_ALLOWLIST)
     if unknown:
@@ -1869,17 +2159,10 @@ def check_frontmatter(frontmatter: dict[str, Any]) -> None:
             unknown_keys=unknown,
             allowed_keys=list(FRONTMATTER_ALLOWLIST),
         )
-    for key in FRONTMATTER_STRING_KEYS:
-        if key in frontmatter and not isinstance(frontmatter[key], str):
-            raise _wrong_type(key, "a string")
-    for key in FRONTMATTER_STRING_LIST_KEYS:
-        value = frontmatter.get(key)
-        if key in frontmatter and (
-            not isinstance(value, list) or not all(isinstance(item, str) for item in value)
-        ):
-            raise _wrong_type(key, "a list of strings")
-    if "draft" in frontmatter and not isinstance(frontmatter["draft"], bool):
-        raise _wrong_type("draft", "true or false")
+    for key, value in frontmatter.items():
+        expected = _frontmatter_type_problem(key, value)
+        if expected is not None:
+            raise _wrong_type(key, expected)
 
     title = frontmatter.get("title")
     if not isinstance(title, str) or not title.strip():

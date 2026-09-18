@@ -153,7 +153,8 @@ included. `/healthz` and `/readyz` are the only anonymous routes, forever.
 | --- | --- |
 | `POST /v1/submissions`, `GET /v1/submissions?status=` | raw material in, triage out |
 | `POST /v1/submissions/{id}/claim`, `/discard` | submission lifecycle |
-| `POST /v1/drafts` (`blank`, `from_submission`, `from_post`) | new draft, including an import of a published post from main |
+| `PUT /v1/submissions/{id}` | replace brief, materials, image ids (all required, image ids must exist) while `new` or `claimed`; requires `base_version`, 409 with a diff if stale, 409 `submission_frozen` after that |
+| `POST /v1/drafts` (`blank`, `from_submission`, `from_post`) | new draft; `from_submission` seeds body, title, frontmatter and images from the submission's materials (ADR 018); `from_post` imports a published post from main |
 | `GET /v1/drafts?status=`, `GET /v1/drafts/{id}` | content, version, images, status, claim |
 | `PUT /v1/drafts/{id}` | save; requires `base_version`, 409 with a diff if stale |
 | `POST /v1/drafts/{id}/claim`, `/release` | advisory claim, surfaced but never blocking |
@@ -199,7 +200,8 @@ tz database name): `14:52 CDT` for today, `2026-09-17 14:52 CDT` for another
 day. The API's JSON and the records on disk keep their ISO stamps unchanged.
 
 - **Submissions** (`/content/submissions`): the intake queue, with a detail
-  page per submission (materials, attached images, "create draft from it",
+  page per submission (materials, attached images, an edit form for the brief
+  and materials while it is new or claimed, "create draft from it",
   "discard").
 - **Posts board** (`/content/drafts`): a "New post" button (POST
   `/content/drafts/new`, a blank draft straight into the editor), then work

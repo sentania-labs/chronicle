@@ -19,6 +19,17 @@ class SubmissionCreate(BaseModel):
     image_ids: list[str] = []
 
 
+class SubmissionRevise(BaseModel):
+    # brief, materials and image_ids are all required: a PUT replaces the
+    # editable content wholesale, so an omitted field must be a 422 and not
+    # a silent "delete every material".
+    base_version: int
+    brief: str
+    materials: list[Material]
+    image_ids: list[str]
+    message: str = ""
+
+
 def _dump(record: Any) -> dict[str, Any]:
     dumped: dict[str, Any] = record.model_dump(mode="json", by_alias=True)
     return dumped
@@ -50,6 +61,27 @@ def get_submission(
     services: Services = Depends(get_services),
 ) -> dict[str, Any]:
     return _dump(services.store.get_submission(submission_id))
+
+
+@router.put("/{submission_id}")
+def revise_submission(
+    submission_id: str,
+    payload: SubmissionRevise,
+    consumer: Consumer = Depends(require_consumer),
+    services: Services = Depends(get_services),
+) -> dict[str, Any]:
+    """Edit a `new` or `claimed` submission. A stale `base_version` is a 409
+    carrying a unified diff of what moved, exactly as a draft save does."""
+    record = services.store.revise_submission(
+        submission_id,
+        consumer.name,
+        payload.base_version,
+        payload.brief,
+        payload.materials,
+        payload.image_ids,
+        payload.message,
+    )
+    return _dump(record)
 
 
 @router.post("/{submission_id}/claim")
