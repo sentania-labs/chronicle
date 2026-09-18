@@ -140,9 +140,15 @@ def post_path(draft: Draft, slug: str, content_dir: str | None = None) -> str:
     call site before this parameter existed) keeps the pre-ADR-017 hardcoded
     `content/posts` (issue #18: a site whose archive lives outside
     `content/posts` used to fall through here and land a duplicate file
-    instead of updating the one already on main).
+    instead of updating the one already on main). A trailing slash on
+    `content_dir` is stripped before the prefix match: `hugo config` can
+    report a `contentDir` written with one in `hugo.toml`, and the match
+    below is a plain string prefix, not a path join, so an unstripped
+    slash would make every digest-created record on that site fail to
+    match its own directory and duplicate on every republish, exactly
+    what this parameter exists to stop.
     """
-    base = content_dir or POSTS_DIR
+    base = (content_dir or POSTS_DIR).rstrip("/")
     source = (draft.source_post or {}).get("path")
     if source and _is_safe_relative(source) and source.startswith(f"{base}/"):
         return source

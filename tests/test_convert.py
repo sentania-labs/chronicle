@@ -79,6 +79,29 @@ def test_digested_record_outside_content_posts_republishes_as_update_not_duplica
     assert converted.post_path == "archive/my-post.md"
 
 
+def test_content_dir_with_trailing_slash_still_matches_source_path() -> None:
+    """`hugo config` can report a `contentDir` written with a trailing slash
+    in `hugo.toml`; the prefix match must not treat that as a different
+    directory and duplicate the post."""
+    draft = _draft(
+        frontmatter={"title": "My Post", "date": "2024-03-03", "url": "/2024/03/03/my-post/"},
+        source_post={"slug": "my-post", "path": "archive/my-post.md", "sha": "abc"},
+    )
+    converted = convert.convert(draft, None, "archive/")
+    assert converted.post_path == "archive/my-post.md"
+
+
+def test_traversal_outside_a_non_default_content_dir_is_not_trusted() -> None:
+    """The `_is_safe_relative` guard must still hold when `content_dir` is a
+    derived value rather than the hardcoded `content/posts`."""
+    draft = _draft(
+        frontmatter={"title": "My Post", "date": "2024-03-03"},
+        source_post={"slug": "x", "path": "../../etc/passwd", "sha": "abc"},
+    )
+    converted = convert.convert(draft, None, "archive")
+    assert converted.post_path == "content/posts/2024-03-03-my-post.md"
+
+
 def test_digested_record_outside_content_posts_with_no_content_dir_still_duplicates() -> None:
     """The pre-fix behaviour, kept as a control: with no `content_dir`
     supplied (today's fallback, no digest state yet) a source path outside
