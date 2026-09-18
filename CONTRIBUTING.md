@@ -143,8 +143,9 @@ touch visibility either, so do not mistake a linked-but-private package for
 a misconfigured label. Nothing alerts you when a package is left private:
 the publish job builds, signs, and pushes successfully either way, so a
 private package looks identical to a public one from CI's own output. The
-only way to know is to check, which is why it is a checklist step below and
-not just this paragraph. While a package is private, both
+only way to know is to check, which is why the release procedure above
+includes it as an explicit step, not just this paragraph. While a package
+is private, both
 `docker manifest inspect` and `cosign verify` need `docker login ghcr.io`
 first, with a token carrying `read:packages`. Once a package is public,
 neither call needs a login. Check the package's current visibility before
