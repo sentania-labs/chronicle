@@ -49,3 +49,14 @@ wide) driven against a running `docker compose` stack, not curl. Taken on
 - `08-posts-board-status-labels.png`: the posts board shows In review, Needs
   revision and Previewed instead of the raw status strings. The filter's
   option values are still the API's own.
+- `09-conflict-keeps-the-offered-backup.png`: the review-round fix, taken at
+  about 6:40 PM CDT on 2026-09-18 against the api image rebuilt from the
+  branch. An earlier backup was on offer and unanswered, another writer saved,
+  and a stale Save landed on the conflict page. The offered backup was left
+  untouched and the page says the attempted text on the right is not stored
+  in the browser. When nothing is on offer the page instead stores the text
+  with its title and tags, so a later Restore brings those back too.
+- `10-staged-publish-refused-without-a-preview.png`: the same review round.
+  A staged Publish POSTed for a Draft with no preview is refused (409) with
+  "Publish is not available right now (Preview first)." and the post stays a
+  Draft, the same answer the disabled button gives.
