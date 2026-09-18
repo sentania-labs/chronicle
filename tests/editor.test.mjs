@@ -60,8 +60,10 @@ test("an inline upload inserts the markdown the server built", () => {
     filename: "rack.png",
     role: "inline",
     markdown: "![rack](rack.png)",
+    url: "/content/drafts/d/images/i/file",
   });
   assert.equal(outcome.ok, true);
+  assert.equal(outcome.url, "/content/drafts/d/images/i/file");
   assert.equal(outcome.insert, "![rack](rack.png)");
   assert.match(outcome.message, /rack\.png/);
 });

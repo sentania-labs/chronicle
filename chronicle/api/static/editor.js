@@ -90,6 +90,7 @@ function uploadOutcome(result) {
     insert: typeof result.markdown === "string" ? result.markdown : null,
     filename: result.filename,
     role: result.role,
+    url: result.url,
     message:
       result.markdown !== null && result.markdown !== undefined
         ? "Uploaded " + result.filename + " and inserted it at the cursor."
@@ -184,14 +185,21 @@ function saveStateText(state, detail) {
   var backupKey = BACKUP_PREFIX + draftId;
   var editor = null;
 
+  // Images uploaded on this page, known the moment the server answers. The
+  // images panel is refreshed only after the reference is in the body, so the
+  // render that insertion triggers cannot find the new image in the panel yet.
+  var uploaded = [];
+
   function attachedImages() {
     var rows = document.querySelectorAll("#images-panel [data-image-filename]");
-    return Array.prototype.map.call(rows, function (row) {
-      return {
-        filename: row.getAttribute("data-image-filename"),
-        src: row.getAttribute("data-image-src"),
-      };
-    });
+    return uploaded.concat(
+      Array.prototype.map.call(rows, function (row) {
+        return {
+          filename: row.getAttribute("data-image-filename"),
+          src: row.getAttribute("data-image-src"),
+        };
+      })
+    );
   }
 
   function renderMarkdown(text) {
@@ -598,6 +606,9 @@ function saveStateText(state, detail) {
         if (!outcome.ok) {
           say(outcome.message, true);
           return;
+        }
+        if (outcome.url) {
+          uploaded.push({ filename: outcome.filename, src: outcome.url });
         }
         if (outcome.insert !== null) {
           if (editor) {
