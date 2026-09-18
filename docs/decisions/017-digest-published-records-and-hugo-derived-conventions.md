@@ -123,10 +123,9 @@ never a silent choice.
 
 All four are computed together, in one `HugoConventions` value
 (`digest.read_hugo_conventions`), so a digest run and the admin status
-page both see the same answer for the same run. Two of the four change
-digest's own behavior this round; the other two are derived and reported
-this round, wired into behavior elsewhere once that code has a path to
-receive them:
+page both see the same answer for the same run. Three of the four are
+wired into behavior this round; `taxonomies` is computed and reported
+only, deliberately, since Chronicle never rejects or rewrites on it:
 
 - `contentdir` replaces `POSTS_GLOB_DIRS`'s hardcoded `"content/posts"` as
   digest's walk root (still walked recursively for bundles; `mainsections`
