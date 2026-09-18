@@ -23,9 +23,14 @@ STYLE_LINKS = (
     '<script src="/static/vendor/marked.min.js"></script>'
 )
 
+# User-facing label only: "Drafts" reads "Posts" everywhere Scott sees it
+# (ADR 017), since he intends to hold other content types here too and most
+# working records now start life already `published` by digest rather than
+# hand-drafted. The route path, `/content/drafts`, is unchanged this round;
+# see ADR 017 for why a storage/route rename is deferred.
 NAV_LINKS = (
     ("/content/submissions", "Submissions"),
-    ("/content/drafts", "Drafts"),
+    ("/content/drafts", "Posts"),
     ("/content/import", "Import"),
     ("/content/previews", "Preview"),
 )
@@ -151,7 +156,7 @@ def submission_detail_page(
     if can_draft:
         actions.append(
             f'<form method="post" action="/content/submissions/{escape(submission["id"])}/draft">'
-            '<button type="submit">Create draft from this submission</button></form>'
+            '<button type="submit">Create post from this submission</button></form>'
         )
     if can_discard:
         actions.append(
@@ -219,7 +224,7 @@ def drafts_board_page(pg: Page[dict[str, Any]], *, status_filter: str | None, ba
             _draft_card(row["draft"], row["last_author"], row["run_info"], row["flags"])
             for row in pg.items
         )
-        or "<p>no drafts.</p>"
+        or "<p>no posts.</p>"
     )
     extra = f"&status={escape(status_filter)}" if status_filter else ""
     body = f"""
@@ -231,7 +236,7 @@ def drafts_board_page(pg: Page[dict[str, Any]], *, status_filter: str | None, ba
 {cards}
 {_pagination_links(pg, "/content/drafts", extra=extra)}
 """
-    return page("Drafts", body, banner=banner)
+    return page("Posts", body, banner=banner)
 
 
 # --- Import ---------------------------------------------------------------
@@ -247,7 +252,7 @@ def import_page(
         f"<td>{escape(p['date'])}</td>"
         '<td><form method="post" action="/content/import">'
         f'<input type="hidden" name="slug" value="{escape(p["slug"])}">'
-        '<button type="submit">Import as draft</button></form></td>'
+        '<button type="submit">Import as post</button></form></td>'
         "</tr>"
         for p in pg.items
     )
@@ -482,7 +487,7 @@ def editor_page(
     )
     body_text = escape(draft["body"])
     pr_open_notice = (
-        '<p class="notice conflict">This draft has an open publish pull request; '
+        '<p class="notice conflict">This post has an open publish pull request; '
         "saving is refused until it merges or closes.</p>"
         if publish_pr_open
         else ""
@@ -525,7 +530,7 @@ def editor_page(
 {_feedback_log(feedback)}
 """
     return page(
-        f"Draft: {draft['title'] or '(untitled)'}",
+        f"Post: {draft['title'] or '(untitled)'}",
         body,
         banner=banner,
         notice=notice,
@@ -544,7 +549,7 @@ def conflict_page(
     form ready to reapply on top of, and the visitor's own attempted text in
     a second, read-only pane so nothing they wrote is silently lost."""
     body = f"""
-<p class="notice conflict">Someone else saved draft {escape(draft["id"])} to version
+<p class="notice conflict">Someone else saved post {escape(draft["id"])} to version
 {draft["version_no"]} while you were editing version {attempted["base_version"]}. Nothing was
 overwritten. Review the diff below, then use the reloaded form (now at the current version) to
 reapply anything from your attempted text on the right.</p>
@@ -601,7 +606,7 @@ def diff_page(
         lines.append(span)
     rendered = "\n".join(lines) or "(no differences)"
     body = f"""
-<p><a href="/content/drafts/{escape(draft_id)}">back to draft</a></p>
+<p><a href="/content/drafts/{escape(draft_id)}">back to post</a></p>
 <pre>{rendered}</pre>
 """
     return page(f"Diff v{from_version} to v{to_version}", body, banner=banner)
@@ -628,7 +633,7 @@ def preview_list_page(rows: list[dict[str, Any]], *, banner: bool) -> str:
         )
     body = f"""
 <table>
-<tr><th>draft</th><th>preview</th><th>built</th><th>wall seconds</th><th>toolchain</th><th></th></tr>
+<tr><th>post</th><th>preview</th><th>built</th><th>wall seconds</th><th>toolchain</th><th></th></tr>
 {table}
 </table>
 """

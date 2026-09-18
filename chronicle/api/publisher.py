@@ -20,6 +20,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from . import convert, lint
+from . import digest as digest_mod
 from .admin_deps import AdminServices, InstallationToken
 from .github_client import (
     AppRepoOps,
@@ -227,7 +228,8 @@ def _publish(
     working_draft = draft.model_copy(
         update={"body": linted_body, "frontmatter": stamped_frontmatter}
     )
-    converted = convert.convert(working_draft)
+    static_dir = digest_mod.read_static_dir_from_state(store.data_dir)
+    converted = convert.convert(working_draft, static_dir)
 
     base_sha, base_tree = _base_tree_sha(ops, default_branch)
     post_blob_sha = ops.create_blob(

@@ -349,14 +349,16 @@ def test_digest_reports_an_update_when_a_post_changes(
     store.close()
 
 
-def test_digest_then_from_post_import_of_a_real_shaped_post(
+def test_digest_lands_a_real_shaped_post_as_a_published_working_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The real blog's posts are dated filenames with no `slug:` key, keep
     their images under `static/images/<name>/`, and reference them
     root-relative in both `featureImage` and the body. This is the shape
     that produced zero images and a dropped `url` in the live check against
-    the real repo; digest and from_post together should now round-trip it."""
+    the real repo; since ADR 017, digest itself lands this shape as a
+    published working record directly (`_fill_from_post`'s reuse), with no
+    `from_post` import step needed to round-trip it."""
     from tests.conftest import png_bytes
 
     repo = tmp_path / "blog.git-src"
@@ -397,9 +399,10 @@ def test_digest_then_from_post_import_of_a_real_shaped_post(
     store, admin = _build(tmp_path / "data", repo, monkeypatch)
     digested = run_digest(store, "chronicle", admin)
     assert digested.created == 1
+    assert digested.published_created == 1
 
-    draft, warnings = store.create_draft("chronicle", from_post=slug)
-    assert warnings == []
+    draft = next(d for d in store.list_drafts() if d.slug == slug)
+    assert draft.status == "published"
     assert draft.frontmatter["url"] == "/vcf-operations-can-now-see-my-unifi-network/"
     assert draft.frontmatter["featureImage"] == (
         "/images/vcf-operations-can-now-see-my-unifi-network/featured.png"

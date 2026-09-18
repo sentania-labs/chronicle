@@ -242,3 +242,26 @@ def test_as_dict_round_trips_into_the_toolchain_state_shape(custom_layout_site: 
     assert payload["mainsections"] == ["post"]
     assert payload["unconfigured_taxonomy_keys"] == []
     assert isinstance(payload["taxonomies"], dict)
+
+
+def test_read_static_dir_from_state_reads_the_last_digest_conventions(tmp_path: Path) -> None:
+    """`convert.py`'s callers (publish, preview, the cli dry run) read the
+    `staticdir` the last digest already derived from this file, rather than
+    re-invoking `hugo config` (ADR 017)."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "toolchain.json").write_text(
+        '{"conventions": {"staticdir": "assets"}}', encoding="utf-8"
+    )
+    assert digest.read_static_dir_from_state(tmp_path) == "assets"
+
+
+def test_read_static_dir_from_state_falls_back_with_no_digest_yet(tmp_path: Path) -> None:
+    assert digest.read_static_dir_from_state(tmp_path) == digest.FALLBACK_STATIC_DIR
+
+
+def test_read_static_dir_from_state_falls_back_on_unparseable_state(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "toolchain.json").write_text("not json", encoding="utf-8")
+    assert digest.read_static_dir_from_state(tmp_path) == digest.FALLBACK_STATIC_DIR

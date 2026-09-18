@@ -159,6 +159,27 @@ def test_image_placements_point_at_static_images_slug() -> None:
     assert converted.images[0].url == "/images/my-post/pic.png"
 
 
+def test_static_dir_argument_replaces_the_hardcoded_static_prefix() -> None:
+    """ADR 017: `staticdir` (from a site's own `hugo config`) replaces the
+    hardcoded `static` prefix when a caller passes one; the public `url` a
+    reference rewrites to is unaffected, since Hugo publishes everything
+    under its static directory to the site root regardless of its name."""
+    draft = _draft(
+        images=[DraftImage(image_id="img4", filename="pic.png", role="inline", source_ref=None)]
+    )
+    converted = convert.convert(draft, "assets")
+    assert converted.images[0].site_path == "assets/images/my-post/pic.png"
+    assert converted.images[0].url == "/images/my-post/pic.png"
+
+
+def test_static_dir_defaults_to_static_when_not_passed() -> None:
+    draft = _draft(
+        images=[DraftImage(image_id="img4", filename="pic.png", role="inline", source_ref=None)]
+    )
+    converted = convert.convert(draft, None)
+    assert converted.images[0].site_path == "static/images/my-post/pic.png"
+
+
 def test_image_dir_follows_url_not_dated_slug() -> None:
     """ADR 015: the image directory is the URL's last path segment, not
     draft.slug, when the two differ (an imported post whose digest slug

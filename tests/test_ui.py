@@ -104,7 +104,7 @@ def test_submissions_list_and_detail_render(client: TestClient, agent_token: str
     assert detail.status_code == 200
     assert "some notes" in detail.text
     assert "https://example.com" in detail.text
-    assert "Create draft from this submission" in detail.text
+    assert "Create post from this submission" in detail.text
     assert "Discard" in detail.text
     assert_no_token_leak(detail, agent_token)
 

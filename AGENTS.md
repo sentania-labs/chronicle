@@ -225,6 +225,31 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   `exc.code == "stale_base_version"` before treating a 409 as the
   conflict-view case, because `publish_pr_open` is also a 409 with no
   meaningful diff to show. A round C5 review found both gaps live.
+- **Digest lands a published working record directly, and "Drafts" reads
+  "Posts" in the UI.** As of ADR 017, `Store.apply_digest`'s
+  `_create_published_drafts_from_digest` reuses `_fill_from_post` to create
+  a `Draft` at `published`, with a `published` dict populated from what
+  digest itself observed, for any post on main no existing draft already
+  tracks by slug or by file path; a record already tracking that slug or
+  path (drafting, published, anything) is left alone, which is what makes
+  a second digest of the same post, and the `post_on_main_without_published_draft`
+  reconcile flag, both stay quiet. This method must never call a `@locked`
+  `Store` method (`list_drafts`, `create_draft`, `resolve_flag`, and so on):
+  it always runs from inside `apply_digest`'s own lock, and the store's
+  lock is not reentrant, so a `list_drafts()` call here deadlocks the
+  process rather than raising (found live running this round's own test
+  suite). The "Drafts" to "Posts" rename this ADR also makes is UI copy
+  only (`ui_templates.py`, `admin_templates.py`); `data/repo/drafts/`, the
+  `Draft` model, and every route path are unchanged.
+- **`convert.convert`'s `static_dir` argument is read from the last
+  digest, never from a fresh `hugo config` call.** ADR 017's `staticdir`
+  wiring added an optional second argument (site-relative, `static` when
+  omitted); `publisher.py`, `builder/runner.py`, and `cli.py`'s
+  `convert-dry-run` each call `digest.read_static_dir_from_state(store.
+  data_dir)` right before converting, which reads `data/state/toolchain.
+  json`'s `conventions.staticdir` (falling back the same way digest itself
+  does if no digest has run yet or the file does not parse) rather than
+  invoking Hugo again for a value the last digest already derived.
 
 ## Round C4 status
 

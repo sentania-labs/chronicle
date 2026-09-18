@@ -12,7 +12,7 @@ from chronicle.api import digest as digest_mod
 from chronicle.api import publisher, reconcile, watcher
 from chronicle.api.admin_deps import AdminServices
 from chronicle.api.errors import ApiError
-from chronicle.api.models import Draft, Post
+from chronicle.api.models import Draft, Post, ReconcileFlag
 from chronicle.api.store import Store
 from tests.fakes import FakeRepoOps
 
@@ -104,15 +104,34 @@ def _init_site(store: Store) -> None:
     _git(store.site_dir, "commit", "-m", "init")
 
 
-def test_post_on_main_without_published_draft(store: Store) -> None:
+def test_post_on_main_without_published_draft_is_never_raised_for_a_digested_post(
+    store: Store,
+) -> None:
+    """The regression ADR 017 fixes: digest itself lands a published working
+    record for a post it finds on main, so `post_on_main_without_published_draft`'s
+    own condition (a post with nothing tracking it) is never true, and stays
+    that way on a later reconcile pass, without Scott clicking anything."""
     _init_site(store)
     _write_post(store.site_dir, "content/posts/orphan.md", title="Orphan")
+
     summary = reconcile.run(store, _ADMIN)
     flags = store.list_flags()
-    assert any(
+    assert not any(
         f.type == "post_on_main_without_published_draft" and f.slug == "orphan" for f in flags
     )
-    assert summary.flags_created >= 1
+    assert summary.flags_created == 0
+    tracked = [d for d in store.list_drafts() if d.slug == "orphan"]
+    assert len(tracked) == 1
+    assert tracked[0].status == "published"
+    assert tracked[0].published is not None
+    assert tracked[0].published["post_blob_sha"]
+
+    # A second reconcile pass an hour later must not re-raise it either.
+    reconcile.run(store, _ADMIN)
+    flags_again = store.list_flags()
+    assert not any(
+        f.type == "post_on_main_without_published_draft" and f.slug == "orphan" for f in flags_again
+    )
 
 
 def test_draft_published_missing_on_main(store: Store) -> None:
@@ -197,23 +216,58 @@ def test_resolve_mark_unpublished(store: Store) -> None:
     assert store.get_draft(draft.id).status == "unpublished"
 
 
+def _fabricate_post_on_main_without_published_draft_flag(store: Store, slug: str) -> ReconcileFlag:
+    """A `post_on_main_without_published_draft` flag, raised directly rather
+    than through `reconcile.run`.
+
+    Since ADR 017, digest itself lands a published working record for any
+    post it can actually read from main, so `reconcile.run` only raises this
+    flag type when digest's own attempt failed (an image_dir collision,
+    most plausibly) or, for an instance already carrying flags from before
+    this round, one that predates the fix entirely. Fabricating the flag
+    directly, the way an already-existing flag on the live instance looks,
+    is what lets these tests still exercise `resolve_flag`'s generic
+    mechanics for this flag type without needing to reproduce a live
+    digest failure.
+    """
+    return store.create_flag(
+        "post_on_main_without_published_draft",
+        slug=slug,
+        draft_id=None,
+        detail=f"post {slug!r} is on main with no published draft tracking it",
+        actor="test",
+    )
+
+
 def test_resolve_import_as_draft(store: Store) -> None:
+    """A pre-existing flag (from before ADR 017, or from a digest attempt
+    that failed) resolved by hand once the post's file is actually there."""
     _init_site(store)
+    store.apply_digest(
+        "test",
+        [
+            Post(
+                slug="orphan",
+                path="content/posts/orphan.md",
+                title="Orphan",
+                date="2026-01-01",
+                sha="abc",
+            )
+        ],
+    )
+    flag = _fabricate_post_on_main_without_published_draft_flag(store, "orphan")
     _write_post(store.site_dir, "content/posts/orphan.md", title="Orphan")
-    reconcile.run(store, _ADMIN)
-    flag = next(f for f in store.list_flags() if f.type == "post_on_main_without_published_draft")
 
     store.resolve_flag(flag.id, "import_as_draft", "admin")
 
     imported = [d for d in store.list_drafts() if d.slug == "orphan"]
     assert len(imported) == 1
+    assert imported[0].status == "drafting"
 
 
 def test_resolve_ignore_emits_event_and_leaves_state_alone(store: Store) -> None:
     _init_site(store)
-    _write_post(store.site_dir, "content/posts/orphan.md", title="Orphan")
-    reconcile.run(store, _ADMIN)
-    flag = next(f for f in store.list_flags() if f.type == "post_on_main_without_published_draft")
+    flag = _fabricate_post_on_main_without_published_draft_flag(store, "orphan")
 
     events_before, cursor = store.events_since(0)
     resolved = store.resolve_flag(flag.id, "ignore", "admin")
@@ -226,9 +280,7 @@ def test_resolve_ignore_emits_event_and_leaves_state_alone(store: Store) -> None
 
 def test_resolving_an_already_resolved_flag_is_rejected(store: Store) -> None:
     _init_site(store)
-    _write_post(store.site_dir, "content/posts/orphan.md", title="Orphan")
-    reconcile.run(store, _ADMIN)
-    flag = next(f for f in store.list_flags() if f.type == "post_on_main_without_published_draft")
+    flag = _fabricate_post_on_main_without_published_draft_flag(store, "orphan")
     store.resolve_flag(flag.id, "ignore", "admin")
 
     with pytest.raises(ApiError):
@@ -298,9 +350,66 @@ def test_ignoring_content_drift_records_the_acknowledged_sha_and_stops_reflaggin
 
 
 def test_reconcile_does_not_duplicate_flags_across_runs(store: Store) -> None:
+    """`_already_flagged`'s dedup is generic across flag types; exercised
+    here through `post_removed_without_unpublish`, since ADR 017's own
+    digest-creates-the-record fix makes `post_on_main_without_published_draft`
+    the one flag type that no longer fires for a post digest can actually
+    read (see the dedicated regression test above)."""
     _init_site(store)
-    _write_post(store.site_dir, "content/posts/orphan.md", title="Orphan")
+    store.apply_digest(
+        "test",
+        [Post(slug="gone", path="content/posts/gone.md", title="Gone", date="2026-01-01", sha="a")],
+    )
     reconcile.run(store, _ADMIN)
     reconcile.run(store, _ADMIN)
-    flags = [f for f in store.list_flags() if f.type == "post_on_main_without_published_draft"]
+    flags = [f for f in store.list_flags() if f.type == "post_removed_without_unpublish"]
     assert len(flags) == 1
+
+
+def test_content_drift_compares_against_a_digest_created_post_blob_sha(store: Store) -> None:
+    """A working record digest landed directly at `published` (ADR 017)
+    gives `content_drift` a real `post_blob_sha` to diff against, the same
+    as a record a publish run created."""
+    _init_site(store)
+    _write_post(store.site_dir, "content/posts/hello.md", title="Hello")
+    reconcile.run(store, _ADMIN)
+    draft = next(d for d in store.list_drafts() if d.slug == "hello")
+    assert draft.published is not None
+    assert draft.published["post_blob_sha"]
+
+    _write_post(store.site_dir, "content/posts/hello.md", title="Hello", body="Edited on GitHub.\n")
+    version_before = store.get_draft(draft.id).version_no
+
+    reconcile.run(store, _ADMIN)
+
+    flags = store.list_flags()
+    assert any(f.type == "content_drift" and f.draft_id == draft.id for f in flags)
+    updated = store.get_draft(draft.id)
+    assert updated.version_no == version_before + 1
+    assert updated.status == "published"
+
+
+def test_publisher_treats_a_digest_created_record_as_an_update(store: Store) -> None:
+    """`draft.published` set directly by digest (ADR 017) is exactly what
+    `publisher.py` already checks to pick `update` over `publish`; this
+    confirms that check fires for a digest-created record too, not only one
+    a publish run created."""
+    _init_site(store)
+    _write_post(store.site_dir, "content/posts/hello.md", title="Hello")
+    reconcile.run(store, _ADMIN)
+    draft = next(d for d in store.list_drafts() if d.slug == "hello")
+    assert draft.published is not None
+
+    store.save_draft(
+        draft.id, "scott", draft.version_no, {**draft.frontmatter, "title": "Hello v2"}, "New.\n"
+    )
+    store.act_on_draft(draft.id, "submit", "scott", True)
+    _, run = store.act_on_draft(draft.id, "approve", "scott", True)
+    assert run is not None
+
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+
+    commit_messages = [commit["message"] for commit in ops.commits.values() if "message" in commit]
+    assert any(msg.startswith("chronicle: update hello") for msg in commit_messages)
+    assert not any(msg.startswith("chronicle: publish hello") for msg in commit_messages)

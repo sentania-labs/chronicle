@@ -220,6 +220,30 @@ def read_hugo_conventions(site_dir: Path, environment: str | None = None) -> Hug
     )
 
 
+TOOLCHAIN_STATE_PATH = ("state", "toolchain.json")
+
+
+def read_static_dir_from_state(data_dir: Path) -> str:
+    """The `staticdir` the last digest's `hugo config` read, from `data/state/toolchain.json`.
+
+    Publish and preview both need this (ADR 017's staticdir wiring), but
+    neither runs a fresh `hugo config` call of its own: they read whatever
+    the last digest already wrote, the same way the builder's own
+    `site_hugo_version` reads that file's `hugo_version` rather than
+    re-parsing main's workflow on every build. Falls back to
+    `FALLBACK_STATIC_DIR` on anything short of a clean read: no digest has
+    ever run yet, the file does not parse, or it predates this field.
+    """
+    path = data_dir.joinpath(*TOOLCHAIN_STATE_PATH)
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return FALLBACK_STATIC_DIR
+    conventions = loaded.get("conventions") if isinstance(loaded, dict) else None
+    static_dir = conventions.get("staticdir") if isinstance(conventions, dict) else None
+    return static_dir if isinstance(static_dir, str) and static_dir.strip() else FALLBACK_STATIC_DIR
+
+
 def unconfigured_taxonomy_keys(conventions: HugoConventions) -> tuple[str, ...]:
     """Which of Chronicle's own taxonomy frontmatter keys this site's Hugo
     config does not actually define as a taxonomy.

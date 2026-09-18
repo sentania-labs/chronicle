@@ -257,7 +257,7 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
 <table><tr><th>type</th><th>detail</th><th>resolve</th></tr>{flag_rows}</table>
 <h2>Submissions by status</h2>
 <table>{submission_rows or "<tr><td colspan=2>none</td></tr>"}</table>
-<h2>Drafts by status</h2>
+<h2>Posts by status</h2>
 <table>{draft_rows or "<tr><td colspan=2>none</td></tr>"}</table>
 <h2>Disk use</h2>
 <table>{disk_rows}</table>
