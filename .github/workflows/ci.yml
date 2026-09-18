@@ -1,5 +1,5 @@
 # Placement, decided per the lab's CI rule rather than by habit: this
-# repository is private, but every job here either needs a Docker daemon
+# repository is public, but every job here either needs a Docker daemon
 # (the three image builds, compose smoke) or needs nothing special (lint,
 # test), so nothing uses `runs-on: lab`. Deploying Chronicle is
 # lab-deployment's job, on the far side of publication.

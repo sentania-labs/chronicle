@@ -68,6 +68,22 @@ cosign verify ghcr.io/sentania-labs/chronicle-api:vX.Y.Z \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
+Check that the package is actually public, for every target you just
+published, not only the ones you already knew about:
+
+```bash
+curl -sf https://ghcr.io/token?scope="repository:sentania-labs/chronicle-api:pull" \
+  | jq -r .token \
+  | xargs -I{} curl -sf -H "Authorization: Bearer {}" \
+    https://ghcr.io/v2/sentania-labs/chronicle-api/tags/list
+```
+
+A 200 with the new tag listed, fetched with no login, means the package is
+public. A 401 or 403 means it is not, and the fix is the one-time manual
+flip on GitHub described below, never a workflow change. A brand-new image
+target needs this flip once, the first time it is ever published; an
+existing, already-public target does not need it again.
+
 Two traps make hand verification look broken when it is not:
 
 **Verify against the index digest, not a per-architecture child digest.**
@@ -111,13 +127,29 @@ time to show up in this aggregate listing at all, paginated or not; when a
 package is missing here but the tag-and-digest lookup above resolves
 cleanly, trust the direct lookup over the listing.
 
-Package visibility on ghcr is independent of the repository's visibility.
-A `ghcr.io/sentania-labs/chronicle-*` package stays private until Scott
-flips it by hand on GitHub; nothing in the release workflow changes it.
-While a package is private, both `docker manifest inspect` and
-`cosign verify` need `docker login ghcr.io` first, with a token carrying
-`read:packages`. Once a package is public, neither call needs a login.
-Check the package's current visibility before assuming either way.
+Package visibility on ghcr is independent of the repository's visibility,
+and it does not inherit from it, ever. The three current packages
+(`chronicle-api`, `chronicle-builder`, `chronicle-preview`) were flipped to
+public by hand on 2026-09-18, so `docker manifest inspect` and
+`cosign verify` against any of their existing tags need no login today. That
+flip does not generalize: any newly named package (a fourth image target, a
+renamed one) still comes up private on its first publish and needs the same
+one-time manual flip. Nothing in the release workflow sets it, and nothing
+can, because GitHub exposes no REST endpoint for container package
+visibility; it is a manual, owner-only action in the GitHub UI. The
+`org.opencontainers.image.source` label already on every image in
+`Dockerfile` links the package to this repository, and that linkage does not
+touch visibility either, so do not mistake a linked-but-private package for
+a misconfigured label. Nothing alerts you when a package is left private:
+the publish job builds, signs, and pushes successfully either way, so a
+private package looks identical to a public one from CI's own output. The
+only way to know is to check, which is why the release procedure above
+includes it as an explicit step, not just this paragraph. While a package
+is private, both
+`docker manifest inspect` and `cosign verify` need `docker login ghcr.io`
+first, with a token carrying `read:packages`. Once a package is public,
+neither call needs a login. Check the package's current visibility before
+assuming either way.
 
 ## House style
 
