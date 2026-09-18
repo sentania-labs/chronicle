@@ -11,6 +11,7 @@ from html import escape
 from typing import Any
 
 from .tokens import UI_TOKEN_NAME
+from .ui_time import local_time
 
 STYLE = """
 body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; color: #1a1a1a; }
@@ -27,6 +28,19 @@ input[type=text], input[type=password] { width: 100%; padding: 0.4rem; box-sizin
 button { padding: 0.5rem 1rem; margin-top: 0.6rem; }
 nav a { margin-right: 1rem; }
 """
+
+
+def _stamp(value: object, fallback: str) -> str:
+    """A stamp as local clock time, or `fallback` when there is no value.
+
+    The fallback word ("never", "no", "?") says why nothing is shown, which
+    `local_time`'s own `-` (unreadable stamp) cannot, so it is only converted
+    when a value is actually present. A bare `YYYY-MM-DD` value stays a date
+    on purpose: `local_time` leaves it unshifted because a date has no
+    instant, and shifting it west of UTC would show the day before. Do not
+    "fix" that into a clock time.
+    """
+    return local_time(value) if value else fallback
 
 
 def page(title: str, body: str, notice: str | None = None, notice_kind: str = "error") -> str:
@@ -53,7 +67,8 @@ def nav() -> str:
 def backup_page(
     *, last_backup: str | None, notice: str | None = None, notice_kind: str = "error"
 ) -> str:
-    last_html = escape(last_backup) if last_backup else "never"
+    # A bare YYYY-MM-DD stays a date (no instant to shift); see `_stamp`.
+    last_html = escape(_stamp(last_backup, "never"))
     body = f"""
 {nav()}
 <p>Last backup created: {last_html}</p>
@@ -82,9 +97,11 @@ def backup_confirm_page(*, token: str, manifest: dict[str, Any]) -> str:
         f"<tr><td>{escape(str(key))}</td><td>{escape(str(value))}</td></tr>"
         for key, value in sorted(counts.items())
     )
+    # A bare YYYY-MM-DD stays a date (no instant to shift); see `_stamp`.
+    created = escape(_stamp(manifest.get("created_at"), "?"))
     body = f"""
 {nav()}
-<p>Bundle created {escape(str(manifest.get("created_at", "?")))} by Chronicle
+<p>Bundle created {created} by Chronicle
 {escape(str(manifest.get("chronicle_version", "?")))}.</p>
 <table><tr><th>record</th><th>count</th></tr>{rows}</table>
 <p><strong>This replaces the current repo, images, and credential store.</strong>
@@ -149,7 +166,12 @@ def change_password_page(notice: str | None = None, notice_kind: str = "error") 
 def _heartbeat_rows(row: Any, heartbeat: dict[str, Any] | None, name: str) -> str:
     if not heartbeat:
         return f"<tr><td colspan=2>no heartbeat yet; the {name} has not completed a loop</td></tr>"
-    return "".join(row(key, value) for key, value in heartbeat.items())
+    # Every `*_at` key is an ISO stamp a human reads (last_loop_at, last_run_at).
+    # A missing value renders as it did before; a bare date stays a date.
+    return "".join(
+        row(key, local_time(value) if key.endswith("_at") and value else value)
+        for key, value in heartbeat.items()
+    )
 
 
 def _flag_rows(row: Any, flags: list[dict[str, Any]]) -> str:
@@ -212,11 +234,19 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
             conventions_rows += row("fallback reason", conventions["fallback_reason"])
     else:
         conventions_rows = row("conventions", "no digest has run yet")
+    # The state sentence embeds a raw ISO stamp that /readyz must keep, so the
+    # stamp travels separately and the page rebuilds the same wording from it.
+    verified_at = status.get("github_app_verified_at")
+    app_state = (
+        f"verified at {local_time(verified_at)}" if verified_at else status["github_app_state"]
+    )
+    # last backup and last digest go through `_stamp`: the words "never" survive
+    # and a bare YYYY-MM-DD stays a date (no instant to shift).
     body = f"""
 {nav()}
 <h2>GitHub App</h2>
 <table>
-{row("state", status["github_app_state"])}
+{row("state", app_state)}
 {row("repo", status["github_repo"] or "none chosen")}
 {row("default branch", status["github_default_branch"] or "-")}
 </table>
@@ -225,12 +255,12 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
 </form>
 <h2>Backup</h2>
 <table>
-{row("last backup", status["last_backup_at"] or "never")}
+{row("last backup", _stamp(status["last_backup_at"], "never"))}
 </table>
 <p><a href="/admin/backup">Backup and restore</a></p>
 <h2>Digest</h2>
 <table>
-{row("last digest", status["last_digest_at"] or "never")}
+{row("last digest", _stamp(status["last_digest_at"], "never"))}
 {row("post count", status["post_count"])}
 {row("hugo version (site)", status["toolchain"]["hugo_version"])}
 {row("hugo version (builder)", status["toolchain"]["builder_hugo_version"])}
@@ -374,9 +404,11 @@ def tokens_page(
             '<button type="submit">Revoke</button></form>'
         )
 
+    # A bare YYYY-MM-DD stays a date (no instant to shift); see `_stamp`.
     rows = "".join(
-        f"<tr><td>{escape(t['name'])}</td><td>{escape(t['created_at'])}</td>"
-        f"<td>{escape(t['last_used_at'] or 'never')}</td><td>{escape(t['revoked_at'] or 'no')}</td>"
+        f"<tr><td>{escape(t['name'])}</td><td>{escape(_stamp(t['created_at'], '?'))}</td>"
+        f"<td>{escape(_stamp(t['last_used_at'], 'never'))}</td>"
+        f"<td>{escape(_stamp(t['revoked_at'], 'no'))}</td>"
         f"<td>{actions(t['name'])}</td></tr>"
         for t in tokens
     )
