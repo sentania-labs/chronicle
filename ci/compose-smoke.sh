@@ -5,9 +5,10 @@
 # shape that exposed the /data/preview permission-denied defect: `down -v`
 # then `up -d --build`, so `data` and `preview` are re-initialised from the
 # images (Dockerfile's chown), not inherited from a previous run. Once the
-# stack is up it digests a tiny fixture git repo built in a temp dir,
-# imports the one post it finds with `from_post`, claims a preview, and
-# confirms the built page answers 200 through the preview container.
+# stack is up it digests a tiny fixture git repo built in a temp dir, finds
+# the published record digest already recorded for that post (ADR 017),
+# revises it to claim a preview, and confirms the built page answers 200
+# through the preview container.
 #
 # Usage: make compose-smoke
 set -euo pipefail
@@ -112,14 +113,47 @@ raise SystemExit(0 if any(p["slug"] == "hello-world" for p in posts) else 1)' "$
     || fail "digest did not record the fixture post hello-world"
 ok "digest recorded hello-world"
 
-step "import the post and claim a preview"
-created="$(mktemp -p "$fixture_dir")"
-code="$(curl -sS -o "$created" -w '%{http_code}' -X POST "$API/v1/drafts" \
-    "${AUTH[@]}" -H 'Content-Type: application/json' -d '{"from_post":"hello-world"}')"
-[ "$code" = "201" ] || { cat "$created"; fail "draft import returned $code, expected 201"; }
-draft_id="$(field "$created" id)"
-ok "imported draft $draft_id from hello-world"
+step "find the published record digest created for hello-world"
+# ADR 017: digest lands a published post as a working record directly, so
+# there is already a draft at status "published" for hello-world here.
+# Importing it again with from_post would collide (409 image_dir_collision)
+# with the record digest itself just created, so this proves the same
+# record digest wrote rather than a duplicate import of it.
+published="$(mktemp -p "$fixture_dir")"
+code="$(curl -sS -o "$published" -w '%{http_code}' "${AUTH[@]}" "$API/v1/drafts?status=published")"
+[ "$code" = "200" ] || { cat "$published"; fail "listing published drafts returned $code, expected 200"; }
+draft_id="$(python3 -c 'import json,sys
+drafts = json.load(open(sys.argv[1]))["drafts"]
+match = next((d for d in drafts if d["slug"] == "hello-world"), None)
+print(match["id"] if match else "")' "$published")"
+[ -n "$draft_id" ] || fail "digest did not leave a published draft for hello-world"
+ok "found published draft $draft_id for hello-world"
 
+step "revise the published record so it can be previewed"
+# The preview action only exists from drafting/in_review/previewed, never
+# from published (chronicle/api/transitions.py), so a save is the same step
+# a real edit would take: it moves the record to drafting (the `revise`
+# transition) without touching what digest already recorded on `published`.
+draft="$(mktemp -p "$fixture_dir")"
+curl -sS -o "$draft" "${AUTH[@]}" "$API/v1/drafts/$draft_id"
+base_version="$(field "$draft" version_no)"
+save_body="$(python3 -c 'import json,sys
+draft = json.load(open(sys.argv[1]))
+print(json.dumps({
+    "base_version": draft["version_no"],
+    "frontmatter": draft["frontmatter"],
+    "body": draft["body"],
+    "message": "smoke: revise to claim a preview",
+}))' "$draft")"
+saved="$(mktemp -p "$fixture_dir")"
+code="$(curl -sS -o "$saved" -w '%{http_code}' -X PUT "$API/v1/drafts/$draft_id" \
+    "${AUTH[@]}" -H 'Content-Type: application/json' -d "$save_body")"
+[ "$code" = "200" ] || { cat "$saved"; fail "revising the published draft returned $code, expected 200"; }
+status="$(field "$saved" status)"
+[ "$status" = "drafting" ] || fail "revise left status $status, expected drafting"
+ok "revised draft $draft_id ($base_version -> drafting)"
+
+step "claim a preview"
 action="$(mktemp -p "$fixture_dir")"
 code="$(curl -sS -o "$action" -w '%{http_code}' -X POST \
     "$API/v1/drafts/$draft_id/actions/preview" "${AUTH[@]}")"

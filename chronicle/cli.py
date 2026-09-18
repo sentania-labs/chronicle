@@ -18,6 +18,7 @@ from pathlib import Path
 
 from . import backup as backup_mod
 from .api import convert
+from .api import digest as digest_mod
 from .api.admin_deps import AdminServices
 from .api.digest_runner import DigestNotConfigured
 from .api.digest_runner import run as run_digest
@@ -56,6 +57,7 @@ def _digest(args: argparse.Namespace) -> int:
     print(f"created: {summary.created}")
     print(f"updated: {summary.updated}")
     print(f"unchanged: {summary.unchanged}")
+    print(f"published as working records: {summary.published_created}")
     print(f"hugo version: {summary.hugo_version}")
     print(f"theme submodules: {summary.submodule_count}")
     return 0
@@ -93,7 +95,9 @@ def _convert_dry_run(args: argparse.Namespace) -> int:
     store = Store.open(_data_dir(args))
     try:
         draft = store.get_draft(args.draft_id)
-        converted = convert.convert(draft)
+        static_dir = digest_mod.read_static_dir_from_state(store.data_dir)
+        content_dir = digest_mod.read_content_dir_from_state(store.data_dir)
+        converted = convert.convert(draft, static_dir, content_dir)
     finally:
         store.close()
     print(f"post_path: {converted.post_path}")

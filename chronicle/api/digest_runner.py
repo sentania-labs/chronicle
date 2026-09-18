@@ -28,6 +28,9 @@ class DigestSummary:
     created: int
     updated: int
     unchanged: int
+    # How many posts this run landed a working record for directly at
+    # `published` (ADR 017), because nothing already tracked their slug.
+    published_created: int
     hugo_version: str
     submodule_count: int
     started_at: str
@@ -38,6 +41,7 @@ class DigestSummary:
             "created": self.created,
             "updated": self.updated,
             "unchanged": self.unchanged,
+            "published_created": self.published_created,
             "hugo_version": self.hugo_version,
             "submodule_count": self.submodule_count,
             "started_at": self.started_at,
@@ -106,16 +110,21 @@ def refresh_from_target(
     """
     token = target.token_provider() if target.token_provider else None
     digest_mod.clone_or_update(store.site_dir, target.repo_url, target.default_branch, token=token)
-    discovered = digest_mod.discover_posts(store.site_dir)
+    conventions = digest_mod.read_hugo_conventions(store.site_dir)
+    discovered = digest_mod.discover_posts(store.site_dir, conventions)
     posts = [
         Post(slug=item.slug, path=item.path, title=item.title, date=item.date, sha=item.sha)
         for item in discovered
     ]
-    store.apply_digest(actor, posts)
+    store.apply_digest(actor, posts, conventions)
     if admin is not None:
         toolchain = digest_mod.parse_toolchain(store.site_dir)
         admin.write_toolchain(
-            {"hugo_version": toolchain.hugo_version, "submodules": toolchain.submodules}
+            {
+                "hugo_version": toolchain.hugo_version,
+                "submodules": toolchain.submodules,
+                "conventions": conventions.as_dict(),
+            }
         )
 
 
@@ -123,12 +132,13 @@ def run(store: Store, actor: str, admin: AdminServices | None = None) -> DigestS
     started_at = now_stamp()
     repo_url, branch, token = _clone_url(admin)
     digest_mod.clone_or_update(store.site_dir, repo_url, branch, token=token)
-    discovered = digest_mod.discover_posts(store.site_dir)
+    conventions = digest_mod.read_hugo_conventions(store.site_dir)
+    discovered = digest_mod.discover_posts(store.site_dir, conventions)
     posts = [
         Post(slug=item.slug, path=item.path, title=item.title, date=item.date, sha=item.sha)
         for item in discovered
     ]
-    counts = store.apply_digest(actor, posts)
+    counts = store.apply_digest(actor, posts, conventions)
     toolchain = digest_mod.parse_toolchain(store.site_dir)
 
     finished_at = now_stamp()
@@ -136,6 +146,7 @@ def run(store: Store, actor: str, admin: AdminServices | None = None) -> DigestS
         created=counts["created"],
         updated=counts["updated"],
         unchanged=counts["unchanged"],
+        published_created=counts["published_created"],
         hugo_version=toolchain.hugo_version,
         submodule_count=len(toolchain.submodules),
         started_at=started_at,
@@ -143,7 +154,11 @@ def run(store: Store, actor: str, admin: AdminServices | None = None) -> DigestS
     )
     if admin is not None:
         admin.write_toolchain(
-            {"hugo_version": toolchain.hugo_version, "submodules": toolchain.submodules}
+            {
+                "hugo_version": toolchain.hugo_version,
+                "submodules": toolchain.submodules,
+                "conventions": conventions.as_dict(),
+            }
         )
         admin.write_digest_status(summary.as_dict())
     return summary

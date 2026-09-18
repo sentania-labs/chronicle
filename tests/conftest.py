@@ -8,6 +8,7 @@ test.
 from __future__ import annotations
 
 import io
+import shutil
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -19,6 +20,14 @@ from chronicle.api.deps import Services
 from chronicle.api.main import DATA_DIR_ENV, create_app
 from chronicle.api.store import Store
 from chronicle.api.tokens import UI_TOKEN_FILE_NAME
+
+# ADR 017's real-hugo-config tests need the actual binary (the api and
+# builder images both install it; CI's `test` job now does too). A
+# contributor without Hugo on PATH gets a clear skip here rather than a
+# confusing assertion failure against the fallback path.
+requires_hugo = pytest.mark.skipif(
+    shutil.which("hugo") is None, reason="requires a real hugo binary on PATH"
+)
 
 
 @pytest.fixture

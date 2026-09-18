@@ -66,6 +66,55 @@ def test_imported_draft_path_outside_posts_dir_is_not_trusted() -> None:
     assert converted.post_path == "content/posts/2024-03-03-my-post.md"
 
 
+def test_digested_record_outside_content_posts_republishes_as_update_not_duplicate() -> None:
+    """Issue #18: a site whose real `contentdir` is not `content/posts` (a
+    post-like section that moved elsewhere) must still have a digest-created
+    record's republish land on the file it already came from, not a new one
+    under the hardcoded `content/posts`."""
+    draft = _draft(
+        frontmatter={"title": "My Post", "date": "2024-03-03", "url": "/2024/03/03/my-post/"},
+        source_post={"slug": "my-post", "path": "archive/my-post.md", "sha": "abc"},
+    )
+    converted = convert.convert(draft, None, "archive")
+    assert converted.post_path == "archive/my-post.md"
+
+
+def test_content_dir_with_trailing_slash_still_matches_source_path() -> None:
+    """`hugo config` can report a `contentDir` written with a trailing slash
+    in `hugo.toml`; the prefix match must not treat that as a different
+    directory and duplicate the post."""
+    draft = _draft(
+        frontmatter={"title": "My Post", "date": "2024-03-03", "url": "/2024/03/03/my-post/"},
+        source_post={"slug": "my-post", "path": "archive/my-post.md", "sha": "abc"},
+    )
+    converted = convert.convert(draft, None, "archive/")
+    assert converted.post_path == "archive/my-post.md"
+
+
+def test_traversal_outside_a_non_default_content_dir_is_not_trusted() -> None:
+    """The `_is_safe_relative` guard must still hold when `content_dir` is a
+    derived value rather than the hardcoded `content/posts`."""
+    draft = _draft(
+        frontmatter={"title": "My Post", "date": "2024-03-03"},
+        source_post={"slug": "x", "path": "../../etc/passwd", "sha": "abc"},
+    )
+    converted = convert.convert(draft, None, "archive")
+    assert converted.post_path == "content/posts/2024-03-03-my-post.md"
+
+
+def test_digested_record_outside_content_posts_with_no_content_dir_still_duplicates() -> None:
+    """The pre-fix behaviour, kept as a control: with no `content_dir`
+    supplied (today's fallback, no digest state yet) a source path outside
+    `content/posts` is still not trusted, and convert falls through to a
+    brand new path."""
+    draft = _draft(
+        frontmatter={"title": "My Post", "date": "2024-03-03", "url": "/2024/03/03/my-post/"},
+        source_post={"slug": "my-post", "path": "archive/my-post.md", "sha": "abc"},
+    )
+    converted = convert.convert(draft)
+    assert converted.post_path == "content/posts/2024-03-03-my-post.md"
+
+
 def test_missing_slug_raises() -> None:
     draft = _draft(slug=None)
     with pytest.raises(convert.ConversionError):
@@ -157,6 +206,27 @@ def test_image_placements_point_at_static_images_slug() -> None:
     converted = convert.convert(draft)
     assert converted.images[0].site_path == "static/images/my-post/pic.png"
     assert converted.images[0].url == "/images/my-post/pic.png"
+
+
+def test_static_dir_argument_replaces_the_hardcoded_static_prefix() -> None:
+    """ADR 017: `staticdir` (from a site's own `hugo config`) replaces the
+    hardcoded `static` prefix when a caller passes one; the public `url` a
+    reference rewrites to is unaffected, since Hugo publishes everything
+    under its static directory to the site root regardless of its name."""
+    draft = _draft(
+        images=[DraftImage(image_id="img4", filename="pic.png", role="inline", source_ref=None)]
+    )
+    converted = convert.convert(draft, "assets")
+    assert converted.images[0].site_path == "assets/images/my-post/pic.png"
+    assert converted.images[0].url == "/images/my-post/pic.png"
+
+
+def test_static_dir_defaults_to_static_when_not_passed() -> None:
+    draft = _draft(
+        images=[DraftImage(image_id="img4", filename="pic.png", role="inline", source_ref=None)]
+    )
+    converted = convert.convert(draft, None)
+    assert converted.images[0].site_path == "static/images/my-post/pic.png"
 
 
 def test_image_dir_follows_url_not_dated_slug() -> None:

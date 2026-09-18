@@ -17,6 +17,7 @@ import difflib
 import fcntl
 import functools
 import json
+import logging
 import re
 import threading
 import uuid
@@ -88,6 +89,8 @@ FRONTMATTER_STRING_KEYS = (
     "shareImage",
 )
 FRONTMATTER_STRING_LIST_KEYS = ("tags", "categories")
+
+log = logging.getLogger("chronicle.api.store")
 
 
 def new_id() -> str:
@@ -1263,7 +1266,12 @@ class Store:
         return self.index.run_counts(kind)
 
     @locked
-    def apply_digest(self, actor: str, discovered: list[Post]) -> dict[str, int]:
+    def apply_digest(
+        self,
+        actor: str,
+        discovered: list[Post],
+        conventions: digest_mod.HugoConventions | None = None,
+    ) -> dict[str, int]:
         """Write post records for a digest of main, one commit for the whole run.
 
         Idempotent by construction: a post record is only written when its
@@ -1280,11 +1288,13 @@ class Store:
         created = 0
         updated = 0
         unchanged = 0
+        valid_posts: list[Post] = []
         for post in discovered:
             if not is_valid_slug(post.slug):
                 # A slug this unsafe would land outside posts_dir/*.json if
                 # written; refuse the one record rather than the whole digest.
                 continue
+            valid_posts.append(post)
             path = self.posts_dir / f"{post.slug}.json"
             payload = post.model_dump(mode="json")
             if path.exists():
@@ -1307,7 +1317,121 @@ class Store:
             self._commit(
                 f"digest: {created} created, {updated} updated, {unchanged} unchanged", actor
             )
-        return {"created": created, "updated": updated, "unchanged": unchanged}
+
+        published_created = self._create_published_drafts_from_digest(
+            actor, valid_posts, conventions
+        )
+        return {
+            "created": created,
+            "updated": updated,
+            "unchanged": unchanged,
+            "published_created": published_created,
+        }
+
+    def _create_published_drafts_from_digest(
+        self,
+        actor: str,
+        discovered: list[Post],
+        conventions: digest_mod.HugoConventions | None = None,
+    ) -> int:
+        """Land a working record at status `published` for a post digest just
+        saw, when nothing already tracks that slug (ADR 017).
+
+        This is what kills the `post_on_main_without_published_draft` reconcile
+        loop: digest itself puts a PUBLISHED record in place, so the flag's own
+        condition (a post with no published record tracking it) is false from
+        the moment digest has seen the post, with nobody clicking "Import as
+        draft". Reuses `_fill_from_post` (frontmatter allowlist with warnings,
+        body, images, `source_post`) rather than a parallel importer, then
+        lands the result at `published` with a `published` dict populated from
+        what digest itself observed instead of from a publish run.
+
+        A slug already tracked by a Draft, at ANY status, is left alone: a
+        record still `drafting` (or anywhere else) is Scott mid-edit and must
+        never be dragged back to `published` by a later digest run; a record
+        already `published` keeps whatever `published` dict it already has,
+        since comparing it against main for drift is `reconcile.py`'s job
+        (`content_drift`), not digest's, unchanged by this method. This is
+        what makes a second digest of the same post idempotent: nothing here
+        writes a second time once a working record exists at all.
+
+        A post whose import fails (an image_dir collision with another
+        draft, most plausibly) is skipped with a warning logged rather than
+        aborting the whole digest run over one post.
+
+        Existing unresolved `post_on_main_without_published_draft` flags from
+        before this method existed are not touched here: ADR 005 forbids
+        reconciliation (or digest) from resolving a flag on its own
+        conclusion, so a flag raised for a post that now has a
+        digest-created published record simply stops recurring on the next
+        reconcile pass; the already-created flag itself stays unresolved
+        until Scott resolves it by hand (`ignore` fits every one of these,
+        since the condition it flagged is already satisfied; `import_as_draft`
+        on the same flag would now try to create a second working record and
+        hit the same `image_dir_collision` a duplicate import always would).
+        """
+        # Not `self.list_drafts()`: it takes `self._lock` itself, and this
+        # method only ever runs from inside an already-`@locked` caller
+        # (`apply_digest`), so re-acquiring here would deadlock the same
+        # non-reentrant lock `_put_image_unlocked` exists to avoid.
+        all_drafts = [self.get_draft(did) for did in self.index.draft_ids()]
+        tracked_slugs = {draft.slug for draft in all_drafts if draft.slug}
+        # A post whose file path some existing draft already tracks (as the
+        # draft it was imported/published from, or as what it last actually
+        # published) is also left alone, even under a slug that has changed
+        # since: `slug_drift` is reconciliation's flag for exactly that
+        # mismatch, and digest creating a second working record for the
+        # same file under its new slug would just be a duplicate for Scott
+        # to clean up by hand.
+        tracked_paths = {
+            (draft.source_post or {}).get("path") for draft in all_drafts if draft.source_post
+        } | {(draft.published or {}).get("post_path") for draft in all_drafts if draft.published}
+        static_dir = conventions.staticdir if conventions else None
+        static_images_dir = f"{static_dir}/images" if static_dir else convert.STATIC_IMAGES_DIR
+        created = 0
+        for post in discovered:
+            if post.slug in tracked_slugs or post.path in tracked_paths:
+                continue
+            draft = Draft(id=new_id(), created_at=now_stamp(), updated_at=now_stamp())
+            try:
+                draft, _warnings = self._fill_from_post(draft, post.slug)
+            except ApiError as exc:
+                log.warning(
+                    "digest: skipping published-record import for post %r: %s",
+                    post.slug,
+                    exc,
+                )
+                continue
+            draft.status = "published"
+            placed = convert.placements(draft, draft.image_dir or post.slug, static_images_dir)
+            draft.published = {
+                "kind": "digest",
+                "branch": None,
+                "pr_number": None,
+                "pr_url": None,
+                "commit_sha": None,
+                "post_path": post.path,
+                "url": convert.post_url(draft, post.slug),
+                "date": post.date,
+                "images": [{"path": p.site_path, "url": p.url} for p in placed],
+                "post_blob_sha": post.sha,
+            }
+            self._write_json(self._draft_path(draft.id), draft.model_dump(mode="json"))
+            self._append_event(
+                type="draft.created",
+                actor=actor,
+                draft_id=draft.id,
+                to_status=draft.status,
+            )
+            self.index.upsert_draft(draft)
+            tracked_slugs.add(post.slug)
+            created += 1
+
+        if created:
+            self._commit(
+                f"digest: {created} post(s) recorded as published working record(s)", actor
+            )
+        return created
 
     # Publish and unpublish (spec section 9)
 

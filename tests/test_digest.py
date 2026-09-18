@@ -18,6 +18,7 @@ from chronicle.api.admin_deps import AdminServices
 from chronicle.api.digest_runner import DigestNotConfigured
 from chronicle.api.digest_runner import run as run_digest
 from chronicle.api.store import Store
+from tests.conftest import requires_hugo
 
 GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
 
@@ -174,6 +175,7 @@ def test_digest_repo_url_carries_the_test_token_in_test_token_mode(
     assert captured["token"] == "fake-test-token"
 
 
+@requires_hugo
 def test_digest_run_creates_posts_and_a_second_run_is_a_no_op(
     tmp_path: Path, blog_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -216,6 +218,16 @@ def test_digest_run_creates_posts_and_a_second_run_is_a_no_op(
     assert toolchain is not None
     assert toolchain["hugo_version"] == "0.164.0"
     assert toolchain["submodules"][0]["path"] == "themes/stub-theme"
+
+    # ADR 017: `blog_repo` carries no hugo.toml/config of its own, so Hugo
+    # answers from its own built-in defaults (real `hugo config`, not the
+    # fallback path); this is what a digest against `content/posts` alone
+    # still reports in the same toolchain state the admin status page
+    # reads.
+    conventions = toolchain["conventions"]
+    assert conventions["source"] == "hugo_config"
+    assert conventions["contentdir"] == "content"
+    assert conventions["fallback_reason"] is None
 
     store.close()
 
@@ -339,14 +351,16 @@ def test_digest_reports_an_update_when_a_post_changes(
     store.close()
 
 
-def test_digest_then_from_post_import_of_a_real_shaped_post(
+def test_digest_lands_a_real_shaped_post_as_a_published_working_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The real blog's posts are dated filenames with no `slug:` key, keep
     their images under `static/images/<name>/`, and reference them
     root-relative in both `featureImage` and the body. This is the shape
     that produced zero images and a dropped `url` in the live check against
-    the real repo; digest and from_post together should now round-trip it."""
+    the real repo; since ADR 017, digest itself lands this shape as a
+    published working record directly (`_fill_from_post`'s reuse), with no
+    `from_post` import step needed to round-trip it."""
     from tests.conftest import png_bytes
 
     repo = tmp_path / "blog.git-src"
@@ -387,9 +401,10 @@ def test_digest_then_from_post_import_of_a_real_shaped_post(
     store, admin = _build(tmp_path / "data", repo, monkeypatch)
     digested = run_digest(store, "chronicle", admin)
     assert digested.created == 1
+    assert digested.published_created == 1
 
-    draft, warnings = store.create_draft("chronicle", from_post=slug)
-    assert warnings == []
+    draft = next(d for d in store.list_drafts() if d.slug == slug)
+    assert draft.status == "published"
     assert draft.frontmatter["url"] == "/vcf-operations-can-now-see-my-unifi-network/"
     assert draft.frontmatter["featureImage"] == (
         "/images/vcf-operations-can-now-see-my-unifi-network/featured.png"

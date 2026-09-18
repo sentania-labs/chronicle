@@ -24,16 +24,19 @@ The three rules, checked against the real blog's 347 posts:
   not reproduce that, and an author who wants it can set `url` by hand,
   which this module then leaves alone).
 - **Images.** Every attached image is copied to
-  `static/images/<image_dir>/<filename>` and every reference to it in the
-  body or in a frontmatter image field is rewritten to
-  `/images/<image_dir>/<filename>`. `image_dir` is the post's own URL slug
-  (the last non-empty path segment of `url`), never the dated filename and
-  never `draft.slug` directly when the two differ (ADR 015); it is pinned
-  once on the draft (`Draft.image_dir`) at the same moment the slug is
-  pinned, so a later save or republish never relocates the directory. A
-  reference matches by its recorded `source_ref` (what the post itself used
-  before the import) or, for an image that has none because it was uploaded
-  fresh, by filename.
+  `<static_dir>/images/<image_dir>/<filename>` (`static_dir` is the site's
+  own `staticdir`, ADR 017; `static/images` when no caller passes one) and
+  every reference to it in the body or in a frontmatter image field is
+  rewritten to `/images/<image_dir>/<filename>`, which never carries
+  `static_dir`: Hugo publishes everything under its static directory to
+  the site root regardless of what that directory is named. `image_dir` is
+  the post's own URL slug (the last non-empty path segment of `url`),
+  never the dated filename and never `draft.slug` directly when the two
+  differ (ADR 015); it is pinned once on the draft (`Draft.image_dir`) at
+  the same moment the slug is pinned, so a later save or republish never
+  relocates the directory. A reference matches by its recorded
+  `source_ref` (what the post itself used before the import) or, for an
+  image that has none because it was uploaded fresh, by filename.
 
 `draft: false` is forced on the way out. A preview of a draft that Hugo
 skipped as a draft would be an empty page, and publish never wants the flag
@@ -118,19 +121,36 @@ def post_date(frontmatter: dict[str, Any]) -> date:
 
 
 def post_filename(draft: Draft, slug: str) -> str:
+    # ADR 017: Hugo does not govern content filenames at all, so this stays
+    # an observed convention read off the real posts, never something a
+    # site's own `hugo config` could confirm or replace.
     return f"{post_date(draft.frontmatter).isoformat()}-{slug}.md"
 
 
-def post_path(draft: Draft, slug: str) -> str:
+def post_path(draft: Draft, slug: str, content_dir: str | None = None) -> str:
     """Where the post file goes, site-relative.
 
     An import keeps the path it came from, but only when that path is inside
-    `content/posts` and names no parent directory: `source_post` is data from
+    `content_dir` and names no parent directory: `source_post` is data from
     a digest of main, and a path that escaped the content directory would let
-    a build write outside the scratch tree.
+    a build write outside the scratch tree. `content_dir` is the site's own
+    `contentdir` (ADR 017, `hugo config`'s answer, e.g. `"content"`), read by
+    the caller from the last digest's conventions
+    (`digest.read_content_dir_from_state`); `None` (the default, and every
+    call site before this parameter existed) keeps the pre-ADR-017 hardcoded
+    `content/posts` (issue #18: a site whose archive lives outside
+    `content/posts` used to fall through here and land a duplicate file
+    instead of updating the one already on main). A trailing slash on
+    `content_dir` is stripped before the prefix match: `hugo config` can
+    report a `contentDir` written with one in `hugo.toml`, and the match
+    below is a plain string prefix, not a path join, so an unstripped
+    slash would make every digest-created record on that site fail to
+    match its own directory and duplicate on every republish, exactly
+    what this parameter exists to stop.
     """
+    base = (content_dir or POSTS_DIR).rstrip("/")
     source = (draft.source_post or {}).get("path")
-    if source and _is_safe_relative(source) and source.startswith(f"{POSTS_DIR}/"):
+    if source and _is_safe_relative(source) and source.startswith(f"{base}/"):
         return source
     return f"{POSTS_DIR}/{post_filename(draft, slug)}"
 
@@ -139,6 +159,11 @@ def post_url(draft: Draft, slug: str) -> str:
     existing = draft.frontmatter.get("url")
     if isinstance(existing, str) and existing.strip():
         return existing.strip()
+    # ADR 017: this `/YYYY/MM/slug/` default stays convention, not derived.
+    # Scott's own site has `permalinks: null` in its Hugo config, so there
+    # is nothing there to read this from; it is an observed pattern from
+    # the real posts, and an author who wants something else sets `url`
+    # by hand, which this function then leaves alone.
     stamp = post_date(draft.frontmatter)
     return f"/{stamp.year:04d}/{stamp.month:02d}/{slug}/"
 
@@ -158,8 +183,10 @@ def image_dir_name(url: str | None, fallback_slug: str) -> str:
     return fallback_slug
 
 
-def image_site_path(image_dir: str, filename: str) -> str:
-    return f"{STATIC_IMAGES_DIR}/{image_dir}/{PurePosixPath(filename).name}"
+def image_site_path(
+    image_dir: str, filename: str, static_images_dir: str = STATIC_IMAGES_DIR
+) -> str:
+    return f"{static_images_dir}/{image_dir}/{PurePosixPath(filename).name}"
 
 
 def image_url(image_dir: str, filename: str) -> str:
@@ -182,7 +209,9 @@ def _disambiguated_filename(filename: str, image_id: str) -> str:
     return f"{path.stem}-{image_id[:8]}{path.suffix}"
 
 
-def placements(draft: Draft, image_dir: str) -> list[ImagePlacement]:
+def placements(
+    draft: Draft, image_dir: str, static_images_dir: str = STATIC_IMAGES_DIR
+) -> list[ImagePlacement]:
     """Where each attached image lands, deduplicating a repeated filename.
 
     `attach_image` (`chronicle/api/store.py`) already rejects attaching a
@@ -191,9 +220,15 @@ def placements(draft: Draft, image_dir: str) -> list[ImagePlacement]:
     check existed, or by anything that writes `Draft.images` directly, could
     still carry two entries with the same filename and different content. A
     plain second occurrence would collide with the first at
-    `static/images/<image_dir>/<filename>` and silently overwrite it (round
-    C3 review); a repeated name here gets its image id worked into the
+    `<static_images_dir>/<image_dir>/<filename>` and silently overwrite it
+    (round C3 review); a repeated name here gets its image id worked into the
     output path instead.
+
+    `static_images_dir` is site-relative (`static/images` by default, ADR
+    017's `staticdir` plus the `images` subdirectory when a caller passes
+    it); the public `url` a reference is rewritten to never carries this
+    prefix, since Hugo publishes everything under its static directory to
+    the site root regardless of what that directory is named.
     """
     seen: dict[str, int] = {}
     placed: list[ImagePlacement] = []
@@ -206,7 +241,7 @@ def placements(draft: Draft, image_dir: str) -> list[ImagePlacement]:
                 image_id=image.image_id,
                 filename=name,
                 role=image.role,
-                site_path=image_site_path(image_dir, output_name),
+                site_path=image_site_path(image_dir, output_name, static_images_dir),
                 url=image_url(image_dir, output_name),
             )
         )
@@ -281,8 +316,23 @@ def render_frontmatter(frontmatter: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def convert(draft: Draft) -> ConvertedPost:
-    """The draft as a Hugo post file, plus where its images have to land."""
+def convert(
+    draft: Draft, static_dir: str | None = None, content_dir: str | None = None
+) -> ConvertedPost:
+    """The draft as a Hugo post file, plus where its images have to land.
+
+    `static_dir` is the site's own `staticdir` (ADR 017, `hugo config`'s
+    answer, e.g. `"static"`), read by the caller from the last digest's
+    conventions (`digest.read_static_dir_from_state`) or supplied directly
+    when it already has a fresh `HugoConventions`; `None` (the default, and
+    every call site before this parameter existed) keeps the pre-ADR-017
+    hardcoded `static/images`. `content_dir` is the same shape for the
+    site's own `contentdir` (`digest.read_content_dir_from_state`), passed
+    through to `post_path` so a digest-created record's source path is
+    matched against the site's real content directory rather than a
+    hardcoded `content/posts` (issue #18); `None` keeps the same
+    pre-ADR-017 fallback.
+    """
     slug = draft.slug
     if not slug:
         raise ConversionError(
@@ -295,7 +345,8 @@ def convert(draft: Draft) -> ConvertedPost:
     # (ADR 015); this fallback only fires for a draft written before that
     # field existed, or a test that builds a Draft by hand.
     image_dir = draft.image_dir or image_dir_name(draft.frontmatter.get("url"), slug)
-    placed = placements(draft, image_dir)
+    static_images_dir = f"{static_dir}/images" if static_dir else STATIC_IMAGES_DIR
+    placed = placements(draft, image_dir, static_images_dir)
     by_ref, by_name = _rewrite_map(draft, placed)
 
     frontmatter = dict(draft.frontmatter)
@@ -313,7 +364,7 @@ def convert(draft: Draft) -> ConvertedPost:
 
     return ConvertedPost(
         slug=slug,
-        post_path=post_path(draft, slug),
+        post_path=post_path(draft, slug, content_dir),
         text=text,
         url=frontmatter["url"],
         images=placed,
