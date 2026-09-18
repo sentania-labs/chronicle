@@ -548,6 +548,14 @@ async def draft_save(
             "frontmatter": frontmatter,
             "body": body_text,
             "base_version": base_version,
+            # The raw values as posted (title, tags, summary...), which is what
+            # `editor.js` keeps a backup's `fields` in, so a later Restore
+            # brings them back as well as the body.
+            "fields": {
+                name: value
+                for name, value in form.items()
+                if name not in ("body", "base_version") and isinstance(value, str)
+            },
         }
         html = tpl.conflict_page(
             _dump(current), attempted, diff_summary, banner=banner_enabled(request)

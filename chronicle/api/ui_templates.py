@@ -11,6 +11,7 @@ the visitor's own browser, not from anything the server renders).
 
 from __future__ import annotations
 
+import json
 from html import escape
 from posixpath import basename
 from typing import Any
@@ -781,16 +782,24 @@ def conflict_page(
     form ready to reapply on top of, and the visitor's own attempted text in
     a second, read-only pane so nothing they wrote is silently lost.
 
-    The attempted text is also the one copy of it that survives a reload:
-    `editor.js` reads `#attempted-body` on this page and writes it to the
-    browser's local backup, so the editor's restore banner offers it back the
-    next time the post is opened."""
+    `editor.js` reads `#attempted-body` on this page and, when the browser's
+    local backup holds nothing else the visitor has not answered for, writes
+    the attempted text there (with the frontmatter fields from `data-fields`,
+    the raw form values as posted) so the editor's restore banner offers it
+    back. It then shows whichever of the three `backup-note-*` sentences is
+    true; with no script none of them is claimed."""
     body = f"""
 <p class="notice conflict">Someone else saved post {escape(draft["id"])} to version
 {draft["version_no"]} while you were editing version {attempted["base_version"]}. Nothing was
 overwritten. Review the diff below, then use the reloaded form (now at the current version) to
-reapply anything from your attempted text on the right. Your text is also kept in this browser:
-open the post again and choose Restore.</p>
+reapply anything from your attempted text on the right.
+<span id="backup-note-stored" hidden>Your text is also kept in this browser: open the post again
+and choose Restore.</span>
+<span id="backup-note-kept-other" hidden>This browser already holds earlier unsaved work for this
+post, and it was left as it was: the attempted text on the right is not stored there, so copy
+anything you need from it now.</span>
+<span id="backup-note-unavailable" hidden>This browser could not store your text: it is only in the
+pane on the right, so copy anything you need from it now.</span></p>
 <h2>What changed underneath you</h2>
 <pre>{escape(diff_summary) or "(no diff available)"}</pre>
 <div class="columns">
@@ -807,7 +816,7 @@ open the post again and choose Restore.</p>
 <div>
 <h2>Your attempted text (not saved, for manual merging)</h2>
 {_attempted_frontmatter_summary(attempted.get("frontmatter", {}))}
-<pre id="attempted-body" data-draft-id="{escape(draft["id"])}" data-base-version="{attempted["base_version"]}">{escape(attempted.get("body", ""))}</pre>
+<pre id="attempted-body" data-draft-id="{escape(draft["id"])}" data-base-version="{attempted["base_version"]}" data-fields="{escape(json.dumps(attempted.get("fields", {})))}">{escape(attempted.get("body", ""))}</pre>
 </div>
 </div>
 """

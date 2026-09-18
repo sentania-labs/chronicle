@@ -62,6 +62,84 @@ function backupWriteAction(now, saved, offerPending) {
   return sameState(now, saved) ? "clear" : "write";
 }
 
+// One tab's handle on the browser's single backup slot for a draft. The slot
+// is shared by every tab open on the post, so a tab may only remove what it is
+// entitled to remove: the entry it wrote itself, or one holding exactly the
+// state it has just saved. A clean tab that is switched away from or closed
+// used to clear the slot unconditionally, taking another tab's unsaved work
+// with it. `storage` is anything with getItem/setItem/removeItem (or null when
+// the browser blocks it); every access is guarded because any of them can throw.
+function makeBackupStore(storage, key) {
+  var own = null;
+  return {
+    read: function () {
+      try {
+        return JSON.parse(storage.getItem(key) || "null");
+      } catch (e) {
+        return null;
+      }
+    },
+    write: function (state, baseVersion) {
+      var raw = JSON.stringify({
+        body: state.body,
+        fields: state.fields,
+        baseVersion: baseVersion,
+        savedAt: new Date().toISOString(),
+      });
+      try {
+        storage.setItem(key, raw);
+        own = raw;
+      } catch (e) {
+        // storage full or blocked: the save indicator still says what is unsaved
+      }
+    },
+    // Clear only an entry this tab wrote, or one that matches `saved`, the
+    // state this tab knows the server now holds.
+    clear: function (saved) {
+      try {
+        var raw = storage.getItem(key);
+        if (raw === null) {
+          return;
+        }
+        var stored = null;
+        try {
+          stored = JSON.parse(raw);
+        } catch (e) {
+          // an unreadable entry is nobody's work: only this tab's own write clears it
+        }
+        if (raw === own || (stored && sameState(stored, saved))) {
+          storage.removeItem(key);
+          own = null;
+        }
+      } catch (e) {
+        // nothing more to do client-side
+      }
+    },
+    // The visitor's explicit Discard: theirs to decide, whoever wrote it.
+    discard: function () {
+      try {
+        storage.removeItem(key);
+      } catch (e) {
+        // nothing more to do client-side
+      }
+      own = null;
+    },
+  };
+}
+
+// What the conflict page does with the browser's backup slot. The attempted
+// text is stored only when the slot holds nothing that carries it: an entry
+// with the same body is the editor's fuller copy (title, tags and so on), and
+// an entry with a different body is earlier work nobody has answered for (an
+// offered backup the visitor ignored, or another tab's), which this page must
+// not overwrite. The attempted text stays in the page's own pane instead.
+function conflictBackupAction(existing, body) {
+  if (!existing || typeof existing.body !== "string") {
+    return "write";
+  }
+  return existing.body === body ? "same" : "keep";
+}
+
 function backupMessage(verdict, whenText) {
   var text = "Unsaved edits from " + whenText + " are stored in this browser.";
   if (verdict.serverMoved) {
@@ -143,24 +221,34 @@ function saveStateText(state, detail) {
   }
   var key = BACKUP_PREFIX + attempted.getAttribute("data-draft-id");
   var body = attempted.textContent || "";
+  var outcome = "unavailable";
   try {
     var existing = JSON.parse(window.localStorage.getItem(key) || "null");
-    // The editor already wrote a fuller backup (title, tags and so on) before
-    // it sent the save; only fill in when nothing there carries this text.
-    if (existing && existing.body === body) {
-      return;
+    var action = conflictBackupAction(existing, body);
+    if (action === "write") {
+      var fields = {};
+      try {
+        fields = JSON.parse(attempted.getAttribute("data-fields") || "{}") || {};
+      } catch (e) {
+        // a malformed attribute leaves the body-only backup
+      }
+      window.localStorage.setItem(
+        key,
+        JSON.stringify({
+          body: body,
+          fields: fields,
+          baseVersion: Number(attempted.getAttribute("data-base-version")),
+          savedAt: new Date().toISOString(),
+        })
+      );
     }
-    window.localStorage.setItem(
-      key,
-      JSON.stringify({
-        body: body,
-        fields: {},
-        baseVersion: Number(attempted.getAttribute("data-base-version")),
-        savedAt: new Date().toISOString(),
-      })
-    );
+    outcome = action === "keep" ? "kept-other" : "stored";
   } catch (e) {
     // localStorage unavailable: the page's own attempted-text pane remains
+  }
+  var note = document.getElementById("backup-note-" + outcome);
+  if (note) {
+    note.hidden = false;
   }
 })();
 
@@ -306,25 +394,17 @@ function saveStateText(state, detail) {
   // stale text back over newer server content with no prompt. This keeps the
   // browser's copy, offers it on the next visit, and clears it only when the
   // server has the same text.
-  function readBackup() {
-    try {
-      return JSON.parse(window.localStorage.getItem(backupKey) || "null");
-    } catch (e) {
-      return null;
-    }
+  var storage = null;
+  try {
+    storage = window.localStorage;
+  } catch (e) {
+    // blocked outright: every store call below is then a no-op
   }
+  var backup = makeBackupStore(storage, backupKey);
 
   // True while a stored backup is on offer and unanswered (see
   // backupWriteAction).
   var offerPending = false;
-
-  function clearBackup() {
-    try {
-      window.localStorage.removeItem(backupKey);
-    } catch (e) {
-      // nothing more to do client-side
-    }
-  }
 
   function writeBackup() {
     var now = currentState();
@@ -333,30 +413,18 @@ function saveStateText(state, detail) {
       return;
     }
     if (action === "clear") {
-      clearBackup();
+      backup.clear(saved);
       return;
     }
-    try {
-      window.localStorage.setItem(
-        backupKey,
-        JSON.stringify({
-          body: now.body,
-          fields: now.fields,
-          baseVersion: Number(baseInput.value),
-          savedAt: new Date().toISOString(),
-        })
-      );
-    } catch (e) {
-      // storage full or blocked: the save indicator still says what is unsaved
-    }
+    backup.write(now, Number(baseInput.value));
   }
 
   var banner = document.getElementById("backup-banner");
   var bannerText = document.getElementById("backup-banner-text");
-  var pending = readBackup();
+  var pending = backup.read();
   var verdict = backupVerdict(pending, saved, serverVersion);
   if (verdict.action === "clear") {
-    clearBackup();
+    backup.clear(saved);
   } else if (verdict.action === "offer" && banner && bannerText) {
     var when;
     try {
@@ -398,7 +466,7 @@ function saveStateText(state, detail) {
   if (discardBtn) {
     discardBtn.addEventListener("click", function () {
       offerPending = false;
-      clearBackup();
+      backup.discard();
       pending = null;
       hideBanner();
     });
@@ -493,7 +561,7 @@ function saveStateText(state, detail) {
           saved = sent;
           if (sameState(currentState(), saved)) {
             if (!offerPending) {
-              clearBackup();
+              backup.clear(saved);
             }
             setState("saved", timeText());
           } else {
@@ -748,6 +816,8 @@ if (typeof module !== "undefined" && module.exports) {
     sameState: sameState,
     backupVerdict: backupVerdict,
     backupWriteAction: backupWriteAction,
+    makeBackupStore: makeBackupStore,
+    conflictBackupAction: conflictBackupAction,
     backupMessage: backupMessage,
     uploadOutcome: uploadOutcome,
     lookupImageSrc: lookupImageSrc,

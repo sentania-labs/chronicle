@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { sameState, backupVerdict, backupWriteAction, backupMessage, uploadOutcome, lookupImageSrc, saveStateText } =
+const { sameState, backupVerdict, backupWriteAction, makeBackupStore, conflictBackupAction, backupMessage, uploadOutcome, lookupImageSrc, saveStateText } =
   require("../chronicle/api/static/editor.js");
 
 test("sameState compares the body and every field, missing and empty alike", () => {
@@ -110,4 +110,98 @@ test("an unanswered backup offer is never overwritten or cleared", () => {
   assert.equal(backupWriteAction(typed, server, true), "skip");
   assert.equal(backupWriteAction(server, server, false), "clear");
   assert.equal(backupWriteAction(typed, server, false), "write");
+});
+
+// A stand-in for window.localStorage shared by two "tabs".
+function fakeStorage() {
+  const data = new Map();
+  return {
+    getItem: (k) => (data.has(k) ? data.get(k) : null),
+    setItem: (k, v) => void data.set(k, String(v)),
+    removeItem: (k) => void data.delete(k),
+  };
+}
+
+test("a clean second tab does not clear the first tab's unsaved-work backup", () => {
+  const storage = fakeStorage();
+  const key = "chronicle-backup:d1";
+  const server = { body: "server text", fields: { title: "t" } };
+  const tabA = makeBackupStore(storage, key);
+  const tabB = makeBackupStore(storage, key);
+
+  // Tab A has unsaved edits and its backup is written.
+  tabA.write({ body: "A's edits", fields: { title: "t" } }, 3);
+  assert.equal(tabA.read().body, "A's edits");
+
+  // Tab B is clean (its state is the server's) and is switched away from or
+  // closed: the flush asks to clear. It did not write this entry and the entry
+  // is not the state it holds, so it stays.
+  tabB.clear(server);
+  assert.equal(tabB.read().body, "A's edits");
+
+  // Tab A then saves: the entry is its own and matches what it just saved.
+  tabA.clear({ body: "A's edits", fields: { title: "t" } });
+  assert.equal(tabA.read(), null);
+});
+
+test("a tab clears an entry that matches the state it has just saved, even if another tab wrote it", () => {
+  const storage = fakeStorage();
+  const key = "chronicle-backup:d1";
+  const tabA = makeBackupStore(storage, key);
+  const tabB = makeBackupStore(storage, key);
+  tabA.write({ body: "same text", fields: {} }, 2);
+  // Tab B saved that same text: the backup is redundant and B may clear it.
+  tabB.clear({ body: "same text", fields: {} });
+  assert.equal(tabB.read(), null);
+});
+
+test("a tab does not clear a backup another tab overwrote after its own write", () => {
+  const storage = fakeStorage();
+  const key = "chronicle-backup:d1";
+  const tabA = makeBackupStore(storage, key);
+  const tabB = makeBackupStore(storage, key);
+  tabA.write({ body: "A", fields: {} }, 1);
+  tabB.write({ body: "B", fields: {} }, 1);
+  tabA.clear({ body: "A", fields: {} });
+  assert.equal(tabA.read().body, "B");
+});
+
+test("discard is the visitor's own decision and clears whoever wrote the entry", () => {
+  const storage = fakeStorage();
+  const key = "chronicle-backup:d1";
+  const tabA = makeBackupStore(storage, key);
+  const tabB = makeBackupStore(storage, key);
+  tabA.write({ body: "A", fields: {} }, 1);
+  tabB.discard();
+  assert.equal(tabB.read(), null);
+});
+
+test("a blocked or throwing storage never throws out of the backup store", () => {
+  const throwing = {
+    getItem() {
+      throw new Error("blocked");
+    },
+    setItem() {
+      throw new Error("blocked");
+    },
+    removeItem() {
+      throw new Error("blocked");
+    },
+  };
+  for (const store of [makeBackupStore(throwing, "k"), makeBackupStore(null, "k")]) {
+    assert.equal(store.read(), null);
+    store.write({ body: "x", fields: {} }, 1);
+    store.clear({ body: "x", fields: {} });
+    store.discard();
+  }
+});
+
+test("the conflict page never overwrites earlier unanswered work, and stores only when nothing carries the text", () => {
+  // The offered backup the visitor ignored: a different body must survive.
+  assert.equal(conflictBackupAction({ body: "EDIT ONE", fields: { title: "one" } }, "EDIT TWO"), "keep");
+  // The editor's own fuller copy of this very text is left as it is.
+  assert.equal(conflictBackupAction({ body: "EDIT TWO", fields: { title: "two" } }, "EDIT TWO"), "same");
+  // Nothing stored, or an unreadable entry: the attempted text goes in.
+  assert.equal(conflictBackupAction(null, "EDIT TWO"), "write");
+  assert.equal(conflictBackupAction({ nope: true }, "EDIT TWO"), "write");
 });
