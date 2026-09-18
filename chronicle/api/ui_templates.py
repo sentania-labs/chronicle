@@ -703,6 +703,7 @@ def editor_page(
     has_preview: bool = False,
     publish_pr_open: bool = False,
     publish_run_active: bool = False,
+    unpublish_pr_open: bool = False,
     notice: str | None = None,
     notice_kind: str = "error",
 ) -> str:
@@ -719,6 +720,7 @@ def editor_page(
         republish=bool(draft.get("published")),
         publish_pr_open=publish_pr_open,
         publish_run_active=publish_run_active,
+        unpublish_pr_open=unpublish_pr_open,
     )
     frontmatter = draft["frontmatter"]
     title_value = frontmatter.get("title", "")

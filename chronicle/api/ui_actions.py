@@ -10,6 +10,11 @@ Two offers are special. Preview is always present, because the click stages
 whatever it needs to be legal (a published post is revised first, as a save
 would). Publish is the primary action only once a preview of the current text
 exists, and is disabled with "Preview first" until then.
+
+The page and the staged action route read the same offers. `staged_refusal`
+is how the route asks: a click whose plan runs more than one step is refused
+when the offer for it is disabled or absent, so a POST cannot do what the
+page said it would not (this UI has no login, so the offer is the guard).
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ def offers_for(
     republish: bool = False,
     publish_pr_open: bool = False,
     publish_run_active: bool = False,
+    unpublish_pr_open: bool = False,
 ) -> list[Offer]:
     """The editor's action offers for a draft in `status`, in display order.
 
@@ -54,12 +60,16 @@ def offers_for(
     `republish` is a draft that already has a published record (the approve
     button then reads "Republish"). `publish_pr_open` and `publish_run_active`
     are the two things `Store.act_on_draft` refuses a re-approve for that the
-    table cannot see.
+    table cannot see. `unpublish_pr_open` blocks a Preview that would first
+    revise the post: the unpublish PR is about to remove it from main, and a
+    revise moves the record to `drafting`, where the merge has no transition.
     """
     offers: list[Offer] = []
 
     preview_plan = plan_action(status, "preview", True)
-    if preview_plan is not None:
+    if preview_plan is not None and unpublish_pr_open and len(preview_plan) > 1:
+        offers.append(Offer("preview", "Preview", DISABLED, reason="Unpublish PR open"))
+    elif preview_plan is not None:
         offers.append(
             Offer("preview", "Preview", primary=not has_preview, steps=preview_plan),
         )
@@ -126,3 +136,47 @@ def _publish_offer(
         )
         return Offer("approve", label, DISABLED, reason=reason, reserved=True)
     return Offer("approve", label, primary=True, reserved=True, steps=plan)
+
+
+def staged_refusal(
+    status: str,
+    action: str,
+    actor_is_ui: bool,
+    *,
+    has_preview: bool,
+    republish: bool = False,
+    publish_pr_open: bool = False,
+    publish_run_active: bool = False,
+    unpublish_pr_open: bool = False,
+) -> str | None:
+    """Why a click on `action` must be refused, or None when it may run.
+
+    Only a click that stages (its plan is more than the action itself) is
+    judged here: a single legal step stays a plain table lookup in the store,
+    as it always was. A staged click is allowed only if the editor offers it
+    as available for this same state, so the page and the route cannot
+    disagree about what a click does.
+    """
+    plan = plan_action(status, action, actor_is_ui)
+    if plan is None or len(plan) < 2:
+        return None
+    offer = next(
+        (
+            candidate
+            for candidate in offers_for(
+                status,
+                has_preview=has_preview,
+                republish=republish,
+                publish_pr_open=publish_pr_open,
+                publish_run_active=publish_run_active,
+                unpublish_pr_open=unpublish_pr_open,
+            )
+            if candidate.action == action
+        ),
+        None,
+    )
+    if offer is None:
+        return "That action is not available right now."
+    if offer.state == DISABLED:
+        return f"{offer.label} is not available right now ({offer.reason})."
+    return None

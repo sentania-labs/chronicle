@@ -216,10 +216,13 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   only if `transitions.plan_action` finds a path, and `Store.act_on_draft_staged`
   (editor buttons only, never `/v1`) runs that path's steps under one lock:
   Preview on a `published` post revises it first, Publish on a `previewed` one
-  submits it first. "Preview first" on Publish is presentation (a hand-built
-  approve from `drafting` runs the same two legal steps), and a preview counts
-  only while `built_version` equals the draft's version, so a save makes it
-  stale again. The draft status shown to a human goes through
+  submits it first. The lifecycle stays in the table, but the action route also
+  holds a staged click to the offer the page rendered for it
+  (`ui_actions.staged_refusal`, same `_offer_state` inputs): a disabled or absent
+  offer is a 409, so "Preview first" and an open unpublish PR are enforced
+  where the page states them, not only on the button. A preview counts only
+  while `built_version` equals the draft's version, so a save makes it stale
+  again. The draft status shown to a human goes through
   `ui_status.status_label`; API values and filter query values stay raw.
 - **The image upload route answers JSON to `Accept: application/json`.**
   `editor.js` gets the stored filename (a dedup can keep an earlier upload's

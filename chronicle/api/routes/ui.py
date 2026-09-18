@@ -25,6 +25,7 @@ from ..images import MAX_IMAGE_BYTES, alt_text_for, safe_upload_filename
 from ..models import Draft, Material, Post, Submission
 from ..pagination import Page, paginate
 from ..store import Store
+from ..ui_actions import staged_refusal
 from ..ui_deps import banner_enabled, check_same_origin, get_services, require_ui_consumer
 from ..ui_time import sort_key
 
@@ -364,6 +365,29 @@ def drafts_board(
     )
 
 
+def _offer_state(store: Store, draft: Draft, preview_run: Any) -> dict[str, bool]:
+    """What `ui_actions.offers_for` needs beyond the draft's status. The editor
+    page renders its buttons from this and the action route refuses a staged
+    click from it (`ui_actions.staged_refusal`), so both read one computation."""
+    watch = store.get_watch(draft.id)
+    publish_run = store.last_run(draft.id, kind="publish")
+    return {
+        "has_preview": _has_current_preview(preview_run, draft.version_no),
+        "publish_pr_open": watch is not None and watch.kind == "publish",
+        "unpublish_pr_open": watch is not None and watch.kind == "unpublish",
+        # `Store.act_on_draft` separately refuses a re-approve while a
+        # publish run is still queued or building (409
+        # publish_run_in_progress), the gap between "approved" and a watch
+        # entry existing (the watch is only created once the publisher has
+        # actually opened a PR). The transition table and the
+        # publish_pr_open check above can't see a run with no PR yet, so a
+        # round C5 review found this button rendering and 409ing on every
+        # click for exactly that window.
+        "publish_run_active": publish_run is not None
+        and publish_run.status in ("queued", "building"),
+    }
+
+
 def _editor_response(
     services: Services,
     draft_id: str,
@@ -380,8 +404,6 @@ def _editor_response(
     last_run = store.last_run(draft_id)
     preview_run = store.last_run(draft_id, kind="preview")
     preview_url = _preview_url(preview_run)
-    watch = store.get_watch(draft_id)
-    publish_run = store.last_run(draft_id, kind="publish")
     html = tpl.editor_page(
         _dump(draft),
         versions,
@@ -389,17 +411,7 @@ def _editor_response(
         _dump(last_run) if last_run else None,
         preview_url,
         banner=banner,
-        has_preview=_has_current_preview(preview_run, draft.version_no),
-        publish_pr_open=watch is not None and watch.kind == "publish",
-        # `Store.act_on_draft` separately refuses a re-approve while a
-        # publish run is still queued or building (409
-        # publish_run_in_progress), the gap between "approved" and a watch
-        # entry existing (the watch is only created once the publisher has
-        # actually opened a PR). The transition table and the
-        # publish_pr_open check above can't see a run with no PR yet, so a
-        # round C5 review found this button rendering and 409ing on every
-        # click for exactly that window.
-        publish_run_active=publish_run is not None and publish_run.status in ("queued", "building"),
+        **_offer_state(store, draft, preview_run),
         notice=notice,
         notice_kind=notice_kind,
     )
@@ -583,6 +595,20 @@ async def draft_action(
         # Staged: the editor offers Preview on a published post and Publish
         # on a previewed one, and the store runs the steps
         # `transitions.plan_action` says make that legal (nothing decided here).
+        # A staged click is first held to the offer the page rendered for it:
+        # `ui_actions.staged_refusal` reads the same state the page does.
+        draft = services.store.get_draft(draft_id)
+        refusal = staged_refusal(
+            draft.status,
+            action,
+            consumer.is_ui,
+            republish=bool(draft.published),
+            **_offer_state(
+                services.store, draft, services.store.last_run(draft_id, kind="preview")
+            ),
+        )
+        if refusal is not None:
+            raise ApiError(409, "offer_unavailable", refusal)
         services.store.act_on_draft_staged(
             draft_id, action, consumer.name, consumer.is_ui, feedback
         )

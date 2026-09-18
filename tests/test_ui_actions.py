@@ -17,9 +17,34 @@ from fastapi.testclient import TestClient
 from chronicle.api.deps import Services
 from chronicle.api.models import DRAFT_STATUSES
 from chronicle.api.transitions import DRAFT_TRANSITIONS, plan_action, resolve_draft
-from chronicle.api.ui_actions import AVAILABLE, DISABLED, Offer, offers_for
+from chronicle.api.models import WatchEntry
+from chronicle.api.ui_actions import AVAILABLE, DISABLED, Offer, offers_for, staged_refusal
 
 from .test_ui import make_draft
+
+
+def build_preview(services: Services, draft_id: str) -> None:
+    """A succeeded preview run of the draft's current version."""
+    store = services.store
+    draft = store.get_draft(draft_id)
+    run = store._queue_run(draft_id, "preview")
+    store.index.upsert_run(run)
+    store.start_run(run.id, "builder-1", "0.164.0", False, built_version=draft.version_no)
+    store.finish_run(run.id, "builder-1", True, {"preview_url": f"/preview/{draft.slug}/"})
+
+
+def open_watch(services: Services, draft_id: str, kind: str) -> None:
+    services.store.record_watch(
+        WatchEntry(
+            draft_id=draft_id,
+            kind=kind,
+            branch="post/a-draft",
+            pr_number=7,
+            pr_url="https://github.com/o/r/pull/7",
+            created_at="2026-09-17T00:00:00-05:00",
+        ),
+        "scott",
+    )
 
 
 def by_action(offers: list[Offer]) -> dict[str, Offer]:
@@ -202,6 +227,7 @@ def test_clicking_publish_on_a_previewed_post_submits_then_approves(
     client: TestClient, services: Services
 ) -> None:
     draft_id = make_draft(services, "previewed")
+    build_preview(services, draft_id)
     response = client.post(f"/content/drafts/{draft_id}/actions/approve")
     assert response.status_code == 200
     assert services.store.get_draft(draft_id).status == "approved"
@@ -219,18 +245,116 @@ def test_a_refused_click_writes_nothing(client: TestClient, services: Services) 
     assert services.store.last_run(draft_id, kind="preview") is None
 
 
-def test_the_preview_gate_is_presentation_and_the_route_stays_a_table_lookup(
+def test_a_staged_publish_with_no_current_preview_is_refused_and_writes_nothing(
     client: TestClient, services: Services
 ) -> None:
-    # "Preview first" disables the button; it is not a second lifecycle rule.
-    # A hand-built approve from `drafting` runs the same two legal steps a
-    # person could POST one at a time (submit, then approve), and an action
-    # with no path at all is refused untouched.
+    # The editor renders Publish disabled ("Preview first"); the route the
+    # button posts to must agree, or a same-origin POST publishes what the
+    # page said it would not (this UI has no login, so the offer is the guard).
+    draft_id = make_draft(services, "drafting")
+    version = services.store.get_draft(draft_id).version_no
+    refused = client.post(f"/content/drafts/{draft_id}/actions/approve")
+    assert refused.status_code == 409
+    assert "Preview first" in refused.text
+    draft = services.store.get_draft(draft_id)
+    assert draft.status == "drafting" and draft.version_no == version
+    assert services.store.last_run(draft_id, kind="publish") is None
+    events, _cursor = services.store.events_since(0)
+    assert not [e for e in events if e.type == "draft.submit" and e.draft_id == draft_id]
+
+
+def test_a_staged_publish_on_a_stale_preview_is_refused(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "previewed")
+    build_preview(services, draft_id)
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(draft_id, "scott", draft.version_no, draft.frontmatter, "edited")
+    refused = client.post(f"/content/drafts/{draft_id}/actions/approve")
+    assert refused.status_code == 409
+    assert services.store.get_draft(draft_id).status == "previewed"
+
+
+def test_a_staged_publish_with_a_current_preview_still_runs_both_steps(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "drafting")
+    build_preview(services, draft_id)
+    response = client.post(f"/content/drafts/{draft_id}/actions/approve")
+    assert response.status_code == 200
+    assert services.store.get_draft(draft_id).status == "approved"
+
+
+def test_staging_a_preview_still_works(client: TestClient, services: Services) -> None:
+    for status in ("published", "revision_requested"):
+        draft_id = make_draft(services, status, with_publish=status == "published")
+        response = client.post(f"/content/drafts/{draft_id}/actions/preview")
+        assert response.status_code == 200, status
+        assert services.store.get_draft(draft_id).status == "drafting"
+
+
+def test_an_action_with_no_path_is_still_refused_untouched(
+    client: TestClient, services: Services
+) -> None:
     draft_id = make_draft(services, "drafting")
     refused = client.post(f"/content/drafts/{draft_id}/actions/reject", data={"feedback": "no"})
     assert refused.status_code == 409
     assert services.store.get_draft(draft_id).status == "drafting"
 
-    staged = client.post(f"/content/drafts/{draft_id}/actions/approve")
-    assert staged.status_code == 200
-    assert services.store.get_draft(draft_id).status == "approved"
+
+def test_the_route_and_the_page_read_one_offer(client: TestClient, services: Services) -> None:
+    # Whatever the page renders disabled, a staged POST of that action refuses,
+    # for every status and both preview states.
+    for status in DRAFT_STATUSES:
+        for with_preview in (False, True):
+            draft_id = make_draft(services, status)
+            if with_preview:
+                build_preview(services, draft_id)
+            html = client.get(f"/content/drafts/{draft_id}").text
+            for action in ("approve", "preview"):
+                plan = plan_action(status, action, True)
+                if plan is None or len(plan) == 1:
+                    continue
+                offered = f"/content/drafts/{draft_id}/actions/{action}" in html
+                response = client.post(f"/content/drafts/{draft_id}/actions/{action}")
+                assert (response.status_code == 200) == offered, (status, action, with_preview)
+
+
+# --- An open unpublish PR blocks the staged Preview ---------------------------
+
+
+def test_preview_is_disabled_when_it_would_revise_under_an_open_unpublish_pr() -> None:
+    preview = by_action(offers_for("published", has_preview=False, unpublish_pr_open=True))[
+        "preview"
+    ]
+    assert preview.state == DISABLED
+    assert preview.reason == "Unpublish PR open"
+    assert preview.steps == ()
+    # No staging needed, nothing to protect: a draft under review still previews.
+    assert (
+        by_action(offers_for("in_review", has_preview=False, unpublish_pr_open=True))[
+            "preview"
+        ].state
+        == AVAILABLE
+    )
+
+
+def test_a_staged_preview_on_a_post_with_an_open_unpublish_pr_is_refused(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "published", with_publish=True)
+    open_watch(services, draft_id, "unpublish")
+    html = client.get(f"/content/drafts/{draft_id}").text
+    assert "/actions/preview" not in html and "Unpublish PR open" in html
+    refused = client.post(f"/content/drafts/{draft_id}/actions/preview")
+    assert refused.status_code == 409
+    assert services.store.get_draft(draft_id).status == "published"
+    assert services.store.last_run(draft_id, kind="preview") is None
+
+
+def test_staged_refusal_is_none_for_an_unstaged_action() -> None:
+    assert staged_refusal("in_review", "approve", True, has_preview=False) is None
+    assert staged_refusal("drafting", "reject", True, has_preview=False) is None
+    assert staged_refusal("drafting", "approve", True, has_preview=False) == (
+        "Publish is not available right now (Preview first)."
+    )
