@@ -1,5 +1,6 @@
 // Node-only regression test for the pure URL check in
-// chronicle/api/static/ui.js (isSafeUrl). Run by tests/test_js.py as part of
+// chronicle/api/static/ui.js (isSafeUrl). `sanitize` itself needs a DOM, which
+// node lacks; tests/test_js_dom.py runs it in headless Chrome. Run by tests/test_js.py as part of
 // `make check` when node is on PATH (skipped, with the reason, when it is
 // not), or directly with `node --test tests/ui_sanitize.test.mjs`. The payload
 // list itself is also documented in ui.js's own comment so the coverage is

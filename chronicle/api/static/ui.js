@@ -51,13 +51,56 @@ function sanitize(html, resolveImageSrc) {
   // matter (script-bearing tags, event handler attributes, unsafe URLs,
   // `srcset`) rather than pulling in a full third-party sanitiser for one
   // preview pane.
-  ["script", "style", "iframe", "object", "embed", "link", "meta", "base"].forEach(function (tag) {
+  //
+  // The preview pane sits inside the editor's own <form>, next to controls
+  // that carry reserved actions. Nothing a body contains may become, join,
+  // or point at a control: form-owning elements are removed outright, and the
+  // attributes that submit somewhere else (`formaction` and its siblings),
+  // attach an element to a form (`form`), or name an element the page's own
+  // script and labels look up (`id`, `name`, `for`) are stripped. That is the
+  // boundary; it does not lean on the parser ignoring a nested <form> or on
+  // editor.js cancelling the submit.
+  [
+    "script",
+    "style",
+    "iframe",
+    "object",
+    "embed",
+    "link",
+    "meta",
+    "base",
+    "template",
+    "form",
+    "button",
+    "input",
+    "select",
+    "option",
+    "optgroup",
+    "datalist",
+    "textarea",
+    "fieldset",
+    "output",
+  ].forEach(function (tag) {
     doc.querySelectorAll(tag).forEach(function (el) {
       el.remove();
     });
   });
+  var stripped = [
+    "srcset",
+    "form",
+    "formaction",
+    "formmethod",
+    "formtarget",
+    "formenctype",
+    "formnovalidate",
+    "id",
+    "name",
+    "for",
+  ];
   doc.querySelectorAll("*").forEach(function (el) {
-    el.removeAttribute("srcset");
+    stripped.forEach(function (name) {
+      el.removeAttribute(name);
+    });
     Array.prototype.slice.call(el.attributes).forEach(function (attr) {
       var name = attr.name.toLowerCase();
       var isUrlAttr = name === "href" || name === "src" || name === "xlink:href";
