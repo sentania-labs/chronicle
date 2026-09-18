@@ -81,7 +81,8 @@ def run(store: Store, admin: AdminServices, actor: str = RECONCILE_ACTOR) -> Rec
         raise ReconcileNotConfigured("no GitHub App or test-token repo is configured yet")
 
     refresh_from_target(store, target, actor, admin=admin)
-    discovered = digest_mod.discover_posts(store.site_dir)
+    conventions = digest_mod.read_hugo_conventions(store.site_dir)
+    discovered = digest_mod.discover_posts(store.site_dir, conventions)
     discovered_by_slug = {item.slug: item for item in discovered}
 
     drafts = store.list_drafts()

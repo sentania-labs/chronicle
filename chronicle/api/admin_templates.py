@@ -195,6 +195,23 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
         row(name, count) for name, count in status["preview_runs_by_status"].items()
     )
     flag_rows = _flag_rows(row, status.get("reconcile_flags", []))
+    conventions = status["toolchain"].get("conventions")
+    if conventions:
+        conventions_rows = (
+            row("source", conventions["source"])
+            + row("environment", conventions["environment"])
+            + row("contentdir", conventions["contentdir"])
+            + row("staticdir", conventions["staticdir"])
+            + row("mainsections", ", ".join(conventions["mainsections"]) or "none")
+            + row(
+                "unconfigured taxonomy keys",
+                ", ".join(conventions["unconfigured_taxonomy_keys"]) or "none",
+            )
+        )
+        if conventions["source"] == "fallback":
+            conventions_rows += row("fallback reason", conventions["fallback_reason"])
+    else:
+        conventions_rows = row("conventions", "no digest has run yet")
     body = f"""
 {nav()}
 <h2>GitHub App</h2>
@@ -219,6 +236,8 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
 {row("hugo version (builder)", status["toolchain"]["builder_hugo_version"])}
 {row("toolchain", "match" if status["toolchain"]["match"] else "drift")}
 </table>
+<h3>Content conventions</h3>
+<table>{conventions_rows}</table>
 <h3>Theme submodules</h3>
 <table><tr><th>path</th><th>commit</th></tr>{theme_rows}</table>
 <h2>Builder</h2>

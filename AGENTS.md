@@ -231,8 +231,12 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
 Publish, unpublish, merge watch, and reconciliation are all real. A
 publisher thread and a watcher thread run inside the api process alongside
 the request handlers (ADR 013, `chronicle/api/background.py`); neither
-needs the builder's Hugo toolchain, so neither lives in the builder
-container.
+invokes Hugo at all, so neither needs the builder's Hugo toolchain to run
+a build. Digest, which the reconciler calls, is a different story: as of
+ADR 017 it runs `hugo config` (never a build) against the digested working
+tree to derive Chronicle's content, image, and taxonomy conventions, so the
+api image now installs the same pinned Hugo the builder stage does. The
+builder remains the only place a Hugo *build* runs.
 
 - **Publish/unpublish** (`chronicle/api/publisher.py`): claims `publish`
   and `unpublish` queue entries the builder's own claim never looks at,

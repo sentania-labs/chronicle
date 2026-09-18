@@ -118,6 +118,9 @@ def post_date(frontmatter: dict[str, Any]) -> date:
 
 
 def post_filename(draft: Draft, slug: str) -> str:
+    # ADR 017: Hugo does not govern content filenames at all, so this stays
+    # an observed convention read off the real posts, never something a
+    # site's own `hugo config` could confirm or replace.
     return f"{post_date(draft.frontmatter).isoformat()}-{slug}.md"
 
 
@@ -139,6 +142,11 @@ def post_url(draft: Draft, slug: str) -> str:
     existing = draft.frontmatter.get("url")
     if isinstance(existing, str) and existing.strip():
         return existing.strip()
+    # ADR 017: this `/YYYY/MM/slug/` default stays convention, not derived.
+    # Scott's own site has `permalinks: null` in its Hugo config, so there
+    # is nothing there to read this from; it is an observed pattern from
+    # the real posts, and an author who wants something else sets `url`
+    # by hand, which this function then leaves alone.
     stamp = post_date(draft.frontmatter)
     return f"/{stamp.year:04d}/{stamp.month:02d}/{slug}/"
 

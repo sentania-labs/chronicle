@@ -106,7 +106,8 @@ def refresh_from_target(
     """
     token = target.token_provider() if target.token_provider else None
     digest_mod.clone_or_update(store.site_dir, target.repo_url, target.default_branch, token=token)
-    discovered = digest_mod.discover_posts(store.site_dir)
+    conventions = digest_mod.read_hugo_conventions(store.site_dir)
+    discovered = digest_mod.discover_posts(store.site_dir, conventions)
     posts = [
         Post(slug=item.slug, path=item.path, title=item.title, date=item.date, sha=item.sha)
         for item in discovered
@@ -115,7 +116,11 @@ def refresh_from_target(
     if admin is not None:
         toolchain = digest_mod.parse_toolchain(store.site_dir)
         admin.write_toolchain(
-            {"hugo_version": toolchain.hugo_version, "submodules": toolchain.submodules}
+            {
+                "hugo_version": toolchain.hugo_version,
+                "submodules": toolchain.submodules,
+                "conventions": conventions.as_dict(),
+            }
         )
 
 
@@ -123,7 +128,8 @@ def run(store: Store, actor: str, admin: AdminServices | None = None) -> DigestS
     started_at = now_stamp()
     repo_url, branch, token = _clone_url(admin)
     digest_mod.clone_or_update(store.site_dir, repo_url, branch, token=token)
-    discovered = digest_mod.discover_posts(store.site_dir)
+    conventions = digest_mod.read_hugo_conventions(store.site_dir)
+    discovered = digest_mod.discover_posts(store.site_dir, conventions)
     posts = [
         Post(slug=item.slug, path=item.path, title=item.title, date=item.date, sha=item.sha)
         for item in discovered
@@ -143,7 +149,11 @@ def run(store: Store, actor: str, admin: AdminServices | None = None) -> DigestS
     )
     if admin is not None:
         admin.write_toolchain(
-            {"hugo_version": toolchain.hugo_version, "submodules": toolchain.submodules}
+            {
+                "hugo_version": toolchain.hugo_version,
+                "submodules": toolchain.submodules,
+                "conventions": conventions.as_dict(),
+            }
         )
         admin.write_digest_status(summary.as_dict())
     return summary

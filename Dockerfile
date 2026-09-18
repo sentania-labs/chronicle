@@ -81,8 +81,33 @@ RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin chronicle \
 # -----------------------------------------------------------------------------
 FROM base AS api
 
+ARG HUGO_VERSION
+ARG TARGETARCH
+
 LABEL org.opencontainers.image.title="chronicle-api" \
       org.opencontainers.image.description="Chronicle API: the public contract, UI backend, admin, GitHub client, reconciler"
+
+# ADR 017: digest.py runs `hugo config` (never a build) against the digested
+# working tree to derive Chronicle's content, image, and taxonomy
+# conventions from the site's own Hugo config, rather than a hardcoded
+# directory guess. That call runs in this process, so the api image needs
+# the same pinned Hugo the builder stage installs below, from the same
+# HUGO_VERSION ARG, so there is exactly one pinned version in this file. No
+# build ever runs here: the builder stage remains the only place a full
+# Hugo build happens.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && case "${TARGETARCH}" in \
+         amd64) hugo_arch="amd64" ;; \
+         arm64) hugo_arch="arm64" ;; \
+         *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL -o /tmp/hugo.deb \
+       "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-${hugo_arch}.deb" \
+    && apt-get install -y --no-install-recommends /tmp/hugo.deb \
+    && rm -f /tmp/hugo.deb \
+    && apt-get purge -y --auto-remove curl \
+    && rm -rf /var/lib/apt/lists/*
 
 USER 1000
 EXPOSE 8080

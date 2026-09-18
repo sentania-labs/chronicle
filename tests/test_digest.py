@@ -217,6 +217,16 @@ def test_digest_run_creates_posts_and_a_second_run_is_a_no_op(
     assert toolchain["hugo_version"] == "0.164.0"
     assert toolchain["submodules"][0]["path"] == "themes/stub-theme"
 
+    # ADR 017: `blog_repo` carries no hugo.toml/config of its own, so Hugo
+    # answers from its own built-in defaults (real `hugo config`, not the
+    # fallback path); this is what a digest against `content/posts` alone
+    # still reports in the same toolchain state the admin status page
+    # reads.
+    conventions = toolchain["conventions"]
+    assert conventions["source"] == "hugo_config"
+    assert conventions["contentdir"] == "content"
+    assert conventions["fallback_reason"] is None
+
     store.close()
 
 

@@ -86,6 +86,11 @@ def toolchain_summary(admin: AdminServices, heartbeat: dict[str, Any] | None) ->
         "builder_hugo_version": builder_version,
         "match": match,
         "submodules": stored.get("submodules", []),
+        # ADR 017: what the last digest's own `hugo config` said about this
+        # site's content/image/taxonomy conventions, or the fallback it used
+        # when that call didn't work. None for an instance that has never
+        # digested since this field was added.
+        "conventions": stored.get("conventions"),
     }
 
 
