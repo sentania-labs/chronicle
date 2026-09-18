@@ -98,6 +98,7 @@ body.wide { max-width: 96rem; }
 
 .offer { display: inline-block; margin-right: 0.6rem; }
 .offer-reason { color: #666; margin-left: 0.3rem; }
+button.primary .reserved { color: inherit; opacity: 0.85; }
 button.primary { background: #1a4f8a; color: #fff; border: 1px solid #123a68; border-radius: 4px; }
 button.primary:disabled, .offer button:disabled { opacity: 0.55; cursor: not-allowed; }
 .actions { margin-bottom: 0.8rem; }
