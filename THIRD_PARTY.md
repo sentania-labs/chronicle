@@ -32,8 +32,9 @@ is loaded from a CDN, ever.
 - **Why:** the post editor needs a markdown toolbar and a side-by-side live
   render on top of a plain textarea, with markdown staying the stored text
   (no rich-text WYSIWYG). EasyMDE is a single-file, maintained editor that
-  does this and degrades to the plain textarea without script. It is the same
-  build the sibling dashboard app already runs.
+  does this and degrades to the plain textarea without script. 2.18.0 is the
+  version the sibling dashboard app uses (there from a CDN; here it is
+  vendored).
 - **Not modified** from the upstream minified build. The bundle contains
   jsdelivr and bootstrapcdn URLs it would fetch a spelling dictionary and
   FontAwesome from; `editor.js` sets `spellChecker: false` and
