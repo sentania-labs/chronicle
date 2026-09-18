@@ -188,3 +188,18 @@ def test_warnings_reach_the_http_response(client: TestClient, agent_token: str) 
     body = response.json()
     assert body["title"] == "Why the lab drifted"
     assert body["warnings"] == ["dropped unknown frontmatter key 'mood'"]
+
+
+def test_crlf_and_bom_material_still_seeds_title_frontmatter_and_body(store: Store) -> None:
+    text = (
+        "\ufeff---\r\ntitle: Real Post\r\ntags: [a]\r\n---\r\n\r\n# Real Post\r\n\r\nbody text\r\n"
+    )
+    submission_id = make_claimed(store, [Material(name="post", text=text)])
+
+    draft, warnings = store.create_draft("scott", from_submission=submission_id)
+
+    assert draft.title == "Real Post"
+    assert draft.frontmatter == {"title": "Real Post", "tags": ["a"]}
+    assert draft.body == "\n# Real Post\n\nbody text\n"
+    assert "\r" not in draft.body
+    assert warnings == []

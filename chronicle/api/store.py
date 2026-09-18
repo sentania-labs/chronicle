@@ -100,6 +100,7 @@ FRONTMATTER_STRING_LIST_KEYS = ("tags", "categories")
 # heading. The frontmatter pattern mirrors what `digest.parse_frontmatter`
 # will actually split, so detection and parsing cannot disagree.
 _FRONTMATTER_BLOCK = re.compile(r"\A(---|\+\+\+)\n.*?\n\1\n", re.DOTALL)
+_IMAGE_ID = re.compile(r"[0-9a-f]{64}")
 _LEADING_HEADING = re.compile(r"\s*#{1,6}[ \t]+(\S[^\n]*)")
 
 log = logging.getLogger("chronicle.api.store")
@@ -425,6 +426,17 @@ class Store:
         """
         record = self.get_submission(submission_id)
         resolve_submission_revise(record.status, submission_id)
+        for image_id in image_ids:
+            if not _IMAGE_ID.fullmatch(image_id) or not self._image_sidecar_path(image_id).exists():
+                # The detail page loads every listed image, so an id that
+                # names nothing would make the page (and its edit form)
+                # answer 404 for good.
+                raise ApiError(
+                    422,
+                    "image_not_found",
+                    f"image {image_id} is not in the image store; upload it first",
+                    image_id=image_id,
+                )
         if base_version != record.version_no:
             raise ApiError(
                 409,
@@ -582,7 +594,7 @@ class Store:
         warnings: list[str] = []
         primary = _primary_material(submission.materials)
         if primary is not None and primary.text is not None:
-            frontmatter, body, parse_error = _split_material(primary.text)
+            frontmatter, body, parse_error = _split_material(_clean_material_text(primary.text))
             if parse_error is not None:
                 warnings.append(f"material {primary.name!r}: {parse_error}")
             allowed: dict[str, Any] = {}
@@ -2074,6 +2086,13 @@ class Store:
         return counts
 
 
+def _clean_material_text(text: str) -> str:
+    """A submitter's text as the seeding heuristics should see it: no byte
+    order mark and LF line endings, or a CRLF post's frontmatter fence would
+    never match and the whole block would land in the body unannounced."""
+    return text.removeprefix("\ufeff").replace("\r\n", "\n")
+
+
 def _looks_like_post(text: str) -> bool:
     return bool(_FRONTMATTER_BLOCK.match(text) or _LEADING_HEADING.match(text))
 
@@ -2083,7 +2102,7 @@ def _primary_material(materials: list[Material]) -> Material | None:
     post, else the first with any text at all, else None."""
     with_text = [material for material in materials if material.text]
     for material in with_text:
-        if material.text is not None and _looks_like_post(material.text):
+        if material.text is not None and _looks_like_post(_clean_material_text(material.text)):
             return material
     return with_text[0] if with_text else None
 

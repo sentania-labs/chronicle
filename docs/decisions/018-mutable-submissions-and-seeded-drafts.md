@@ -26,7 +26,9 @@ materials still yields a blank draft.
 
 **Mutability.** `PUT /v1/submissions/{id}` replaces brief, materials and
 image ids, guarded by `base_version` exactly like a draft save (409 with a
-unified diff when stale). A submission is version 1 as posted; each
+unified diff when stale). All three content fields are required, so an
+omitted field is a 422 and never "delete every material", and every image id
+must already be in the image store (422 `image_not_found`). A submission is version 1 as posted; each
 revision writes `submissions/<id>/versions/<n>.json`, one `submission.revise`
 event, and one internal git commit authored by the acting consumer, so the
 diffs are in `git log -p` like every other record. It is editable while

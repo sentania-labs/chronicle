@@ -183,6 +183,55 @@ def test_a_frozen_submission_refuses_edits_by_name(
     assert client.get(url, headers=auth(agent_token)).json()["version_no"] == 1
 
 
+@pytest.mark.parametrize("missing", ["materials", "image_ids", "brief"])
+def test_put_that_omits_a_content_field_is_422_and_changes_nothing(
+    client: TestClient, agent_token: str, missing: str
+) -> None:
+    created = create(client, agent_token)
+    url = f"/v1/submissions/{created['id']}"
+    body = revise_body(1)
+    del body[missing]
+
+    response = client.put(url, json=body, headers=auth(agent_token))
+
+    assert response.status_code == 422
+    fresh = client.get(url, headers=auth(agent_token)).json()
+    assert fresh["version_no"] == 1
+    assert [m["name"] for m in fresh["materials"]] == ["notes"]
+
+
+@pytest.mark.parametrize("image_id", ["deadbeef", "../../etc/passwd", "f" * 64])
+def test_put_with_an_unknown_image_id_is_422_and_changes_nothing(
+    client: TestClient, agent_token: str, image_id: str
+) -> None:
+    created = create(client, agent_token)
+    url = f"/v1/submissions/{created['id']}"
+
+    response = client.put(url, json=revise_body(1, image_ids=[image_id]), headers=auth(agent_token))
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "image_not_found"
+    assert client.get(url, headers=auth(agent_token)).json()["version_no"] == 1
+
+
+def test_put_with_an_uploaded_image_id_is_accepted(client: TestClient, agent_token: str) -> None:
+    from .conftest import png_bytes
+
+    created = create(client, agent_token)
+    image = client.post(
+        "/v1/images",
+        files={"file": ("shot.png", png_bytes(), "image/png")},
+        headers=auth(agent_token),
+    ).json()
+    response = client.put(
+        f"/v1/submissions/{created['id']}",
+        json=revise_body(1, image_ids=[image["image_id"]]),
+        headers=auth(agent_token),
+    )
+    assert response.status_code == 200
+    assert response.json()["image_ids"] == [image["image_id"]]
+
+
 def test_a_claimed_submission_can_still_be_edited(client: TestClient, agent_token: str) -> None:
     created = create(client, agent_token)
     url = f"/v1/submissions/{created['id']}"

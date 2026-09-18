@@ -144,7 +144,17 @@ async def submission_edit(
     services: Services = Depends(get_services),
 ) -> HTMLResponse:
     form = await request.form()
-    base_version = int(str(form.get("base_version", "0")) or "0")
+    try:
+        base_version = int(str(form.get("base_version", "0")) or "0")
+    except ValueError:
+        return _submission_response(
+            services,
+            submission_id,
+            request,
+            notice="base_version must be a whole number",
+            notice_kind="error",
+            status_code=422,
+        )
     brief = _crlf_to_lf(str(form.get("brief", "")))
     materials: list[Material] = []
     rows = zip_longest(

@@ -130,3 +130,27 @@ def test_cross_origin_edit_is_refused(client: TestClient, agent_token: str) -> N
         headers={"Origin": "http://evil.example"},
     )
     assert response.status_code == 403
+
+
+def test_a_non_integer_base_version_is_a_422_page_not_a_crash(
+    client: TestClient, agent_token: str
+) -> None:
+    submission_id = make_submission(client, agent_token)
+    bad = form(1)
+    bad["base_version"] = "abc"
+    response = client.post(f"/content/submissions/{submission_id}/edit", data=bad)
+    assert response.status_code == 422
+    assert "base_version must be a whole number" in response.text
+
+
+def test_a_leading_blank_line_in_a_textarea_survives_the_html_parser(
+    client: TestClient, agent_token: str, services: Services
+) -> None:
+    submission_id = make_submission(client, agent_token)
+    services.store.revise_submission(
+        submission_id, "ghostwriter", 1, "\nstarts blank", [], [], "leading newline"
+    )
+    page = client.get(f"/content/submissions/{submission_id}").text
+    # A browser drops exactly one newline right after <textarea>, so the
+    # template emits one extra: the stored text's own leading newline stays.
+    assert 'cols="80">\n\nstarts blank</textarea>' in page

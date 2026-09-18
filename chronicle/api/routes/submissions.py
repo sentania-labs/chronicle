@@ -20,10 +20,13 @@ class SubmissionCreate(BaseModel):
 
 
 class SubmissionRevise(BaseModel):
+    # brief, materials and image_ids are all required: a PUT replaces the
+    # editable content wholesale, so an omitted field must be a 422 and not
+    # a silent "delete every material".
     base_version: int
     brief: str
-    materials: list[Material] = []
-    image_ids: list[str] = []
+    materials: list[Material]
+    image_ids: list[str]
     message: str = ""
 
 

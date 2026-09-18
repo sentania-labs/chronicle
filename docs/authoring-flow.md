@@ -153,7 +153,7 @@ included. `/healthz` and `/readyz` are the only anonymous routes, forever.
 | --- | --- |
 | `POST /v1/submissions`, `GET /v1/submissions?status=` | raw material in, triage out |
 | `POST /v1/submissions/{id}/claim`, `/discard` | submission lifecycle |
-| `PUT /v1/submissions/{id}` | revise brief, materials, image ids while `new` or `claimed`; requires `base_version`, 409 with a diff if stale, 409 `submission_frozen` after that |
+| `PUT /v1/submissions/{id}` | replace brief, materials, image ids (all required, image ids must exist) while `new` or `claimed`; requires `base_version`, 409 with a diff if stale, 409 `submission_frozen` after that |
 | `POST /v1/drafts` (`blank`, `from_submission`, `from_post`) | new draft; `from_submission` seeds body, title, frontmatter and images from the submission's materials (ADR 018); `from_post` imports a published post from main |
 | `GET /v1/drafts?status=`, `GET /v1/drafts/{id}` | content, version, images, status, claim |
 | `PUT /v1/drafts/{id}` | save; requires `base_version`, 409 with a diff if stale |

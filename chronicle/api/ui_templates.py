@@ -137,7 +137,7 @@ def _submission_edit_form(submission: dict[str, Any]) -> str:
         "<fieldset>"
         f'<label>Name <input name="material_name" value="{escape(m["name"])}"></label> '
         f'<label>URL <input name="material_url" value="{escape(m.get("url") or "")}"></label>'
-        f'<br><label>Text<br><textarea name="material_text" rows="6" cols="80">'
+        f'<br><label>Text<br><textarea name="material_text" rows="6" cols="80">\n'
         f"{escape(m.get('text') or '')}</textarea></label>"
         "</fieldset>"
         for m in rows
@@ -152,7 +152,8 @@ def _submission_edit_form(submission: dict[str, Any]) -> str:
 <input type="hidden" name="base_version" value="{submission["version_no"]}">
 {image_fields}
 <label for="brief">Brief</label><br>
-<textarea id="brief" name="brief" rows="4" cols="80">{escape(submission["brief"])}</textarea>
+<textarea id="brief" name="brief" rows="4" cols="80">
+{escape(submission["brief"])}</textarea>
 {material_rows}
 <button type="submit">Save changes (version {submission["version_no"]})</button>
 </form>
