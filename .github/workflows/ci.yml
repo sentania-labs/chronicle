@@ -33,6 +33,14 @@ defaults:
   run:
     shell: bash
 
+env:
+  # The one pinned Hugo version for this workflow: the `test` job installs
+  # it to exercise the real `hugo config` derivation (ADR 017), and
+  # `publish` builds images with it. The Dockerfile's own `ARG
+  # HUGO_VERSION` default is the other copy of this number; move both
+  # together on a Hugo bump.
+  HUGO_VERSION: "0.164.0"
+
 jobs:
   lint:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.owner.login == 'sentania-labs'
@@ -52,6 +60,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install hugo (pinned, matches the Dockerfile's api/builder stages)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/hugo.tar.gz" \
+            "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
+          tar -xzf "$RUNNER_TEMP/hugo.tar.gz" -C "$RUNNER_TEMP" hugo
+          chmod +x "$RUNNER_TEMP/hugo"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           python-version: "3.12"
@@ -170,7 +185,7 @@ jobs:
           push: true
           sbom: true
           build-args: |
-            HUGO_VERSION=0.164.0
+            HUGO_VERSION=${{ env.HUGO_VERSION }}
             BUILD_VERSION=${{ github.ref_name }}
             BUILD_SHA=${{ github.sha }}
       - name: Sign the pushed image (keyless)

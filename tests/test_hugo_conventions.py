@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from chronicle.api import digest
+from tests.conftest import requires_hugo
 
 GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
 
@@ -90,6 +91,7 @@ def custom_layout_site(tmp_path: Path) -> Path:
     return site_dir
 
 
+@requires_hugo
 def test_conventions_derived_from_real_hugo_config(custom_layout_site: Path) -> None:
     conventions = digest.read_hugo_conventions(custom_layout_site)
     assert conventions.source == "hugo_config"
@@ -104,6 +106,7 @@ def test_conventions_derived_from_real_hugo_config(custom_layout_site: Path) -> 
     assert conventions.fallback_reason is None
 
 
+@requires_hugo
 def test_discover_posts_walks_a_content_dir_outside_content_posts_and_skips_pages(
     custom_layout_site: Path,
 ) -> None:
@@ -117,6 +120,7 @@ def test_discover_posts_walks_a_content_dir_outside_content_posts_and_skips_page
     assert slugs == {"x"}
 
 
+@requires_hugo
 def test_unconfigured_taxonomy_keys_reports_what_this_site_never_defined(
     tmp_path: Path,
 ) -> None:
@@ -288,6 +292,7 @@ def test_explicit_environment_argument_wins_over_the_env_var(
     assert conventions.environment == "staging"
 
 
+@requires_hugo
 def test_as_dict_round_trips_into_the_toolchain_state_shape(custom_layout_site: Path) -> None:
     """`digest_runner.py` writes this straight into `admin.write_toolchain`,
     so it has to be plain JSON-safe values, not tuples or a dataclass."""

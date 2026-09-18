@@ -18,6 +18,7 @@ from chronicle.api.admin_deps import AdminServices
 from chronicle.api.digest_runner import DigestNotConfigured
 from chronicle.api.digest_runner import run as run_digest
 from chronicle.api.store import Store
+from tests.conftest import requires_hugo
 
 GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
 
@@ -174,6 +175,7 @@ def test_digest_repo_url_carries_the_test_token_in_test_token_mode(
     assert captured["token"] == "fake-test-token"
 
 
+@requires_hugo
 def test_digest_run_creates_posts_and_a_second_run_is_a_no_op(
     tmp_path: Path, blog_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
