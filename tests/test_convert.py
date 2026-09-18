@@ -66,6 +66,32 @@ def test_imported_draft_path_outside_posts_dir_is_not_trusted() -> None:
     assert converted.post_path == "content/posts/2024-03-03-my-post.md"
 
 
+def test_digested_record_outside_content_posts_republishes_as_update_not_duplicate() -> None:
+    """Issue #18: a site whose real `contentdir` is not `content/posts` (a
+    post-like section that moved elsewhere) must still have a digest-created
+    record's republish land on the file it already came from, not a new one
+    under the hardcoded `content/posts`."""
+    draft = _draft(
+        frontmatter={"title": "My Post", "date": "2024-03-03", "url": "/2024/03/03/my-post/"},
+        source_post={"slug": "my-post", "path": "archive/my-post.md", "sha": "abc"},
+    )
+    converted = convert.convert(draft, None, "archive")
+    assert converted.post_path == "archive/my-post.md"
+
+
+def test_digested_record_outside_content_posts_with_no_content_dir_still_duplicates() -> None:
+    """The pre-fix behaviour, kept as a control: with no `content_dir`
+    supplied (today's fallback, no digest state yet) a source path outside
+    `content/posts` is still not trusted, and convert falls through to a
+    brand new path."""
+    draft = _draft(
+        frontmatter={"title": "My Post", "date": "2024-03-03", "url": "/2024/03/03/my-post/"},
+        source_post={"slug": "my-post", "path": "archive/my-post.md", "sha": "abc"},
+    )
+    converted = convert.convert(draft)
+    assert converted.post_path == "content/posts/2024-03-03-my-post.md"
+
+
 def test_missing_slug_raises() -> None:
     draft = _draft(slug=None)
     with pytest.raises(convert.ConversionError):

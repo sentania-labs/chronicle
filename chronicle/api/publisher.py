@@ -229,7 +229,8 @@ def _publish(
         update={"body": linted_body, "frontmatter": stamped_frontmatter}
     )
     static_dir = digest_mod.read_static_dir_from_state(store.data_dir)
-    converted = convert.convert(working_draft, static_dir)
+    content_dir = digest_mod.read_content_dir_from_state(store.data_dir)
+    converted = convert.convert(working_draft, static_dir, content_dir)
 
     base_sha, base_tree = _base_tree_sha(ops, default_branch)
     post_blob_sha = ops.create_blob(

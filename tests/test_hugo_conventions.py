@@ -324,3 +324,26 @@ def test_read_static_dir_from_state_falls_back_on_unparseable_state(tmp_path: Pa
     state_dir.mkdir()
     (state_dir / "toolchain.json").write_text("not json", encoding="utf-8")
     assert digest.read_static_dir_from_state(tmp_path) == digest.FALLBACK_STATIC_DIR
+
+
+def test_read_content_dir_from_state_reads_the_last_digest_conventions(tmp_path: Path) -> None:
+    """Same shape as `read_static_dir_from_state` (issue #18): `convert.py`'s
+    callers read the `contentdir` the last digest already derived, rather
+    than re-invoking `hugo config`."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "toolchain.json").write_text(
+        '{"conventions": {"contentdir": "archive"}}', encoding="utf-8"
+    )
+    assert digest.read_content_dir_from_state(tmp_path) == "archive"
+
+
+def test_read_content_dir_from_state_falls_back_with_no_digest_yet(tmp_path: Path) -> None:
+    assert digest.read_content_dir_from_state(tmp_path) == digest.FALLBACK_CONTENT_DIR
+
+
+def test_read_content_dir_from_state_falls_back_on_unparseable_state(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "toolchain.json").write_text("not json", encoding="utf-8")
+    assert digest.read_content_dir_from_state(tmp_path) == digest.FALLBACK_CONTENT_DIR

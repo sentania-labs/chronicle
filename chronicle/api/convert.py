@@ -127,16 +127,24 @@ def post_filename(draft: Draft, slug: str) -> str:
     return f"{post_date(draft.frontmatter).isoformat()}-{slug}.md"
 
 
-def post_path(draft: Draft, slug: str) -> str:
+def post_path(draft: Draft, slug: str, content_dir: str | None = None) -> str:
     """Where the post file goes, site-relative.
 
     An import keeps the path it came from, but only when that path is inside
-    `content/posts` and names no parent directory: `source_post` is data from
+    `content_dir` and names no parent directory: `source_post` is data from
     a digest of main, and a path that escaped the content directory would let
-    a build write outside the scratch tree.
+    a build write outside the scratch tree. `content_dir` is the site's own
+    `contentdir` (ADR 017, `hugo config`'s answer, e.g. `"content"`), read by
+    the caller from the last digest's conventions
+    (`digest.read_content_dir_from_state`); `None` (the default, and every
+    call site before this parameter existed) keeps the pre-ADR-017 hardcoded
+    `content/posts` (issue #18: a site whose archive lives outside
+    `content/posts` used to fall through here and land a duplicate file
+    instead of updating the one already on main).
     """
+    base = content_dir or POSTS_DIR
     source = (draft.source_post or {}).get("path")
-    if source and _is_safe_relative(source) and source.startswith(f"{POSTS_DIR}/"):
+    if source and _is_safe_relative(source) and source.startswith(f"{base}/"):
         return source
     return f"{POSTS_DIR}/{post_filename(draft, slug)}"
 
@@ -302,7 +310,9 @@ def render_frontmatter(frontmatter: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def convert(draft: Draft, static_dir: str | None = None) -> ConvertedPost:
+def convert(
+    draft: Draft, static_dir: str | None = None, content_dir: str | None = None
+) -> ConvertedPost:
     """The draft as a Hugo post file, plus where its images have to land.
 
     `static_dir` is the site's own `staticdir` (ADR 017, `hugo config`'s
@@ -310,7 +320,12 @@ def convert(draft: Draft, static_dir: str | None = None) -> ConvertedPost:
     conventions (`digest.read_static_dir_from_state`) or supplied directly
     when it already has a fresh `HugoConventions`; `None` (the default, and
     every call site before this parameter existed) keeps the pre-ADR-017
-    hardcoded `static/images`.
+    hardcoded `static/images`. `content_dir` is the same shape for the
+    site's own `contentdir` (`digest.read_content_dir_from_state`), passed
+    through to `post_path` so a digest-created record's source path is
+    matched against the site's real content directory rather than a
+    hardcoded `content/posts` (issue #18); `None` keeps the same
+    pre-ADR-017 fallback.
     """
     slug = draft.slug
     if not slug:
@@ -343,7 +358,7 @@ def convert(draft: Draft, static_dir: str | None = None) -> ConvertedPost:
 
     return ConvertedPost(
         slug=slug,
-        post_path=post_path(draft, slug),
+        post_path=post_path(draft, slug, content_dir),
         text=text,
         url=frontmatter["url"],
         images=placed,

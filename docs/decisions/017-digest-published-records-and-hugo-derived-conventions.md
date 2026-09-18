@@ -133,6 +133,14 @@ receive them:
   decides what counts as a post from there, so the walk itself covers
   everything under `contentdir`, not just what happens to sit under a
   `posts/` subdirectory). Wired into `digest.discover_posts` this round.
+  It is also, as of issue #18, wired into `convert.post_path`: a
+  digest-created record's republish now matches its source path against
+  the site's real `contentdir` (read from the last digest's state,
+  `digest.read_content_dir_from_state`, the same shape as `staticdir`
+  below), not the hardcoded `content/posts` prefix. A site whose archive
+  moves outside `content/posts` used to fall through that check and land
+  a duplicate file on republish instead of updating the one already on
+  main; that gap is closed, not deferred.
 - `params.mainsections` decides which walked files are posts (archive
   content) versus a page bundle or anything else. Hugo's JSON output
   lowercases every key, `mainsections` included; this is read that way,
@@ -140,12 +148,10 @@ receive them:
 - `staticdir` is where images live on this site (`static` on Scott's own
   site, matching `convert.py`'s hardcoded `static/images` prefix exactly,
   so nothing observable changes for him). Derived and surfaced on the
-  admin status page this round, not yet wired into `convert.py`:
-  `convert.convert(draft)` is a pure function of the draft alone, with no
-  path today to a live `HugoConventions` value, and threading one through
-  it, `publisher.py`, `builder/runner.py`, and `cli.py` at once is real
-  surface change this round does not take on. Left for the round that
-  gives converting a draft an actual site context to read from.
+  admin status page this round, and wired into `convert.py`,
+  `publisher.py`, `builder/runner.py`, and `cli.py` (`digest.
+  read_static_dir_from_state`), each reading the last digest's state
+  rather than a live `HugoConventions` value.
 - `taxonomies` validates that the `categories`/`tags`/`series` keys
   Chronicle's frontmatter allowlist already carries are taxonomies this
   site's config actually defines, rather than assuming English defaults

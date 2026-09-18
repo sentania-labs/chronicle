@@ -269,6 +269,29 @@ def read_static_dir_from_state(data_dir: Path) -> str:
     return static_dir if isinstance(static_dir, str) and static_dir.strip() else FALLBACK_STATIC_DIR
 
 
+def read_content_dir_from_state(data_dir: Path) -> str:
+    """The `contentdir` the last digest's `hugo config` read, from `data/state/toolchain.json`.
+
+    The same shape as `read_static_dir_from_state`, for the same reason
+    (issue #18): `convert.post_path` needs the site's real `contentdir` to
+    decide whether a digest-created record's source path is still eligible
+    for reuse, and it must not run a fresh `hugo config` call of its own to
+    get it. Falls back to `FALLBACK_CONTENT_DIR` on anything short of a
+    clean read: no digest has ever run yet, the file does not parse, or it
+    predates this field.
+    """
+    path = data_dir.joinpath(*TOOLCHAIN_STATE_PATH)
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return FALLBACK_CONTENT_DIR
+    conventions = loaded.get("conventions") if isinstance(loaded, dict) else None
+    content_dir = conventions.get("contentdir") if isinstance(conventions, dict) else None
+    if isinstance(content_dir, str) and content_dir.strip():
+        return content_dir
+    return FALLBACK_CONTENT_DIR
+
+
 def unconfigured_taxonomy_keys(conventions: HugoConventions) -> tuple[str, ...]:
     """Which of Chronicle's own taxonomy frontmatter keys this site's Hugo
     config does not actually define as a taxonomy.

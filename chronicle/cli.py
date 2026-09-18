@@ -96,7 +96,8 @@ def _convert_dry_run(args: argparse.Namespace) -> int:
     try:
         draft = store.get_draft(args.draft_id)
         static_dir = digest_mod.read_static_dir_from_state(store.data_dir)
-        converted = convert.convert(draft, static_dir)
+        content_dir = digest_mod.read_content_dir_from_state(store.data_dir)
+        converted = convert.convert(draft, static_dir, content_dir)
     finally:
         store.close()
     print(f"post_path: {converted.post_path}")

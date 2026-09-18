@@ -226,7 +226,8 @@ def _link_or_copy(src: str, dst: str) -> None:
 
 def _write_post_and_images(store: Store, draft: Draft, scratch: Path) -> convert.ConvertedPost:
     static_dir = digest_mod.read_static_dir_from_state(store.data_dir)
-    converted = convert.convert(draft, static_dir)
+    content_dir = digest_mod.read_content_dir_from_state(store.data_dir)
+    converted = convert.convert(draft, static_dir, content_dir)
     post_path = scratch / converted.post_path
     post_path.parent.mkdir(parents=True, exist_ok=True)
     # `_copy_site` hard-links `scratch` to `store.site_dir` wherever it can, so
