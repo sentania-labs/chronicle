@@ -496,11 +496,13 @@ def draft_image_detach(
 def _untracked_posts(store: Store) -> tuple[list[Post], list[Post]]:
     """(every post, the posts no draft record tracks yet).
 
-    Same rule as `Store._create_published_drafts_from_digest`: a post is
-    tracked when its slug is some draft's slug, or its path is some draft's
-    `source_post` path or `published` post path. Digest lands a record for
-    each post it sees, so on a digested blog this is usually empty; what is
-    left is the recovery case (a post digest could not import).
+    Same rule as `Store._create_published_drafts_from_digest`, which holds
+    the other copy of it (store.py is owned elsewhere, so the two are kept in
+    step by hand: change one, change both). A post is tracked when its slug is
+    some draft's slug, or its path is some draft's `source_post` path or
+    `published` post path. Digest lands a record for each post it sees, so on
+    a digested blog this is usually empty; what is left is the recovery case
+    (a post digest could not import).
     """
     posts = store.list_posts()
     drafts = store.list_drafts()
@@ -542,12 +544,14 @@ def import_search(
     )
 
 
-def _import_refusal(services: Services, request: Request, message: str, status_code: int) -> Any:
-    pg, posts_total, untracked_total = _import_listing(services, "", 1)
+def _import_refusal(
+    services: Services, request: Request, message: str, status_code: int, q: str, page: int
+) -> Any:
+    pg, posts_total, untracked_total = _import_listing(services, q, page)
     return HTMLResponse(
         tpl.import_page(
             pg,
-            "",
+            q,
             banner=banner_enabled(request),
             notice=message,
             posts_total=posts_total,
@@ -566,6 +570,11 @@ async def import_create(
 ) -> Any:
     form = await request.form()
     slug = str(form.get("slug", ""))
+    q = str(form.get("q", ""))
+    try:
+        page = max(1, int(str(form.get("page", "1"))))
+    except ValueError:
+        page = 1
     posts, untracked = _untracked_posts(services.store)
     if any(p.slug == slug for p in posts) and not any(p.slug == slug for p in untracked):
         # A stale tab or a hand-built POST: the list no longer offers this
@@ -576,6 +585,8 @@ async def import_create(
             f"{slug} is already a post on the Posts tab, so there is nothing to import. "
             "Open it from there.",
             409,
+            q,
+            page,
         )
     try:
         draft, warnings = services.store.create_draft(consumer.name, from_post=slug)
@@ -588,7 +599,7 @@ async def import_create(
                 "to another post on this board. Nothing was created. If that post is this "
                 "one, it is already on the Posts tab."
             )
-        return _import_refusal(services, request, message, exc.status_code)
+        return _import_refusal(services, request, message, exc.status_code, q, page)
     return _redirect_to_draft(draft.id, warnings)
 
 

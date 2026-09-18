@@ -1307,3 +1307,34 @@ def test_import_still_creates_a_post_for_an_untracked_one(
     response = client.post("/content/import", data={"slug": "recover-me"}, follow_redirects=False)
     assert response.status_code == 303
     assert [d.slug for d in services.store.list_drafts()] == ["recover-me"]
+
+
+def test_import_refusal_keeps_the_visitors_search_and_page(
+    client: TestClient, services: Services
+) -> None:
+    """A refused import re-renders the list the visitor was on, not page one
+    of an unfiltered list, and the listing's own forms carry both values."""
+    _digest_posts(services, "already-here", "other-race", "second-race")
+    _set_fields(services, make_draft(services, "published"), slug="already-here")
+
+    listed = client.get("/content/import?q=race").text
+    assert 'name="q" value="race"' in listed
+    assert 'name="page" value="1"' in listed
+
+    response = client.post(
+        "/content/import", data={"slug": "already-here", "q": "race", "page": "1"}
+    )
+    assert response.status_code == 409
+    assert 'value="race"' in response.text
+    assert 'value="other-race"' in response.text
+    assert "Title of already-here" not in response.text
+
+
+def test_import_refusal_tolerates_a_garbage_page(client: TestClient, services: Services) -> None:
+    _digest_posts(services, "already-here", "loose")
+    _set_fields(services, make_draft(services, "published"), slug="already-here")
+    response = client.post(
+        "/content/import", data={"slug": "already-here", "q": "", "page": "banana"}
+    )
+    assert response.status_code == 409
+    assert 'value="loose"' in response.text

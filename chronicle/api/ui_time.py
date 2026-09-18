@@ -11,7 +11,7 @@ not know falls back to the default instead of failing a page render.
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime, tzinfo
+from datetime import UTC, date, datetime, tzinfo
 from functools import lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -50,15 +50,35 @@ def sort_key(stamp: object) -> datetime:
     return parse_stamp(stamp) or datetime.min.replace(tzinfo=UTC)
 
 
+def _date_only(stamp: object) -> date | None:
+    """The calendar date of a stamp that has no time component, else None.
+    A bare date has no instant to convert, so shifting it into a zone west of
+    UTC would show the day before."""
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return date.fromisoformat(stamp.strip())
+    except ValueError:
+        return None
+
+
 def local_time(stamp: object, *, now: datetime | None = None, zone: tzinfo | None = None) -> str:
     """`14:52 CDT` for a stamp on today's date in the zone, and
-    `2026-09-17 14:52 CDT` for any other day. A missing or unparsable stamp
-    renders as `-`. `now` and `zone` exist for tests."""
+    `2026-09-17 14:52 CDT` for any other day. A date-only stamp renders as its
+    own date, unshifted. A missing, unparsable, or out-of-range stamp renders
+    as `-`. `now` and `zone` exist for tests."""
+    day = _date_only(stamp)
+    if day is not None:
+        return day.isoformat()
     parsed = parse_stamp(stamp)
     if parsed is None:
         return "-"
     tz = zone or ui_zone()
-    local = parsed.astimezone(tz)
+    try:
+        local = parsed.astimezone(tz)
+    except (OverflowError, ValueError):
+        # A stamp near year 1 or 9999 cannot be shifted into a zone.
+        return "-"
     today = (now or datetime.now(UTC)).astimezone(tz).date()
     clock = local.strftime("%H:%M %Z")
     if local.date() == today:

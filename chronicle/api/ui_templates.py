@@ -308,6 +308,8 @@ def import_page(
         f"<td>{escape(p['date'])}</td>"
         '<td><form method="post" action="/content/import">'
         f'<input type="hidden" name="slug" value="{escape(p["slug"])}">'
+        f'<input type="hidden" name="q" value="{escape(q)}">'
+        f'<input type="hidden" name="page" value="{pg.page}">'
         '<button type="submit">Import as post</button></form></td>'
         "</tr>"
         for p in pg.items
