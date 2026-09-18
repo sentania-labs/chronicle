@@ -13,8 +13,9 @@ exists, and is disabled with "Preview first" until then.
 
 The page and the staged action route read the same offers. `staged_refusal`
 is how the route asks: a click whose plan runs more than one step is refused
-when the offer for it is disabled or absent, so a POST cannot do what the
-page said it would not (this UI has no login, so the offer is the guard).
+when the offer for it is disabled or absent, and a one-step click is refused
+when the page renders its offer disabled, so a POST cannot do what the page
+said it would not (this UI has no login, so the offer is the guard).
 """
 
 from __future__ import annotations
@@ -151,14 +152,16 @@ def staged_refusal(
 ) -> str | None:
     """Why a click on `action` must be refused, or None when it may run.
 
-    Only a click that stages (its plan is more than the action itself) is
-    judged here: a single legal step stays a plain table lookup in the store,
-    as it always was. A staged click is allowed only if the editor offers it
-    as available for this same state, so the page and the route cannot
-    disagree about what a click does.
+    A click that stages (its plan is more than the action itself) is allowed
+    only if the editor offers it as available for this same state, so the page
+    and the route cannot disagree about what a click does. A single legal step
+    is held to the same offer when the page renders one for it and disabled
+    (Publish on a draft in review with no current preview); with no offer at
+    all it stays a plain table lookup in the store, which is where the refusals
+    the table cannot see (an open publish PR) keep their own error codes.
     """
     plan = plan_action(status, action, actor_is_ui)
-    if plan is None or len(plan) < 2:
+    if plan is None:
         return None
     offer = next(
         (
@@ -176,7 +179,7 @@ def staged_refusal(
         None,
     )
     if offer is None:
-        return "That action is not available right now."
+        return "That action is not available right now." if len(plan) > 1 else None
     if offer.state == DISABLED:
         return f"{offer.label} is not available right now ({offer.reason})."
     return None

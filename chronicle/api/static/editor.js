@@ -128,16 +128,17 @@ function makeBackupStore(storage, key) {
 }
 
 // What the conflict page does with the browser's backup slot. The attempted
-// text is stored only when the slot holds nothing that carries it: an entry
-// with the same body is the editor's fuller copy (title, tags and so on), and
-// an entry with a different body is earlier work nobody has answered for (an
-// offered backup the visitor ignored, or another tab's), which this page must
-// not overwrite. The attempted text stays in the page's own pane instead.
-function conflictBackupAction(existing, body) {
+// state ({body, fields}) is stored only when the slot holds nothing that
+// carries it: an entry with the same body and the same fields already is that
+// work, and an entry that differs in either (a body, or just an older title or
+// tags) is earlier work nobody has answered for (an offered backup the visitor
+// ignored, or another tab's), which this page must not overwrite. The
+// attempted state stays in the page's own pane instead.
+function conflictBackupAction(existing, attempted) {
   if (!existing || typeof existing.body !== "string") {
     return "write";
   }
-  return existing.body === body ? "same" : "keep";
+  return sameState(existing, attempted) ? "same" : "keep";
 }
 
 function backupMessage(verdict, whenText) {
@@ -223,15 +224,15 @@ function saveStateText(state, detail) {
   var body = attempted.textContent || "";
   var outcome = "unavailable";
   try {
+    var fields = {};
+    try {
+      fields = JSON.parse(attempted.getAttribute("data-fields") || "{}") || {};
+    } catch (e) {
+      // a malformed attribute leaves the body-only backup
+    }
     var existing = JSON.parse(window.localStorage.getItem(key) || "null");
-    var action = conflictBackupAction(existing, body);
+    var action = conflictBackupAction(existing, { body: body, fields: fields });
     if (action === "write") {
-      var fields = {};
-      try {
-        fields = JSON.parse(attempted.getAttribute("data-fields") || "{}") || {};
-      } catch (e) {
-        // a malformed attribute leaves the body-only backup
-      }
       window.localStorage.setItem(
         key,
         JSON.stringify({

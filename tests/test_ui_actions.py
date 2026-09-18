@@ -32,6 +32,14 @@ def build_preview(services: Services, draft_id: str) -> None:
     store.finish_run(run.id, "builder-1", True, {"preview_url": f"/preview/{draft.slug}/"})
 
 
+def previewed_then_submitted(services: Services, draft_id: str) -> None:
+    """An `in_review` draft whose current text has a built preview (the preview
+    finishing moves a draft to `previewed`; submitting it puts it in review)."""
+    build_preview(services, draft_id)
+    services.store.act_on_draft(draft_id, "submit", "scott", True)
+    assert services.store.get_draft(draft_id).status == "in_review"
+
+
 def open_watch(services: Services, draft_id: str, kind: str) -> None:
     services.store.record_watch(
         WatchEntry(
@@ -306,17 +314,136 @@ def test_the_route_and_the_page_read_one_offer(client: TestClient, services: Ser
     # for every status and both preview states.
     for status in DRAFT_STATUSES:
         for with_preview in (False, True):
-            draft_id = make_draft(services, status)
-            if with_preview:
-                build_preview(services, draft_id)
-            html = client.get(f"/content/drafts/{draft_id}").text
             for action in ("approve", "preview"):
-                plan = plan_action(status, action, True)
-                if plan is None or len(plan) == 1:
+                # A fresh draft per click, with its own title: a click that goes
+                # through changes the status and pins a slug, and two drafts may
+                # not pin the same one.
+                draft_id = make_draft(
+                    services, status, title=f"Draft {status} {with_preview} {action}"
+                )
+                if with_preview:
+                    build_preview(services, draft_id)  # may move the draft to previewed
+                actual = services.store.get_draft(draft_id).status
+                if plan_action(actual, action, True) is None:
                     continue
+                html = client.get(f"/content/drafts/{draft_id}").text
                 offered = f"/content/drafts/{draft_id}/actions/{action}" in html
                 response = client.post(f"/content/drafts/{draft_id}/actions/{action}")
                 assert (response.status_code == 200) == offered, (status, action, with_preview)
+
+
+# --- The one-step publish is held to the offer too -----------------------------
+
+
+def test_a_one_step_publish_with_no_current_preview_is_refused_and_writes_nothing(
+    client: TestClient, services: Services
+) -> None:
+    # `in_review` -> `approve` is a single step, so it never staged, and the
+    # offer check used to skip it: a POST published what the page rendered
+    # disabled ("Preview first").
+    draft_id = make_draft(services, "in_review")
+    assert plan_action("in_review", "approve", True) == ("approve",)
+    html = client.get(f"/content/drafts/{draft_id}").text
+    assert "Preview first" in html and f"/content/drafts/{draft_id}/actions/approve" not in html
+    version = services.store.get_draft(draft_id).version_no
+    refused = client.post(f"/content/drafts/{draft_id}/actions/approve")
+    assert refused.status_code == 409
+    assert "Preview first" in refused.text
+    draft = services.store.get_draft(draft_id)
+    assert draft.status == "in_review" and draft.version_no == version
+    assert services.store.last_run(draft_id, kind="publish") is None
+
+
+def test_a_one_step_publish_on_a_stale_preview_is_refused(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "in_review")
+    previewed_then_submitted(services, draft_id)
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(draft_id, "scott", draft.version_no, draft.frontmatter, "edited")
+    assert services.store.get_draft(draft_id).status == "in_review"
+    refused = client.post(f"/content/drafts/{draft_id}/actions/approve")
+    assert refused.status_code == 409
+    assert services.store.last_run(draft_id, kind="publish") is None
+
+
+def test_a_one_step_publish_with_a_current_preview_still_runs(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "in_review")
+    previewed_then_submitted(services, draft_id)
+    response = client.post(f"/content/drafts/{draft_id}/actions/approve")
+    assert response.status_code == 200
+    assert services.store.get_draft(draft_id).status == "approved"
+    assert services.store.last_run(draft_id, kind="publish") is not None
+
+
+def test_a_publish_retry_on_an_approved_post_still_needs_no_preview(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "approved", with_publish=True)
+    response = client.post(f"/content/drafts/{draft_id}/actions/approve")
+    assert response.status_code == 200
+
+
+# --- The offer check runs under the store lock -----------------------------------
+
+
+@pytest.mark.parametrize("status", ["previewed", "in_review"])
+def test_a_save_landing_after_the_click_is_read_cannot_publish_an_unpreviewed_version(
+    client: TestClient, services: Services, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """The window the review found: the route checked the offer, then took the
+    store lock, and a save landing in between was published unpreviewed.
+
+    The save is made to land at exactly that point, between the route's call
+    into the store and the store taking its lock (the only place a writer could
+    always slip in), by wrapping `act_on_draft_staged` on the instance. With the
+    offer checked before the call, the click saw preview N current and then ran
+    against version N+1; checked under the lock it sees version N+1 and refuses.
+    The wrapper saves before the lock is held, so it cannot deadlock the guard
+    that now runs inside it."""
+    # The route's store is the app's own, not the fixture's: patch that one.
+    store = client.app.state.services.store  # type: ignore[attr-defined]
+    draft_id = make_draft(services, status)
+    build_preview(services, draft_id)
+    if status == "in_review":
+        store.act_on_draft(draft_id, "submit", "scott", True)
+    assert store.get_draft(draft_id).status == status
+    version = store.get_draft(draft_id).version_no
+    real = store.act_on_draft_staged
+
+    def save_then_act(*args: object, **kwargs: object) -> object:
+        current = store.get_draft(draft_id)
+        store.save_draft(draft_id, "ghostwriter", current.version_no, current.frontmatter, "raced")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "act_on_draft_staged", save_then_act)
+    refused = client.post(f"/content/drafts/{draft_id}/actions/approve")
+    assert refused.status_code == 409
+    draft = store.get_draft(draft_id)
+    assert draft.version_no == version + 1 and draft.status == status
+    assert store.last_run(draft_id, kind="publish") is None
+    events, _cursor = store.events_since(0)
+    assert not [e for e in events if e.type == "draft.approve" and e.draft_id == draft_id]
+
+
+def test_the_guard_runs_under_the_store_lock(services: Services) -> None:
+    store = services.store
+    draft_id = make_draft(services, "in_review")
+    held: list[bool] = []
+
+    def guard(_draft: object) -> str | None:
+        held.append(store._lock._thread_lock.locked())
+        return "no"
+
+    from chronicle.api.errors import ApiError
+
+    with pytest.raises(ApiError) as caught:
+        store.act_on_draft_staged(draft_id, "approve", "scott", True, guard=guard)
+    assert caught.value.status_code == 409 and caught.value.code == "offer_unavailable"
+    assert held == [True]
+    assert store.get_draft(draft_id).status == "in_review"
 
 
 # --- An open unpublish PR blocks the staged Preview ---------------------------
@@ -351,9 +478,17 @@ def test_a_staged_preview_on_a_post_with_an_open_unpublish_pr_is_refused(
     assert services.store.last_run(draft_id, kind="preview") is None
 
 
-def test_staged_refusal_is_none_for_an_unstaged_action() -> None:
-    assert staged_refusal("in_review", "approve", True, has_preview=False) is None
+def test_staged_refusal_is_none_for_an_action_the_page_does_not_disable() -> None:
+    assert staged_refusal("in_review", "approve", True, has_preview=True) is None
     assert staged_refusal("drafting", "reject", True, has_preview=False) is None
+    # No offer at all for a one-step click (an open publish PR): the store's own
+    # 409, with its own code, stays the answer.
+    assert (
+        staged_refusal("approved", "approve", True, has_preview=False, publish_pr_open=True) is None
+    )
+    assert staged_refusal("in_review", "approve", True, has_preview=False) == (
+        "Publish is not available right now (Preview first)."
+    )
     assert staged_refusal("drafting", "approve", True, has_preview=False) == (
         "Publish is not available right now (Preview first)."
     )

@@ -603,22 +603,22 @@ async def draft_action(
         # Staged: the editor offers Preview on a published post and Publish
         # on a previewed one, and the store runs the steps
         # `transitions.plan_action` says make that legal (nothing decided here).
-        # A staged click is first held to the offer the page rendered for it:
-        # `ui_actions.staged_refusal` reads the same state the page does.
-        draft = services.store.get_draft(draft_id)
-        refusal = staged_refusal(
-            draft.status,
-            action,
-            consumer.is_ui,
-            republish=bool(draft.published),
-            **_offer_state(
-                services.store, draft, services.store.last_run(draft_id, kind="preview")
-            ),
-        )
-        if refusal is not None:
-            raise ApiError(409, "offer_unavailable", refusal)
+        # The click is held to the offer the page rendered for it, and that
+        # check runs inside the store's lock (`guard`), on the draft as it is
+        # then: `ui_actions.staged_refusal` reads the same state the page does.
+        def guard(draft: Draft) -> str | None:
+            return staged_refusal(
+                draft.status,
+                action,
+                consumer.is_ui,
+                republish=bool(draft.published),
+                **_offer_state(
+                    services.store, draft, services.store.last_run(draft.id, kind="preview")
+                ),
+            )
+
         services.store.act_on_draft_staged(
-            draft_id, action, consumer.name, consumer.is_ui, feedback
+            draft_id, action, consumer.name, consumer.is_ui, feedback, guard=guard
         )
     except ApiError as exc:
         return _editor_response(

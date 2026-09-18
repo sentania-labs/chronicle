@@ -196,12 +196,24 @@ test("a blocked or throwing storage never throws out of the backup store", () =>
   }
 });
 
-test("the conflict page never overwrites earlier unanswered work, and stores only when nothing carries the text", () => {
+test("the conflict page never overwrites earlier unanswered work, and stores only when nothing carries the state", () => {
+  const attempted = { body: "EDIT TWO", fields: { title: "two", tags: "b" } };
   // The offered backup the visitor ignored: a different body must survive.
-  assert.equal(conflictBackupAction({ body: "EDIT ONE", fields: { title: "one" } }, "EDIT TWO"), "keep");
-  // The editor's own fuller copy of this very text is left as it is.
-  assert.equal(conflictBackupAction({ body: "EDIT TWO", fields: { title: "two" } }, "EDIT TWO"), "same");
-  // Nothing stored, or an unreadable entry: the attempted text goes in.
-  assert.equal(conflictBackupAction(null, "EDIT TWO"), "write");
-  assert.equal(conflictBackupAction({ nope: true }, "EDIT TWO"), "write");
+  assert.equal(conflictBackupAction({ body: "EDIT ONE", fields: { title: "one" } }, attempted), "keep");
+  // The editor's own copy of this very state is left as it is.
+  assert.equal(conflictBackupAction({ body: "EDIT TWO", fields: { title: "two", tags: "b" } }, attempted), "same");
+  // Same body but older title or tags: the attempted field values are not stored yet.
+  assert.equal(conflictBackupAction({ body: "EDIT TWO", fields: { title: "one", tags: "b" } }, attempted), "keep");
+  assert.equal(conflictBackupAction({ body: "EDIT TWO", fields: { title: "two", tags: "a" } }, attempted), "keep");
+  assert.equal(conflictBackupAction({ body: "EDIT TWO", fields: { title: "two" } }, attempted), "keep");
+  assert.equal(conflictBackupAction({ body: "EDIT TWO" }, attempted), "keep");
+  // A missing field and an empty one are the same, as everywhere else.
+  assert.equal(
+    conflictBackupAction({ body: "EDIT TWO", fields: { title: "two", tags: "b", summary: "" } }, attempted),
+    "same"
+  );
+  // Nothing stored, or an unreadable entry: the attempted state goes in.
+  assert.equal(conflictBackupAction(null, attempted), "write");
+  assert.equal(conflictBackupAction({ nope: true }, attempted), "write");
 });
+

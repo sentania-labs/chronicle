@@ -217,10 +217,13 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   (editor buttons only, never `/v1`) runs that path's steps under one lock:
   Preview on a `published` post revises it first, Publish on a `previewed` one
   submits it first. The lifecycle stays in the table, but the action route also
-  holds a staged click to the offer the page rendered for it
-  (`ui_actions.staged_refusal`, same `_offer_state` inputs): a disabled or absent
-  offer is a 409, so "Preview first" and an open unpublish PR are enforced
-  where the page states them, not only on the button. A preview counts only
+  holds a click to the offer the page rendered for it
+  (`ui_actions.staged_refusal`, same `_offer_state` inputs): a disabled offer,
+  or an absent one for a staged click, is a 409, so "Preview first" and an open
+  unpublish PR are enforced where the page states them, not only on the button.
+  That check is the `guard` `act_on_draft_staged` runs under the store lock,
+  never a check before the call: a save landing in between would otherwise be
+  published unpreviewed. A preview counts only
   while `built_version` equals the draft's version, so a save makes it stale
   again. The draft status shown to a human goes through
   `ui_status.status_label`; API values and filter query values stay raw.
