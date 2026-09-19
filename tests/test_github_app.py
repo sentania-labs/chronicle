@@ -344,7 +344,8 @@ def test_digest_html_endpoint_shows_an_already_running_notice(admin_client: Test
 def test_manifest_json_round_trips_through_the_connect_page(admin_client: TestClient) -> None:
     response = admin_client.get("/admin/github/connect")
     text = response.text
-    start = text.index("<pre>") + len("<pre>")
+    marker = '<pre class="lat-code">'
+    start = text.index(marker) + len(marker)
     end = text.index("</pre>")
     from html import unescape
 

@@ -32,6 +32,7 @@ body.wide .chr-page { max-width: 96rem; }
 .chr-flow { white-space: normal; }
 
 a.lat-tab { text-decoration: none; }
+.lat-btn { white-space: nowrap; }
 .lat-tab { border-radius: 0; }
 
 .chr-page > h2 {
@@ -77,6 +78,11 @@ input[type="file"]::file-selector-button {
 .chr-narrow { max-width: 28rem; }
 .chr-filter { display: flex; align-items: flex-end; flex-wrap: wrap; gap: var(--space-5); margin: var(--space-7) 0; }
 .chr-filter > .lat-btn:not(:first-child) { margin-top: 0; }
+/* A select and an input are not the same height by default; one row of
+   controls has to line up, or their labels sit at different heights. */
+.chr-filter .lat-input, .chr-filter .lat-select, .chr-filter .lat-btn {
+  height: 32px; padding-block: 0;
+}
 .chr-field { min-width: 12rem; }
 .chr-field .lat-label { margin-top: 0; }
 .chr-grow { flex: 1 1 16rem; }
@@ -98,6 +104,10 @@ input[type="file"]::file-selector-button {
 }
 .lat-table-scroll { margin-bottom: var(--space-5); }
 .lat-card > .lat-table-scroll:last-child { margin-bottom: 0; }
+/* A key and value table (Admin's status page): keys in a fixed first column so
+   the values line up down the page, and the value in `ink`, the key in muted. */
+.lat-table:not(:has(thead)) { table-layout: fixed; }
+.lat-table:not(:has(thead)) td:first-child { width: 45%; }
 .lat-table:not(:has(thead)) td + td { color: var(--ink); }
 .lat-table td.lat-num, .lat-table th.lat-num { white-space: nowrap; }
 .lat-table th.lat-num { text-align: right; }
@@ -108,6 +118,8 @@ input[type="file"]::file-selector-button {
 .chr-cards > .lat-card { margin: 0; padding: var(--space-6) var(--space-7); }
 .chr-card-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-4); margin-bottom: var(--space-3); }
 .chr-card-head h3 { margin: 0; margin-right: var(--space-3); }
+.chr-card-head a { text-decoration: none; }
+.chr-card-head a:hover { text-decoration: underline; }
 .chr-cards .muted { margin: 0; }
 .chr-cards .muted + .muted { margin-top: var(--space-2); }
 details#published { margin-top: var(--space-9); }
