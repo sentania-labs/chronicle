@@ -101,6 +101,10 @@ FRONTMATTER_STRING_LIST_KEYS = ("tags", "categories")
 # markdown heading. The frontmatter pattern mirrors what `digest.parse_frontmatter`
 # will actually split, so detection and parsing cannot disagree.
 _FRONTMATTER_BLOCK = re.compile(r"\A(---|\+\+\+)\n.*?\n\1\n", re.DOTALL)
+# The `action` of the feedback entry `_seed_draft_from_submission` writes for
+# each non-primary material; `changes_since` includes these at any cutoff.
+MATERIAL_ACTION = "material"
+
 _IMAGE_ID = re.compile(r"[0-9a-f]{64}")
 _LEADING_HEADING = re.compile(r"\s*#{1,6}[ \t]+(\S[^\n]*)")
 
@@ -666,7 +670,7 @@ class Store:
                     draft_id=draft.id,
                     author=actor,
                     created_at=stamp,
-                    action="material",
+                    action=MATERIAL_ACTION,
                     version_no=0,
                     text="\n".join(parts),
                 )
@@ -1067,13 +1071,28 @@ class Store:
                     "diff": self._diff(draft_id, version_no - 1, version_no),
                 }
             )
-        # Feedback written against version n arrived after the caller saved
-        # version n, so `since=n` has to include it or a ghostwriter resuming
-        # at its own last version would never see the review that followed it.
+        # Two rules, and only two.
+        #
+        # Review feedback (an action's feedback, a closed PR, a failed
+        # publish) is cut off by version: written against version n, it
+        # arrived after the caller saved version n, so `since=n` includes it
+        # or a ghostwriter resuming at its own last version would never see
+        # the review that followed it. `since=n+1` does not.
+        #
+        # Seeded reference material (`MATERIAL_ACTION`) is not review of any
+        # version. It arrived with the submission the draft was made from, at
+        # version 0, and the ghostwriter has no memory between sessions, so a
+        # cutoff would hide it from every session after its first save. It is
+        # always included, at any `since`, in the same `feedback` list and log
+        # order it already appears in at `since=0`, so a client that reads it
+        # there needs no change. It is written once, when the draft is
+        # seeded, and never grows afterwards, so repeating it is bounded by the
+        # size of the submission; a client that only wants review comments skips entries whose
+        # `action` is `material`.
         feedback = [
             entry.model_dump(mode="json")
             for entry in self.list_feedback(draft_id)
-            if entry.version_no >= since
+            if entry.action == MATERIAL_ACTION or entry.version_no >= since
         ]
         return {
             "draft_id": draft_id,
