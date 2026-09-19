@@ -308,6 +308,7 @@ class Store:
         materials: list[Material],
         image_ids: list[str],
     ) -> Submission:
+        self._require_images(image_ids)
         record = Submission.model_validate(
             {
                 "id": new_id(),
@@ -408,6 +409,39 @@ class Store:
             )
         )
 
+    def _image_exists(self, image_id: str) -> bool:
+        # The shape guard comes first: an id becomes part of a path, so a
+        # caller-chosen string must never reach `_image_sidecar_path`.
+        return bool(_IMAGE_ID.fullmatch(image_id)) and self._image_sidecar_path(image_id).exists()
+
+    def _require_images(self, image_ids: list[str]) -> None:
+        """422 `image_not_found` naming the first id that is not in the image
+        store. Create and revise both call this: the detail page loads every
+        listed image, so an id that names nothing would leave a submission
+        whose page (and its actions) cannot render."""
+        for image_id in image_ids:
+            if not self._image_exists(image_id):
+                raise ApiError(
+                    422,
+                    "image_not_found",
+                    f"image {image_id} is not in the image store; upload it first",
+                    image_id=image_id,
+                )
+
+    def submission_images(self, image_ids: list[str]) -> tuple[list[Image], list[str]]:
+        """The stored images among `image_ids`, in order, and the ids that are
+        not in the store. A record written before create validated can carry
+        an id that names nothing; readers use this instead of `get_image` so
+        one such id does not take the whole page down."""
+        found: list[Image] = []
+        missing: list[str] = []
+        for image_id in image_ids:
+            if self._image_exists(image_id):
+                found.append(self.get_image(image_id))
+            else:
+                missing.append(image_id)
+        return found, missing
+
     @locked
     def revise_submission(
         self,
@@ -428,17 +462,7 @@ class Store:
         """
         record = self.get_submission(submission_id)
         resolve_submission_revise(record.status, submission_id)
-        for image_id in image_ids:
-            if not _IMAGE_ID.fullmatch(image_id) or not self._image_sidecar_path(image_id).exists():
-                # The detail page loads every listed image, so an id that
-                # names nothing would make the page (and its edit form)
-                # answer 404 for good.
-                raise ApiError(
-                    422,
-                    "image_not_found",
-                    f"image {image_id} is not in the image store; upload it first",
-                    image_id=image_id,
-                )
+        self._require_images(image_ids)
         if base_version != record.version_no:
             raise ApiError(
                 409,

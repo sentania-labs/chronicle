@@ -124,9 +124,22 @@ def _submission_response(
     # the same snapshot it computed anything else from.
     if submission is None:
         submission = services.store.get_submission(submission_id)
-    images = [_dump(services.store.get_image(image_id)) for image_id in submission.image_ids]
+    found, missing = services.store.submission_images(submission.image_ids)
+    images = [_dump(image) for image in found]
+    dumped = _dump(submission)
+    if missing:
+        # A record from before create checked its image ids. The page renders
+        # what exists, names what does not, and hands the edit form only real
+        # ids, so saving it drops the dead ones (issue 23).
+        dumped["image_ids"] = [image.image_id for image in found]
+        note = (
+            f"Not in the image store, so not shown: {', '.join(missing)}."
+            " Saving this submission removes them."
+        )
+        notice = f"{notice} {note}" if notice else note
+        notice_kind = notice_kind or "error"
     html = tpl.submission_detail_page(
-        _dump(submission),
+        dumped,
         images,
         banner=banner_enabled(request),
         notice=notice,

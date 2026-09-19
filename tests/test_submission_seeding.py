@@ -150,7 +150,14 @@ def test_image_ids_are_attached_as_inline_images(store: Store) -> None:
 
 
 def test_an_unknown_image_id_is_a_warning_not_a_failure(store: Store) -> None:
-    submission_id = make_claimed(store, [Material(name="notes", text="x")], ["f" * 64])
+    # `create_submission` refuses an unknown id now (issue 23), so this is a
+    # record from before that check: the bad id is written onto it directly.
+    submission_id = make_claimed(store, [Material(name="notes", text="x")])
+    record = store.get_submission(submission_id)
+    record.image_ids = ["f" * 64]
+    store._write_json(
+        store._submission_path(submission_id), record.model_dump(mode="json", by_alias=True)
+    )
 
     draft, warnings = store.create_draft("scott", from_submission=submission_id)
 
