@@ -37,3 +37,21 @@ def test_a_full_stamp_renders_as_local_clock_time() -> None:
 def test_a_space_separated_utc_stamp_from_a_real_blog_is_converted() -> None:
     html = _import_html("2005-06-10 17:37:40+00:00")
     assert '<td class="lat-num">2005-06-10 12:37 CDT</td>' in html
+
+
+def test_a_non_iso_date_renders_the_authors_raw_text() -> None:
+    html = _import_html("July 4, 2026", "2026/07/04")
+    assert '<td class="lat-num">July 4, 2026</td>' in html
+    assert '<td class="lat-num">2026/07/04</td>' in html
+
+
+def test_an_empty_date_renders_an_empty_cell_not_a_dash() -> None:
+    html = _import_html("")
+    assert '<td class="lat-num"></td>' in html
+    assert '<td class="lat-num">-</td>' not in html
+
+
+def test_a_naive_stamp_is_assumed_utc() -> None:
+    # Recorded tradeoff: 17:37 with no offset is taken as UTC, so 12:37 CDT.
+    html = _import_html("2005-06-10 17:37:40")
+    assert '<td class="lat-num">2005-06-10 12:37 CDT</td>' in html

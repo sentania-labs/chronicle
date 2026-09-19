@@ -418,6 +418,13 @@ def drafts_board_page(
 # --- Import ---------------------------------------------------------------
 
 
+def _frontmatter_date(raw: str) -> str:
+    """A post's frontmatter date for a human: local clock time when it parses
+    as ISO, else the author's own text unchanged."""
+    shown = local_time(raw)
+    return raw if shown == "-" else shown
+
+
 def import_page(
     pg: Page[dict[str, Any]],
     q: str,
@@ -455,7 +462,12 @@ def import_page(
         # leaves that as its own date on purpose: a date has no instant, and
         # shifting it west of UTC would show the day before. Do not "fix" that
         # into a clock time. A full stamp is converted to local clock time.
-        f'<td class="lat-num">{escape(local_time(p["date"]))}</td>'
+        # Anything `local_time` cannot read (`July 4, 2026`) shows the author's
+        # own text, and an empty date stays an empty cell, never a dash.
+        # A naive stamp (`2026-07-24 12:00:00`) is assumed UTC here, the store's
+        # convention in `parse_stamp`; Hugo reads it in the site's timezone, so
+        # the shown time can differ from Hugo's by the site's offset.
+        f'<td class="lat-num">{escape(_frontmatter_date(p["date"]))}</td>'
         '<td><form method="post" action="/content/import">'
         f'<input type="hidden" name="slug" value="{escape(p["slug"])}">'
         f'<input type="hidden" name="q" value="{escape(q)}">'
