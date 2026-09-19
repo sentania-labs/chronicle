@@ -3,7 +3,7 @@
 Chronicle's UI vendors two third-party libraries, `marked` and `EasyMDE`
 (a JS file and a stylesheet), and one first-party stylesheet pair shared with
 Scott's other tools, `Lattice` (`tokens.css` and `lattice.css`). Everything
-else under `chronicle/api/static/` (`style.css`, `ui.js`, `editor.js`) is
+else under `chronicle/api/static/` (`style.css`, `ui.js`, `editor.js`, `theme.js`) is
 original to this repository. Nothing is loaded from a CDN, ever.
 
 The full licence text of everything the vendored files contain is under
