@@ -312,3 +312,86 @@ def test_an_unquoted_yaml_date_is_dropped_because_it_is_not_a_string(store: Stor
     assert warnings == ["dropped frontmatter key 'date': it must be a string (got date)"]
     assert "date" not in store.get_draft(draft.id).frontmatter
     check_frontmatter(store.get_draft(draft.id).frontmatter)
+
+
+def _seeded_draft_at_version_two(store: Store) -> str:
+    """A seeded draft with two saves, then a revision request written against
+    version 2, so `since` values 0 to 3 all mean something."""
+    submission_id = make_claimed(
+        store,
+        [
+            Material(name="the post", text=POST_TEXT),
+            Material(name="run notes", text="ran it twice, the second run drifted"),
+            Material(name="link", url="https://example.com/ref"),
+        ],
+    )
+    draft, _ = store.create_draft("scott", from_submission=submission_id)
+    fm = {"title": "Why the lab drifted"}
+    store.save_draft(draft.id, "ghostwriter", 0, fm, "first\n")
+    store.save_draft(draft.id, "ghostwriter", 1, fm, "second\n")
+    store.act_on_draft(draft.id, "submit", "ghostwriter", False)
+    store.act_on_draft(draft.id, "request_revision", "scott", True, feedback="tighten the intro")
+    return draft.id
+
+
+def test_changes_feed_always_carries_the_seeded_reference_material(store: Store) -> None:
+    """Issue 25: a ghostwriter resuming at its own last saved version still
+    sees the reference material that arrived with the submission."""
+    draft_id = _seeded_draft_at_version_two(store)
+
+    for since in (0, 1, 2, 3):
+        feedback = store.changes_since(draft_id, since)["feedback"]
+        material = [entry for entry in feedback if entry["action"] == "material"]
+        assert [entry["text"].splitlines()[0] for entry in material] == [
+            "Material: run notes",
+            "Material: link",
+        ], f"since={since}"
+
+
+def test_changes_feed_still_cuts_ordinary_feedback_off_at_since(store: Store) -> None:
+    """The seeded-material rule must not widen the cutoff for review feedback:
+    feedback at version n is in `since=n` and out of `since=n+1`."""
+    draft_id = _seeded_draft_at_version_two(store)
+
+    def review_texts(since: int) -> list[str]:
+        return [
+            entry["text"]
+            for entry in store.changes_since(draft_id, since)["feedback"]
+            if entry["action"] != "material"
+        ]
+
+    assert review_texts(2) == ["tighten the intro"]
+    assert review_texts(3) == []
+
+
+def test_changes_feed_over_the_wire_keeps_material_at_since_one(
+    client: TestClient, agent_token: str
+) -> None:
+    created = client.post(
+        "/v1/submissions",
+        json={
+            "brief": "write this up",
+            "materials": [
+                {"name": "the post", "text": POST_TEXT},
+                {"name": "run notes", "text": "ran it twice"},
+            ],
+        },
+        headers=auth(agent_token),
+    ).json()
+    client.post(f"/v1/submissions/{created['id']}/claim", headers=auth(agent_token))
+    draft = client.post(
+        "/v1/drafts", json={"from_submission": created["id"]}, headers=auth(agent_token)
+    ).json()
+    saved = client.put(
+        f"/v1/drafts/{draft['id']}",
+        json={"base_version": 0, "frontmatter": {"title": "T"}, "body": "b"},
+        headers=auth(agent_token),
+    )
+    assert saved.status_code == 200
+
+    changes = client.get(
+        f"/v1/drafts/{draft['id']}/changes", params={"since": 1}, headers=auth(agent_token)
+    ).json()
+
+    assert [entry["action"] for entry in changes["feedback"]] == ["material"]
+    assert "ran it twice" in changes["feedback"][0]["text"]
