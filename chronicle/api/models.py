@@ -219,6 +219,11 @@ class Run(BaseModel):
     # so a `preview_succeeded` transition can be skipped when the draft has
     # since moved on to a newer version the build never saw (round C3 review).
     built_version: int | None = None
+    # A publish run only: the draft's `version_no` when `approve` queued it,
+    # which is the version the reviewer approved. The publisher refuses to
+    # convert a draft that has moved past it (issue 41). None on a run queued
+    # before this field existed, and on every other run kind.
+    approved_version: int | None = None
 
 
 class WatchEntry(BaseModel):

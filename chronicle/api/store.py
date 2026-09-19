@@ -901,6 +901,23 @@ class Store:
                 pr_url=watch.pr_url,
                 pr_number=watch.pr_number,
             )
+        # The same refusal for the stretch before the PR exists: approve has
+        # queued a publish run (or the publisher is building it) but no watch
+        # yet. Without it a save lands in that window, the draft stays
+        # `approved`, and the run converts text nobody previewed or approved
+        # (issue 41). A run that finishes releases the draft either way: a PR
+        # is a watch, a failure returns the draft to `in_review`.
+        running = self._active_publish_run(draft_id)
+        if running is not None:
+            raise ApiError(
+                409,
+                "publish_run_in_progress",
+                f"draft {draft_id} was approved at version {draft.version_no} and its publish"
+                f" run is {running.status}; wait for it to open its pull request or fail"
+                " before saving",
+                run_id=running.id,
+                approved_version=running.approved_version,
+            )
         check_frontmatter(frontmatter)
 
         if base_version != draft.version_no:
@@ -1074,8 +1091,14 @@ class Store:
         draft.slug = candidate
         draft.image_dir = image_dir
 
-    def _queue_run(self, draft_id: str, kind: str) -> Run:
-        run = Run(id=new_id(), draft_id=draft_id, kind=kind, created_at=now_stamp())
+    def _queue_run(self, draft_id: str, kind: str, approved_version: int | None = None) -> Run:
+        run = Run(
+            id=new_id(),
+            draft_id=draft_id,
+            kind=kind,
+            created_at=now_stamp(),
+            approved_version=approved_version,
+        )
         self._write_json(self._run_path(run.id), run.model_dump(mode="json"))
         self._write_json(
             self._queue_entry_path(run.id),
@@ -1087,6 +1110,17 @@ class Store:
             },
         )
         return run
+
+    def _active_publish_run(self, draft_id: str) -> Run | None:
+        """The draft's publish run while it is queued or building, else None.
+
+        This is the window between `approve` and the run's PR existing, where
+        `get_watch` is still None: neither an open PR nor a finished run says
+        the draft is being published, but it is."""
+        run = self.last_run(draft_id, kind="publish")
+        if run is not None and run.status in ("queued", "building"):
+            return run
+        return None
 
     @locked
     def act_on_draft(
@@ -1162,8 +1196,8 @@ class Store:
                     pr_url=watch.pr_url,
                     pr_number=watch.pr_number,
                 )
-            running = self.last_run(draft_id, kind="publish")
-            if running is not None and running.status in ("queued", "building"):
+            running = self._active_publish_run(draft_id)
+            if running is not None:
                 raise ApiError(
                     409,
                     "publish_run_in_progress",
@@ -1185,7 +1219,13 @@ class Store:
         draft.updated_at = now_stamp()
         self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
 
-        run = self._queue_run(draft_id, transition.run_kind) if transition.run_kind else None
+        run = None
+        if transition.run_kind:
+            # A publish run is queued for exactly the version being approved:
+            # the publisher checks it, and `save_draft` refuses new versions
+            # while the run is in flight (issue 41).
+            pinned = draft.version_no if transition.run_kind == "publish" else None
+            run = self._queue_run(draft_id, transition.run_kind, pinned)
         if feedback:
             self._append_feedback(
                 FeedbackEntry(
