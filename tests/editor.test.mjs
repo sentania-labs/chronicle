@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { sameState, backupVerdict, backupWriteAction, makeBackupStore, conflictBackupAction, backupMessage, uploadOutcome, lookupImageSrc, saveStateText } =
+const { pageTitles, sameState, backupVerdict, backupWriteAction, makeBackupStore, conflictBackupAction, backupMessage, uploadOutcome, lookupImageSrc, saveStateText } =
   require("../chronicle/api/static/editor.js");
 
 test("sameState compares the body and every field, missing and empty alike", () => {
@@ -217,3 +217,13 @@ test("the conflict page never overwrites earlier unanswered work, and stores onl
   assert.equal(conflictBackupAction({ nope: true }, attempted), "write");
 });
 
+
+test("pageTitles reads the tab title and heading the server rendered (#36)", () => {
+  const doc = { title: "Post: New name", querySelector: (sel) => (sel === "h1" ? { textContent: "Post: New name" } : null) };
+  assert.deepEqual(pageTitles(doc), { title: "Post: New name", heading: "Post: New name" });
+});
+
+test("pageTitles gives nothing for a page with neither, so a partial page never blanks them", () => {
+  assert.equal(pageTitles({ title: "", querySelector: () => null }), null);
+  assert.equal(pageTitles(null), null);
+});
