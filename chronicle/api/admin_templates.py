@@ -58,9 +58,10 @@ def page(
     active: str | None = None,
 ) -> str:
     """`active` is the href of the tab this page belongs to (one of the `*_TAB`
-    constants). A page with no `active` is one with no session behind it (login,
-    claim) or a one-off error page: it gets the header and theme control but no
-    tabs and no Log out."""
+    constants). Every page reached with an admin session passes one, error and
+    confirmation pages included, so the tabs and Log out are always there. Only
+    a page with no session behind it (login, claim) leaves it out, and gets the
+    header and theme control alone."""
     notice_html = ui_chrome.notice(notice, notice_kind) if notice else ""
     signed_in = active is not None
     header = ui_chrome.header("Chronicle admin", trailing=LOGOUT_FORM if signed_in else "")

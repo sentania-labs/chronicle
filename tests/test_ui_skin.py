@@ -94,6 +94,53 @@ def test_admin_marks_its_current_tab_and_puts_log_out_in_the_header(
     assert "Log out" not in admin_templates.login_page()
 
 
+def _assert_signed_in_chrome(html: str, tab: str) -> None:
+    assert f'class="lat-tab is-on" href="{tab}" aria-current="page"' in html
+    assert html.count("is-on") == 1
+    assert "Log out" in html
+
+
+def test_admin_error_pages_behind_a_session_keep_the_tabs_and_log_out(
+    admin_client: TestClient,
+) -> None:
+    """Each of these is reached with a session, so an admin who lands on one is
+    not left with only the back button."""
+    github = "/admin/github/connect"
+    cases = [
+        # (response, tab): the state cookie never matches, no App record exists
+        # yet, no installation has been chosen, and the forms are submitted empty.
+        (admin_client.get("/admin/github/callback", params={"code": "c", "state": "s"}), github),
+        (admin_client.get("/admin/github/install"), github),
+        (admin_client.get("/admin/github/repo"), github),
+        (admin_client.post("/admin/github/connect/org", data={"org": ""}), github),
+        (admin_client.post("/admin/github/install", data={}), github),
+        (admin_client.post("/admin/github/repo", data={"repo": "no-slash"}), github),
+        (admin_client.post("/admin/github/repo", data={"repo": "o/r"}), github),
+    ]
+    for response, tab in cases:
+        assert response.status_code in (400, 409, 422), response.url
+        _assert_signed_in_chrome(response.text, tab)
+
+
+def test_the_digest_already_running_page_keeps_the_tabs_and_log_out(
+    admin_client: TestClient,
+) -> None:
+    admin = admin_client.app.state.admin_services  # type: ignore[attr-defined]
+    assert admin._digest_lock.acquire(blocking=False)
+    try:
+        response = admin_client.post("/admin/digest")
+    finally:
+        admin._digest_lock.release()
+    assert response.status_code == 409
+    _assert_signed_in_chrome(response.text, "/admin")
+
+
+def test_the_session_less_pages_still_have_no_tabs_and_no_log_out() -> None:
+    for html in (admin_templates.login_page(), admin_templates.claim_page()):
+        assert "lat-tabs" not in html
+        assert "Log out" not in html
+
+
 def test_the_theme_control_ships_hidden_until_the_script_can_use_it() -> None:
     html = _board()
     assert re.search(r'<button[^>]*id="theme-toggle"[^>]*\bhidden\b', html)
