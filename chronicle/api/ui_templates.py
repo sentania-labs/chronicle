@@ -397,7 +397,11 @@ def import_page(
         "<tr>"
         f"<td>{escape(p['slug'])}</td>"
         f"<td>{escape(p['title'])}</td>"
-        f"<td>{escape(p['date'])}</td>"
+        # A post's date is frontmatter and is often a bare YYYY-MM-DD. `local_time`
+        # leaves that as its own date on purpose: a date has no instant, and
+        # shifting it west of UTC would show the day before. Do not "fix" that
+        # into a clock time. A full stamp is converted to local clock time.
+        f"<td>{escape(local_time(p['date']))}</td>"
         '<td><form method="post" action="/content/import">'
         f'<input type="hidden" name="slug" value="{escape(p["slug"])}">'
         f'<input type="hidden" name="q" value="{escape(q)}">'
