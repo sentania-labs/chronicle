@@ -67,6 +67,15 @@ def test_from_post_image_dir_falls_back_to_slug_with_no_url(store: Store) -> Non
     assert draft.image_dir == "no-url-post"
 
 
+def test_from_post_with_an_unusable_url_segment_falls_back_and_warns(store: Store) -> None:
+    """Issue 28: an import cannot be refused (the post already exists on main),
+    so it pins the slug's directory and says why in the warnings."""
+    _seed_post_on_site(store, "odd-url-post", extra_frontmatter="url: /2026/08/..\n")
+    draft, warnings = store.create_draft("ghostwriter", from_post="odd-url-post")
+    assert draft.image_dir == "odd-url-post"
+    assert any("url" in w and "odd-url-post" in w for w in warnings)
+
+
 def test_from_post_drops_unknown_frontmatter_keys_with_a_warning(store: Store) -> None:
     _seed_post_on_site(store, "legacy-post", extra_frontmatter="oldFieldFromTheDashboard: yes\n")
     draft, warnings = store.create_draft("ghostwriter", from_post="legacy-post")

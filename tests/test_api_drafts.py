@@ -373,6 +373,18 @@ def test_save_after_approve_is_409_publish_run_in_progress(
     assert current["status"] == "approved"
 
 
+def test_put_with_a_traversal_url_is_422_frontmatter_url_invalid(
+    client: TestClient, agent_token: str
+) -> None:
+    """Issue 28 over the wire: the reproduction from the issue, now refused."""
+    draft_id = new_draft(client, agent_token)
+    response = save(
+        client, agent_token, draft_id, 0, frontmatter={"title": "Probe", "url": "/a/.."}
+    )
+    assert response.status_code == 422
+    assert response.json()["error"] == "frontmatter_url_invalid"
+
+
 def test_reject_then_restore(client: TestClient, agent_token: str, ui_token: str) -> None:
     draft_id = new_draft(client, agent_token)
     save(client, agent_token, draft_id, 0)

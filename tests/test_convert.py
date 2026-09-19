@@ -257,6 +257,53 @@ def test_image_dir_name_helper() -> None:
     assert convert.image_dir_name("   ", "fallback") == "fallback"
 
 
+UNUSABLE_URLS = [
+    "/a/..",
+    "/a/../",
+    "..",
+    "/a/.",
+    "/a/./",
+    "/a/b\\c",
+    "/a/..\\..",
+    "/a/%2e%2e",
+    "/a/%2E",
+    "/a/b%2Fc",
+    "/a/b%5Cc",
+    "/a/b\x00c",
+]
+
+
+@pytest.mark.parametrize("url", UNUSABLE_URLS)
+def test_image_dir_name_falls_back_when_the_last_segment_is_not_a_plain_directory_name(
+    url: str,
+) -> None:
+    """Issue 28: `..`, `.`, a backslash, and their percent-encoded forms are
+    not a directory name; the pinned slug stands in, never a traversal segment."""
+    assert convert.image_dir_name(url, "my-post") == "my-post"
+    assert convert.url_problem(url) is not None
+
+
+@pytest.mark.parametrize(
+    "url", ["/2026/08/my-post/", "my-post", "/a/v1.2", "/a/index.html", "/a/h\u00e9llo/", "/a/.x"]
+)
+def test_image_dir_name_keeps_ordinary_segments(url: str) -> None:
+    assert convert.url_problem(url) is None
+    assert convert.image_dir_name(url, "fallback") == url.strip("/").split("/")[-1]
+
+
+def test_convert_does_not_trust_a_pinned_traversal_image_dir() -> None:
+    """A draft that pinned `..` before the fix: converting must not build
+    static/images/../shot.png, so it uses the slug's directory instead."""
+    draft = _draft(
+        image_dir="..",
+        frontmatter={"title": "My Post", "url": "/a/.."},
+        images=[DraftImage(image_id="img1", filename="shot.png", role="inline")],
+    )
+    converted = convert.convert(draft)
+    assert converted.images[0].site_path == "static/images/my-post/shot.png"
+    assert converted.images[0].url == "/images/my-post/shot.png"
+
+
 def test_two_attached_images_with_the_same_filename_get_distinct_output_paths() -> None:
     """Defensive fallback: the API rejects this at attach time, but a draft
     written some other way could still carry two images under one filename,
