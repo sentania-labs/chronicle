@@ -58,6 +58,20 @@ it would do nothing.
   asks Lattice for a component; it does not add a second stylesheet.
 - Lattice has no licence file upstream. `THIRD_PARTY.md` says so and does not
   invent one.
+- **Several Lattice pairings fall below 4.5:1, recorded and not patched.**
+  Chronicle takes `tokens.css` and `lattice.css` unmodified rather than forking
+  them, so a weak pairing in the design system is a weak pairing here until it
+  is fixed upstream. WCAG ratios computed from the `v0.1.0` token values (a
+  review found them first; they were re-derived from `tokens.css` and agree):
+  `ink-subtle` on the light theme's white surface is about 3.0:1 (2.8:1 on
+  `--bg`), and it is what `.editor-side summary` and the Admin card headings
+  use; the dark theme's `bad-ink` on the `bad-soft` ground is about 3.4:1 over a
+  card surface and 3.8:1 over the page ground, which covers `.lat-banner--bad`,
+  error notices and removed diff lines; dark-theme links (`--accent` on
+  `--surface`) are about 4.1:1; `ink-subtle` on the dark surface is about
+  4.1:1; and white text on the dark primary button is about 3.6:1, which is
+  tracked upstream as `sentania-labs/lattice#1`. Chronicle did not choose any of
+  these pairings and adds none of its own; the fix belongs in the tokens.
 - Static assets carry no `Cache-Control` (Starlette's `StaticFiles` sends only
   `Last-Modified` and `ETag`), so a browser may keep an old `style.css` for a
   while after an upgrade. Not addressed here; see the pull request body.
