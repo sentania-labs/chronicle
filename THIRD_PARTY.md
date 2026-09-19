@@ -1,9 +1,10 @@
 # Third-party assets
 
-Chronicle's UI vendors two third-party libraries: `marked` and `EasyMDE`
-(a JS file and a stylesheet). Everything else under `chronicle/api/static/`
-(`style.css`, `ui.js`, `editor.js`) is original to this repository. Nothing
-is loaded from a CDN, ever.
+Chronicle's UI vendors two third-party libraries, `marked` and `EasyMDE`
+(a JS file and a stylesheet), and one first-party stylesheet pair shared with
+Scott's other tools, `Lattice` (`tokens.css` and `lattice.css`). Everything
+else under `chronicle/api/static/` (`style.css`, `ui.js`, `editor.js`) is
+original to this repository. Nothing is loaded from a CDN, ever.
 
 The full licence text of everything the vendored files contain is under
 `chronicle/api/static/vendor/LICENSES/`, one file per component. The minified
@@ -21,6 +22,8 @@ against these and against the upstream npm package, not asserted.
 | `chronicle/api/static/vendor/marked.min.js` | `15fabce5b65898b32b03f5ed25e9f891a729ad4c0d6d877110a7744aa847a894` |
 | `chronicle/api/static/vendor/easymde.min.js` | `aed84bf922d57dfc6a0f65b30eb534dfaab509c74d1f5ccad19ea8775a09de13` |
 | `chronicle/api/static/vendor/easymde.min.css` | `8a148c947f7e63250d8fb8d97e030b6fef6e02480ea08c0acfacb11618ac11f6` |
+| `chronicle/api/static/vendor/tokens.css` | `d9b98f9729dcb61ded4e57fe00d1ce996acf0e217b942944b06fccf4dedce3d4` |
+| `chronicle/api/static/vendor/lattice.css` | `179ce17c5ff9c55963abd82f27b7c6e49b20196e4c23fe7c6ff6a7d7c7d1bdb4` |
 
 ## marked
 
@@ -83,3 +86,25 @@ against these and against the upstream npm package, not asserted.
   is ever made, and the toolbar glyphs are Chronicle's own CSS
   (`.editor-toolbar` in `style.css`). The Content-Security-Policy
   (`default-src 'self'`) would block them anyway.
+
+## Lattice
+
+- **Files:** `chronicle/api/static/vendor/tokens.css` and
+  `chronicle/api/static/vendor/lattice.css`
+- **Version:** v0.1.0
+- **Upstream:** https://github.com/sentania-labs/lattice, release `v0.1.0`
+  (the two release assets of those names, downloaded with `gh release
+  download`, not copied from a working tree).
+- **Licence:** none stated upstream. `sentania-labs/lattice` carries no LICENSE
+  file of its own. It is a first-party asset shared between Scott's own
+  repositories (extracted from `sentania-labs/vcf-cf-migrator`), and Chronicle
+  itself is MIT. No licence is invented for it here, and there is nothing to
+  put under `vendor/LICENSES/`.
+- **Why:** Chronicle's UI and Admin were unstyled browser defaults. Lattice is
+  the shared look for these tools: a stylesheet and design tokens with no
+  build step and no runtime, which is what lets it be served from the app the
+  same way the other vendored files are. Both themes come from the tokens
+  (`data-theme="dark"` on the root element).
+- **Not modified.** Byte-identical to the `v0.1.0` release assets (same sha256
+  as above). Chronicle's own `style.css` is linked after them and carries only
+  what Lattice does not cover.
