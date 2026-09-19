@@ -477,7 +477,7 @@ def tokens_page(
             )
         return (
             f'<form method="post" action="/admin/tokens/{escape(name)}/revoke">'
-            '<button type="submit" class="lat-btn lat-btn--danger">Revoke</button></form>'
+            '<button type="submit" class="lat-btn">Revoke</button></form>'
         )
 
     # A bare YYYY-MM-DD stays a date (no instant to shift); see `_stamp`.

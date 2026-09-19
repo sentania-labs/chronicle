@@ -142,10 +142,13 @@ details#published > summary { cursor: pointer; font-weight: 600; padding: var(--
 .offer-reason { color: var(--ink-muted); font-size: 12px; }
 
 /* Diff colours: an added line is ok, a removed one bad, a hunk header is
-   information. Each is a `-soft` ground with its `-ink` text. */
-.diff-add { background: var(--ok-soft); color: var(--ok-ink); display: block; }
-.diff-del { background: var(--bad-soft); color: var(--bad-ink); display: block; }
-.diff-hunk { background: var(--accent-soft); color: var(--accent-ink); display: block; }
+   information. Each is a `-soft` ground with its `-ink` text. The lines are
+   joined with newlines inside a <pre>, so a `display: block` span would add a
+   blank line after itself; an inline-block as wide as the line does not. */
+.diff-add, .diff-del, .diff-hunk { display: inline-block; width: 100%; }
+.diff-add { background: var(--ok-soft); color: var(--ok-ink); }
+.diff-del { background: var(--bad-soft); color: var(--bad-ink); }
+.diff-hunk { background: var(--accent-soft); color: var(--accent-ink); }
 
 /* --- Editor page ------------------------------------------------------------- */
 
