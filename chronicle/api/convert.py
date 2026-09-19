@@ -182,9 +182,13 @@ def _segment_problem(segment: str) -> str | None:
     much a traversal as a literal one. A backslash is a separator on some
     platforms and in browsers' URL parsing, so it is never part of a name.
     """
+    if segment != segment.strip():
+        return f"{segment!r} has leading or trailing whitespace"
     for candidate in (segment, unquote(segment)):
         if candidate in (".", ".."):
             return f"{segment!r} is a relative path segment, not a directory name"
+        if candidate.lower() == ".git":
+            return f"{segment!r} is a git metadata name that a tree cannot contain"
         if "/" in candidate or "\\" in candidate:
             return f"{segment!r} contains a path separator"
         if any(ord(char) < 32 or ord(char) == 127 for char in candidate):
@@ -194,9 +198,7 @@ def _segment_problem(segment: str) -> str | None:
 
 def usable_image_dir(name: str | None) -> bool:
     """True when `name` is a single plain directory name (ADR 015)."""
-    if not name or name != name.strip():
-        return False
-    return _segment_problem(name) is None
+    return bool(name) and _segment_problem(name or "") is None
 
 
 def url_problem(url: str | None) -> str | None:

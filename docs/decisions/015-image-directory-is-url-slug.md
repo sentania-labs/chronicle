@@ -34,13 +34,17 @@ draft has one, and the pinned slug otherwise (a brand-new draft with no
 case for imported versus new drafts.
 
 The segment must be a plain directory name. `.`, `..`, anything containing
-a backslash or a control character, and their percent-encoded forms
-(`%2e%2e`, `%5c`) are not: `static/images/../shot.png` is one level above
+a backslash or a control character, leading or trailing whitespace, `.git`,
+and the percent-encoded forms of the separators and dots (`%2e%2e`, `%5c`)
+are not: `static/images/../shot.png` is one level above
 the images directory, and a browser resolves an encoded `..` the same way.
 Amended 2026-09-18 (issue 28): `PUT /v1/drafts/{id}` refuses a `url` whose
 last segment fails this with 422 `frontmatter_url_invalid`, so the problem
 is named at the save that caused it rather than at a later preview or
-publish. Where a refusal is impossible or too late, the pinned slug names
+publish. Only a `url` being set or changed is judged: a draft's own current
+`url` is accepted again, because the editor re-sends the stored value with
+every save and an import keeps whatever main has, so refusing it would leave
+a draft that can never be saved. Where a refusal is impossible or too late, the pinned slug names
 the directory instead: an import from main (the post already exists, so the
 `url` is kept as found and `create_draft` returns a warning), a submission
 seed (the `url` key is dropped with a warning, like any other key the save

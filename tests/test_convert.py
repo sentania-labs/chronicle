@@ -270,6 +270,9 @@ UNUSABLE_URLS = [
     "/a/b%2Fc",
     "/a/b%5Cc",
     "/a/b\x00c",
+    "/a/.git",
+    "/a/.GIT",
+    "/a/b /",
 ]
 
 
@@ -289,6 +292,15 @@ def test_image_dir_name_falls_back_when_the_last_segment_is_not_a_plain_director
 def test_image_dir_name_keeps_ordinary_segments(url: str) -> None:
     assert convert.url_problem(url) is None
     assert convert.image_dir_name(url, "fallback") == url.strip("/").split("/")[-1]
+
+
+@pytest.mark.parametrize("url", UNUSABLE_URLS + ["/a/ok/", "/a/v1.2", "/a/.x", None, "/"])
+def test_the_derived_image_dir_is_always_one_the_convert_trust_check_accepts(
+    url: str | None,
+) -> None:
+    """`image_dir_name`, `url_problem` and `usable_image_dir` are one rule: the
+    fallback can never hand back a value convert would then refuse to trust."""
+    assert convert.usable_image_dir(convert.image_dir_name(url, "my-post"))
 
 
 def test_convert_does_not_trust_a_pinned_traversal_image_dir() -> None:

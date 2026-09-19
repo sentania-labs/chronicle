@@ -132,9 +132,9 @@ def _submission_response(
         # what exists, names what does not, and hands the edit form only real
         # ids, so saving it drops the dead ones (issue 23).
         dumped["image_ids"] = [image.image_id for image in found]
-        note = (
-            f"Not in the image store, so not shown: {', '.join(missing)}."
-            " Saving this submission removes them."
+        editable = submission.status in ("new", "claimed")
+        note = f"Not in the image store, so not shown: {', '.join(missing)}." + (
+            " Saving this submission removes them." if editable else ""
         )
         notice = f"{notice} {note}" if notice else note
         notice_kind = notice_kind or "error"

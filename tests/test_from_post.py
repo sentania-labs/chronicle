@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from chronicle.api.errors import ApiError
 from chronicle.api.models import Post
 from chronicle.api.store import Store
 from tests.conftest import auth, png_bytes
@@ -74,6 +75,28 @@ def test_from_post_with_an_unusable_url_segment_falls_back_and_warns(store: Stor
     draft, warnings = store.create_draft("ghostwriter", from_post="odd-url-post")
     assert draft.image_dir == "odd-url-post"
     assert any("url" in w and "odd-url-post" in w for w in warnings)
+
+
+def test_an_imported_draft_with_an_unusable_url_can_still_be_saved_unchanged(
+    store: Store,
+) -> None:
+    """The refusal judges a url being set or changed, never one the draft
+    already carries: the editor re-sends the stored url with every save, and an
+    import keeps what main has, so a refusal here would freeze the draft."""
+    _seed_post_on_site(store, "odd-url-post", extra_frontmatter="url: /2026/08/..\n")
+    created, _ = store.create_draft("ghostwriter", from_post="odd-url-post")
+    draft = store.get_draft(created.id)
+    saved = store.save_draft(
+        draft.id, "ghostwriter", 0, {**draft.frontmatter, "summary": "edited"}, "new body\n"
+    )
+    assert saved.version_no == 1
+    assert saved.frontmatter["url"] == "/2026/08/.."
+
+    with pytest.raises(ApiError) as excinfo:
+        store.save_draft(
+            draft.id, "ghostwriter", 1, {**draft.frontmatter, "url": "/2026/09/.."}, "x\n"
+        )
+    assert excinfo.value.code == "frontmatter_url_invalid"
 
 
 def test_from_post_drops_unknown_frontmatter_keys_with_a_warning(store: Store) -> None:

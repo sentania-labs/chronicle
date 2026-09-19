@@ -946,7 +946,7 @@ class Store:
         # (issue 41). A run that finishes releases the draft either way: a PR
         # is a watch, a failure returns the draft to `in_review`.
         self._refuse_while_publishing(draft, "saved")
-        check_frontmatter(frontmatter)
+        check_frontmatter(frontmatter, current_url=draft.frontmatter.get("url"))
 
         if base_version != draft.version_no:
             # A base_version that names no real version (0 aside, or ahead of
@@ -2346,7 +2346,7 @@ def _frontmatter_type_problem(key: str, value: Any) -> str | None:
     return None
 
 
-def check_frontmatter(frontmatter: dict[str, Any]) -> None:
+def check_frontmatter(frontmatter: dict[str, Any], current_url: Any = None) -> None:
     unknown = sorted(key for key in frontmatter if key not in FRONTMATTER_ALLOWLIST)
     if unknown:
         raise ApiError(
@@ -2361,7 +2361,12 @@ def check_frontmatter(frontmatter: dict[str, Any]) -> None:
         if expected is not None:
             raise _wrong_type(key, expected)
 
-    url_problem = convert.url_problem(frontmatter.get("url"))
+    # A url the draft already carries is never refused again: an import keeps
+    # what main has, and an older save may hold one, and the editor re-sends the
+    # stored value with every save. It is harmless because the image directory
+    # falls back to the slug; only a url being newly set or changed is judged.
+    url = frontmatter.get("url")
+    url_problem = None if url == current_url else convert.url_problem(url)
     if url_problem is not None:
         # ADR 015: the url's last segment names the image directory, so a
         # segment that cannot be a directory name is refused here, not later

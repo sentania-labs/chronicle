@@ -117,3 +117,23 @@ def test_saving_the_detail_form_of_a_healed_page_succeeds(
     record = client.get(f"/v1/submissions/{submission_id}", headers=auth(agent_token)).json()
     assert record["brief"] == "fixed brief"
     assert record["image_ids"] == []
+
+
+def test_frozen_submission_with_a_missing_image_does_not_promise_a_save(
+    client: TestClient, agent_token: str
+) -> None:
+    """A drafted or discarded submission has no edit form, so the notice names
+    the missing id without telling the visitor that saving would remove it."""
+    submission_id = _legacy_submission_with(client, agent_token, [UNKNOWN])
+    assert (
+        client.post(
+            f"/v1/submissions/{submission_id}/discard", headers=auth(agent_token)
+        ).status_code
+        == 200
+    )
+
+    page = client.get(f"/content/submissions/{submission_id}")
+
+    assert page.status_code == 200
+    assert UNKNOWN in page.text
+    assert "Saving this submission removes them" not in page.text
