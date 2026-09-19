@@ -5,6 +5,21 @@ by 900) driven against a running `docker compose` stack, not curl. The "before"
 shots were taken on 2026-09-18 at about 7:20 PM CDT (America/Chicago) from the
 unstyled UI; the "after" shots the same evening between 7:49 PM and 7:51 PM CDT.
 
+## What is and is not shown
+
+Shots kept here: the Posts board, the editor, the submission detail (drafted
+and `new`), Import, Admin status, and a version diff. Nothing else is
+pictured.
+
+Exercised live during the same session, but with no shot kept: the editor's
+backup banner, the conflict view (a stale Save), the Tokens page, Admin login,
+and Preview. Where this README describes one of those, it is describing what
+was seen at the time, not something the shots below show.
+
+No live look is on record for: Admin claim, Backup (and restore confirm), Password, the
+GitHub connect, install and repository pages, the submissions list and the run
+log. Only markup tests cover those.
+
 ## How it was produced
 
 - Branch `feat/lattice-skin`, api image built from the branch, compose project
@@ -75,19 +90,25 @@ Extra shots with no before pair:
   removed lines `bad`, hunk headers the accent's soft ground. Lines are single
   spaced now (they were double spaced by a block-level span inside a `pre`).
 
-## What the shots showed, and what was fixed because of them
+## What the live look showed, and what was fixed because of it
 
-- The diff page's coloured lines were double spaced; fixed in `style.css`.
+Each item below says whether a shot of it is kept.
+
+- The diff page's coloured lines were double spaced; fixed in `style.css`
+  (shot kept: `after-08`).
 - The filter row's select and input were different heights, so their labels
-  sat at different heights; fixed with one height for the row.
-- `Import as post` wrapped onto two lines; buttons no longer wrap.
+  sat at different heights; fixed with one height for the row (shot kept: the
+  board).
+- `Import as post` wrapped onto two lines; buttons no longer wrap (shot kept:
+  `after-04`).
 - Admin's Status tables did not line their values up from card to card; key and
-  value tables now use a fixed first column.
+  value tables now use a fixed first column (shot kept: `after-05`).
 - Revoke in the tokens table was a saturated danger button on every row; it is
   a plain button now (Lattice keeps danger for a destructive action on its own,
-  and Restore now and Discard still are).
+  and Restore now and Discard still are). Seen live on the Tokens page, no shot
+  kept.
 - After an in-place Save the page heading and tab title follow the new title
-  (#36); seen live, the heading changed with no reload.
+  (#36); seen live, the heading changed with no reload. No shot kept.
 
 ## Not fixed here, and why
 
