@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from chronicle.api import publisher, watcher
+from chronicle.api.errors import ApiError
 from chronicle.api.store import Store
 from tests.conftest import png_bytes
 from tests.fakes import FakeRepoOps
@@ -220,6 +223,84 @@ def test_save_is_rejected_with_409_while_a_publish_pr_is_open(store: Store) -> N
     assert watch.pr_url in str(getattr(excinfo.value, "extra", {}).get("pr_url", ""))
 
 
+def _pr_text(ops: FakeRepoOps, pr_number: int) -> str:
+    """The post text the pull request's branch actually carries, decoded from
+    the blob the publish commit's tree points at."""
+    import base64
+
+    branch = ops.pulls[pr_number]["head"]["ref"]
+    commit = ops.commits[ops.refs[f"heads/{branch}"]]
+    entries = ops.trees[commit["tree"]["sha"]]
+    post = next(entry for entry in entries if entry["path"].endswith(".md"))
+    return base64.b64decode(ops.blobs[post["sha"]]).decode("utf-8")
+
+
+def test_save_between_approve_and_publish_run_never_reaches_the_pr(store: Store) -> None:
+    """Issue 41: approve queues the run, a save lands before the run opens the
+    PR. The save is refused, so the PR carries exactly the approved text."""
+    draft, run = _approved_draft(store)
+    approved_version = store.get_draft(draft.id).version_no
+
+    with pytest.raises(ApiError) as excinfo:
+        store.save_draft(
+            draft.id, "ghostwriter", approved_version, {"title": "My First Post"}, "UNAPPROVED\n"
+        )
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.code == "publish_run_in_progress"
+    assert excinfo.value.extra["run_id"] == run.id
+    assert store.get_draft(draft.id).version_no == approved_version
+
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    text = _pr_text(ops, watch.pr_number)
+    assert "Hello, world." in text
+    assert "UNAPPROVED" not in text
+
+
+def test_save_while_publish_run_is_building_is_refused(store: Store) -> None:
+    draft, run = _approved_draft(store)
+    store.start_run(run.id, publisher.PUBLISHER_ACTOR, hugo_version="", toolchain_drift=False)
+    with pytest.raises(ApiError) as excinfo:
+        store.save_draft(
+            draft.id, "ghostwriter", store.get_draft(draft.id).version_no, {"title": "T"}, "x\n"
+        )
+    assert excinfo.value.code == "publish_run_in_progress"
+
+
+def test_save_is_allowed_again_once_the_publish_run_has_failed(store: Store) -> None:
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    ops.fail_on = "create_blob"
+    publisher.run_one(store, target, run)
+    assert store.get_draft(draft.id).status == "in_review"
+    saved = store.save_draft(
+        draft.id, "scott", store.get_draft(draft.id).version_no, {"title": "T"}, "edited\n"
+    )
+    assert saved.version_no == 2
+
+
+def test_publish_run_refuses_a_draft_that_moved_past_the_approved_version(store: Store) -> None:
+    """The backstop under the save gate: a run pins the version approve
+    queued it for, so a draft that moved on by any other route is never
+    converted. The run fails, the draft returns to in_review, and no PR opens."""
+    draft, run = _approved_draft(store)
+    assert run.approved_version == 1
+    # Bypass the save gate the way any future writer of a new version would.
+    moved = store.get_draft(draft.id)
+    moved.version_no = 2
+    store._write_json(store._draft_path(draft.id), moved.model_dump(mode="json"))
+
+    target, ops = _target()
+    finished = publisher.run_one(store, target, run)
+    assert finished.status == "failed"
+    assert (finished.result or {})["error_class"] == "draft_moved_since_approval"
+    assert "create_pull" not in ops.calls
+    assert store.get_watch(draft.id) is None
+    assert store.get_draft(draft.id).status == "in_review"
+
+
 def test_republish_deletes_an_image_detached_since_the_last_publish(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -269,3 +350,88 @@ def test_republish_deletes_an_image_detached_since_the_last_publish(
     tree = ops.trees[commit["tree"]["sha"]]
     deleted_paths = {entry["path"] for entry in tree if entry["sha"] is None}
     assert image_paths[0] in deleted_paths
+
+
+def test_attach_and_detach_are_refused_while_a_publish_run_is_in_flight(store: Store) -> None:
+    """Review finding: image attach and detach change what the run converts
+    without bumping the version, so the save gate alone left that window open."""
+    draft, run = _approved_draft(store)
+    image, _ = store.put_image(png_bytes(), "sneaky.png")
+
+    with pytest.raises(ApiError) as attach_refused:
+        store.attach_image(draft.id, image.image_id, "inline", "ghostwriter")
+    assert attach_refused.value.status_code == 409
+    assert attach_refused.value.code == "publish_run_in_progress"
+    assert store.get_draft(draft.id).images == []
+
+    with pytest.raises(ApiError) as upload_refused:
+        store.put_and_attach_image(draft.id, png_bytes((9, 9, 9)), "other.png", "inline", "scott")
+    assert upload_refused.value.code == "publish_run_in_progress"
+    # A refused upload leaves no orphan image behind.
+    assert store.get_draft(draft.id).images == []
+
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    assert not any(
+        entry["path"].startswith("static/")
+        for entry in ops.trees[ops.commits[ops.refs[f"heads/{watch.branch}"]]["tree"]["sha"]]
+    )
+
+
+def test_detach_is_refused_while_a_publish_run_is_in_flight(store: Store) -> None:
+    draft, _ = store.create_draft("scott")
+    image, _ = store.put_image(png_bytes(), "kept.png")
+    store.attach_image(draft.id, image.image_id, "inline", "scott")
+    store.save_draft(draft.id, "scott", 0, {"title": "T"}, "![kept](kept.png)\n")
+    store.act_on_draft(draft.id, "submit", "scott", True)
+    store.act_on_draft(draft.id, "approve", "scott", True)
+
+    with pytest.raises(ApiError) as caught:
+        store.detach_image(draft.id, image.image_id, "ghostwriter")
+    assert caught.value.code == "publish_run_in_progress"
+    assert [item.image_id for item in store.get_draft(draft.id).images] == [image.image_id]
+
+
+def test_publish_gate_reads_durable_files_when_the_index_lacks_the_run(store: Store) -> None:
+    """Codex review, P1: approval wrote the run and queue files but died before
+    the index update. The index is a cache (ADR 006), so save, attach, detach
+    and a re-approve must all still be refused from the files."""
+    draft, _ = store.create_draft("scott")
+    kept, _ = store.put_image(png_bytes(), "kept.png")
+    store.attach_image(draft.id, kept.image_id, "inline", "scott")
+    store.save_draft(draft.id, "scott", 0, {"title": "T"}, "![kept](kept.png)\n")
+    store.act_on_draft(draft.id, "submit", "scott", True)
+    _, run = store.act_on_draft(draft.id, "approve", "scott", True)
+    assert run is not None
+    other, _ = store.put_image(png_bytes((9, 9, 9)), "other.png")
+
+    store.index.conn.execute("DELETE FROM runs WHERE id = ?", (run.id,))
+    store.index.conn.commit()
+    assert store.last_run(draft.id, kind="publish") is None  # the stale cache
+
+    version = store.get_draft(draft.id).version_no
+    with pytest.raises(ApiError) as saved:
+        store.save_draft(draft.id, "ghostwriter", version, {"title": "T"}, "UNAPPROVED\n")
+    assert saved.value.code == "publish_run_in_progress"
+    with pytest.raises(ApiError) as attached:
+        store.attach_image(draft.id, other.image_id, "inline", "ghostwriter")
+    assert attached.value.code == "publish_run_in_progress"
+    with pytest.raises(ApiError) as detached:
+        store.detach_image(draft.id, kept.image_id, "ghostwriter")
+    assert detached.value.code == "publish_run_in_progress"
+    with pytest.raises(ApiError) as reapproved:
+        store.act_on_draft(draft.id, "approve", "scott", True)
+    assert reapproved.value.code == "publish_run_in_progress"
+
+    fresh = store.get_draft(draft.id)
+    assert fresh.version_no == version
+    assert [item.image_id for item in fresh.images] == [kept.image_id]
+
+    # A finished run whose queue entry survived a crash is not in flight.
+    store.finish_run(run.id, publisher.PUBLISHER_ACTOR, succeeded=False, result={})
+    store._queue_entry_path(run.id).write_text(
+        json.dumps({"run_id": run.id, "draft_id": draft.id, "kind": "publish"})
+    )
+    assert store.active_publish_run(draft.id) is None

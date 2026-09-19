@@ -351,6 +351,40 @@ def test_approve_queues_a_publish_run(client: TestClient, agent_token: str, ui_t
     assert run["kind"] == "publish"
 
 
+def test_save_after_approve_is_409_publish_run_in_progress(
+    client: TestClient, agent_token: str, ui_token: str
+) -> None:
+    """Issue 41 over the wire: the api has no publisher running in a test, so
+    the run stays queued, which is exactly the window between approve and a PR."""
+    draft_id = new_draft(client, agent_token)
+    save(client, agent_token, draft_id, 0)
+    client.post(f"/v1/drafts/{draft_id}/actions/submit", headers=auth(agent_token))
+    approved = client.post(f"/v1/drafts/{draft_id}/actions/approve", headers=auth(ui_token))
+    run_id = approved.json()["run_id"]
+    run = client.get(f"/v1/runs/{run_id}", headers=auth(agent_token)).json()
+    assert run["approved_version"] == 1
+
+    refused = save(client, agent_token, draft_id, 1)
+    assert refused.status_code == 409
+    assert refused.json()["error"] == "publish_run_in_progress"
+    assert refused.json()["run_id"] == run_id
+    current = client.get(f"/v1/drafts/{draft_id}", headers=auth(agent_token)).json()
+    assert current["version_no"] == 1
+    assert current["status"] == "approved"
+
+
+def test_put_with_a_traversal_url_is_422_frontmatter_url_invalid(
+    client: TestClient, agent_token: str
+) -> None:
+    """Issue 28 over the wire: the reproduction from the issue, now refused."""
+    draft_id = new_draft(client, agent_token)
+    response = save(
+        client, agent_token, draft_id, 0, frontmatter={"title": "Probe", "url": "/a/.."}
+    )
+    assert response.status_code == 422
+    assert response.json()["error"] == "frontmatter_url_invalid"
+
+
 def test_reject_then_restore(client: TestClient, agent_token: str, ui_token: str) -> None:
     draft_id = new_draft(client, agent_token)
     save(client, agent_token, draft_id, 0)

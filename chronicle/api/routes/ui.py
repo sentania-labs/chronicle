@@ -124,9 +124,22 @@ def _submission_response(
     # the same snapshot it computed anything else from.
     if submission is None:
         submission = services.store.get_submission(submission_id)
-    images = [_dump(services.store.get_image(image_id)) for image_id in submission.image_ids]
+    found, missing = services.store.submission_images(submission.image_ids)
+    images = [_dump(image) for image in found]
+    dumped = _dump(submission)
+    if missing:
+        # A record from before create checked its image ids. The page renders
+        # what exists, names what does not, and hands the edit form only real
+        # ids, so saving it drops the dead ones (issue 23).
+        dumped["image_ids"] = [image.image_id for image in found]
+        editable = submission.status in ("new", "claimed")
+        note = f"Not in the image store, so not shown: {', '.join(missing)}." + (
+            " Saving this submission removes them." if editable else ""
+        )
+        notice = f"{notice} {note}" if notice else note
+        notice_kind = notice_kind or "error"
     html = tpl.submission_detail_page(
-        _dump(submission),
+        dumped,
         images,
         banner=banner_enabled(request),
         notice=notice,
@@ -370,7 +383,6 @@ def _offer_state(store: Store, draft: Draft, preview_run: Any) -> dict[str, bool
     page renders its buttons from this and the action route refuses a staged
     click from it (`ui_actions.staged_refusal`), so both read one computation."""
     watch = store.get_watch(draft.id)
-    publish_run = store.last_run(draft.id, kind="publish")
     return {
         "has_preview": _has_current_preview(preview_run, draft.version_no),
         "publish_pr_open": watch is not None and watch.kind == "publish",
@@ -383,8 +395,7 @@ def _offer_state(store: Store, draft: Draft, preview_run: Any) -> dict[str, bool
         # publish_pr_open check above can't see a run with no PR yet, so a
         # round C5 review found this button rendering and 409ing on every
         # click for exactly that window.
-        "publish_run_active": publish_run is not None
-        and publish_run.status in ("queued", "building"),
+        "publish_run_active": store.active_publish_run(draft.id) is not None,
     }
 
 

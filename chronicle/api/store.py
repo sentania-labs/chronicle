@@ -101,6 +101,10 @@ FRONTMATTER_STRING_LIST_KEYS = ("tags", "categories")
 # markdown heading. The frontmatter pattern mirrors what `digest.parse_frontmatter`
 # will actually split, so detection and parsing cannot disagree.
 _FRONTMATTER_BLOCK = re.compile(r"\A(---|\+\+\+)\n.*?\n\1\n", re.DOTALL)
+# The `action` of the feedback entry `_seed_draft_from_submission` writes for
+# each non-primary material; `changes_since` includes these at any cutoff.
+MATERIAL_ACTION = "material"
+
 _IMAGE_ID = re.compile(r"[0-9a-f]{64}")
 _LEADING_HEADING = re.compile(r"\s*#{1,6}[ \t]+(\S[^\n]*)")
 
@@ -308,6 +312,7 @@ class Store:
         materials: list[Material],
         image_ids: list[str],
     ) -> Submission:
+        self._require_images(image_ids)
         record = Submission.model_validate(
             {
                 "id": new_id(),
@@ -408,6 +413,39 @@ class Store:
             )
         )
 
+    def _image_exists(self, image_id: str) -> bool:
+        # The shape guard comes first: an id becomes part of a path, so a
+        # caller-chosen string must never reach `_image_sidecar_path`.
+        return bool(_IMAGE_ID.fullmatch(image_id)) and self._image_sidecar_path(image_id).exists()
+
+    def _require_images(self, image_ids: list[str]) -> None:
+        """422 `image_not_found` naming the first id that is not in the image
+        store. Create and revise both call this: the detail page loads every
+        listed image, so an id that names nothing would leave a submission
+        whose page (and its actions) cannot render."""
+        for image_id in image_ids:
+            if not self._image_exists(image_id):
+                raise ApiError(
+                    422,
+                    "image_not_found",
+                    f"image {image_id} is not in the image store; upload it first",
+                    image_id=image_id,
+                )
+
+    def submission_images(self, image_ids: list[str]) -> tuple[list[Image], list[str]]:
+        """The stored images among `image_ids`, in order, and the ids that are
+        not in the store. A record written before create validated can carry
+        an id that names nothing; readers use this instead of `get_image` so
+        one such id does not take the whole page down."""
+        found: list[Image] = []
+        missing: list[str] = []
+        for image_id in image_ids:
+            if self._image_exists(image_id):
+                found.append(self.get_image(image_id))
+            else:
+                missing.append(image_id)
+        return found, missing
+
     @locked
     def revise_submission(
         self,
@@ -428,17 +466,7 @@ class Store:
         """
         record = self.get_submission(submission_id)
         resolve_submission_revise(record.status, submission_id)
-        for image_id in image_ids:
-            if not _IMAGE_ID.fullmatch(image_id) or not self._image_sidecar_path(image_id).exists():
-                # The detail page loads every listed image, so an id that
-                # names nothing would make the page (and its edit form)
-                # answer 404 for good.
-                raise ApiError(
-                    422,
-                    "image_not_found",
-                    f"image {image_id} is not in the image store; upload it first",
-                    image_id=image_id,
-                )
+        self._require_images(image_ids)
         if base_version != record.version_no:
             raise ApiError(
                 409,
@@ -615,6 +643,9 @@ class Store:
                         f" (got {type(value).__name__})"
                     )
                     continue
+                if key == "url" and (problem := convert.url_problem(value)) is not None:
+                    warnings.append(f"dropped frontmatter key 'url': {problem}")
+                    continue
                 allowed[key] = value
             title = allowed.get("title")
             if not title:
@@ -639,7 +670,7 @@ class Store:
                     draft_id=draft.id,
                     author=actor,
                     created_at=stamp,
-                    action="material",
+                    action=MATERIAL_ACTION,
                     version_no=0,
                     text="\n".join(parts),
                 )
@@ -702,6 +733,13 @@ class Store:
         # import reproduces the real blog's static/images/<dir>/ byte for
         # byte even when the two differ.
         draft.image_dir = convert.image_dir_name(allowed.get("url"), slug)
+        if (problem := convert.url_problem(allowed.get("url"))) is not None:
+            # The post is already on main, so the import cannot be refused for
+            # it; the url is kept as found and the directory falls back.
+            warnings.append(
+                f"frontmatter url is not usable as an image directory ({problem});"
+                f" images are pinned to static/images/{draft.image_dir}/ instead"
+            )
         # `_pin_slug`'s own image_dir_collision check never runs for an
         # import (it only fires when `draft.slug is None`, and this method
         # sets it directly), so a second import of the same post, or of a
@@ -901,7 +939,14 @@ class Store:
                 pr_url=watch.pr_url,
                 pr_number=watch.pr_number,
             )
-        check_frontmatter(frontmatter)
+        # The same refusal for the stretch before the PR exists: approve has
+        # queued a publish run (or the publisher is building it) but no watch
+        # yet. Without it a save lands in that window, the draft stays
+        # `approved`, and the run converts text nobody previewed or approved
+        # (issue 41). A run that finishes releases the draft either way: a PR
+        # is a watch, a failure returns the draft to `in_review`.
+        self._refuse_while_publishing(draft, "saved")
+        check_frontmatter(frontmatter, current_url=draft.frontmatter.get("url"))
 
         if base_version != draft.version_no:
             # A base_version that names no real version (0 aside, or ahead of
@@ -1016,13 +1061,28 @@ class Store:
                     "diff": self._diff(draft_id, version_no - 1, version_no),
                 }
             )
-        # Feedback written against version n arrived after the caller saved
-        # version n, so `since=n` has to include it or a ghostwriter resuming
-        # at its own last version would never see the review that followed it.
+        # Two rules, and only two.
+        #
+        # Review feedback (an action's feedback, a closed PR, a failed
+        # publish) is cut off by version: written against version n, it
+        # arrived after the caller saved version n, so `since=n` includes it
+        # or a ghostwriter resuming at its own last version would never see
+        # the review that followed it. `since=n+1` does not.
+        #
+        # Seeded reference material (`MATERIAL_ACTION`) is not review of any
+        # version. It arrived with the submission the draft was made from, at
+        # version 0, and the ghostwriter has no memory between sessions, so a
+        # cutoff would hide it from every session after its first save. It is
+        # always included, at any `since`, in the same `feedback` list and log
+        # order it already appears in at `since=0`, so a client that reads it
+        # there needs no change. It is written once, when the draft is
+        # seeded, and never grows afterwards, so repeating it is bounded by the
+        # size of the submission; a client that only wants review comments skips entries whose
+        # `action` is `material`.
         feedback = [
             entry.model_dump(mode="json")
             for entry in self.list_feedback(draft_id)
-            if entry.version_no >= since
+            if entry.action == MATERIAL_ACTION or entry.version_no >= since
         ]
         return {
             "draft_id": draft_id,
@@ -1074,8 +1134,14 @@ class Store:
         draft.slug = candidate
         draft.image_dir = image_dir
 
-    def _queue_run(self, draft_id: str, kind: str) -> Run:
-        run = Run(id=new_id(), draft_id=draft_id, kind=kind, created_at=now_stamp())
+    def _queue_run(self, draft_id: str, kind: str, approved_version: int | None = None) -> Run:
+        run = Run(
+            id=new_id(),
+            draft_id=draft_id,
+            kind=kind,
+            created_at=now_stamp(),
+            approved_version=approved_version,
+        )
         self._write_json(self._run_path(run.id), run.model_dump(mode="json"))
         self._write_json(
             self._queue_entry_path(run.id),
@@ -1087,6 +1153,50 @@ class Store:
             },
         )
         return run
+
+    def _refuse_while_publishing(self, draft: Draft, verb: str) -> None:
+        """409 `publish_run_in_progress` while a publish run is queued or
+        building for `draft`. Everything the run converts (the text, and the
+        attached image set) must stay what was approved until it has opened
+        its PR or failed, so `save_draft`, `attach_image` and `detach_image`
+        all ask this first."""
+        running = self.active_publish_run(draft.id)
+        if running is not None:
+            raise ApiError(
+                409,
+                "publish_run_in_progress",
+                f"draft {draft.id} was approved at version"
+                f" {running.approved_version or draft.version_no} and its"
+                f" publish run is {running.status}; it cannot be {verb} until the run has opened"
+                " its pull request or failed",
+                run_id=running.id,
+                approved_version=running.approved_version,
+            )
+
+    def active_publish_run(self, draft_id: str) -> Run | None:
+        """The draft's publish run while it is queued or building, else None.
+
+        This is the window between `approve` and the run's PR existing, where
+        `get_watch` is still None: neither an open PR nor a finished run says
+        the draft is being published, but it is.
+
+        Answered from the durable files, never the index (ADR 006): a run whose
+        approval wrote its files but died before the index update is still in
+        flight, and this is a safety gate. A queue entry lives from `_queue_run`
+        until `finish_run`, so the queue (which holds only unfinished runs) is
+        the cheap way to find candidates; the run record then decides, since a
+        crash between `finish_run`'s record write and its unlink leaves a
+        finished run with an entry."""
+        for entry in self.queued_entries("publish"):
+            if entry.get("draft_id") != draft_id:
+                continue
+            try:
+                run = self.get_run(str(entry.get("run_id")))
+            except ApiError:
+                continue
+            if run.status in ("queued", "building"):
+                return run
+        return None
 
     @locked
     def act_on_draft(
@@ -1162,8 +1272,8 @@ class Store:
                     pr_url=watch.pr_url,
                     pr_number=watch.pr_number,
                 )
-            running = self.last_run(draft_id, kind="publish")
-            if running is not None and running.status in ("queued", "building"):
+            running = self.active_publish_run(draft_id)
+            if running is not None:
                 raise ApiError(
                     409,
                     "publish_run_in_progress",
@@ -1185,7 +1295,13 @@ class Store:
         draft.updated_at = now_stamp()
         self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
 
-        run = self._queue_run(draft_id, transition.run_kind) if transition.run_kind else None
+        run = None
+        if transition.run_kind:
+            # A publish run is queued for exactly the version being approved:
+            # the publisher checks it, and `save_draft` refuses new versions
+            # while the run is in flight (issue 41).
+            pinned = draft.version_no if transition.run_kind == "publish" else None
+            run = self._queue_run(draft_id, transition.run_kind, pinned)
         if feedback:
             self._append_feedback(
                 FeedbackEntry(
@@ -1311,6 +1427,7 @@ class Store:
                 422, "image_role_unknown", f"role must be one of {', '.join(IMAGE_ROLES)}"
             )
         draft = self.get_draft(draft_id)
+        self._refuse_while_publishing(draft, "given a new image")
         image = self.get_image(image_id)
         conflict = next(
             (
@@ -1342,6 +1459,7 @@ class Store:
     @locked
     def detach_image(self, draft_id: str, image_id: str, actor: str) -> Draft:
         draft = self.get_draft(draft_id)
+        self._refuse_while_publishing(draft, "have an image detached")
         remaining = [item for item in draft.images if item.image_id != image_id]
         if len(remaining) == len(draft.images):
             raise ApiError(
@@ -2242,7 +2360,7 @@ def _frontmatter_type_problem(key: str, value: Any) -> str | None:
     return None
 
 
-def check_frontmatter(frontmatter: dict[str, Any]) -> None:
+def check_frontmatter(frontmatter: dict[str, Any], current_url: Any = None) -> None:
     unknown = sorted(key for key in frontmatter if key not in FRONTMATTER_ALLOWLIST)
     if unknown:
         raise ApiError(
@@ -2256,6 +2374,23 @@ def check_frontmatter(frontmatter: dict[str, Any]) -> None:
         expected = _frontmatter_type_problem(key, value)
         if expected is not None:
             raise _wrong_type(key, expected)
+
+    # A url the draft already carries is never refused again: an import keeps
+    # what main has, and an older save may hold one, and the editor re-sends the
+    # stored value with every save. It is harmless because the image directory
+    # falls back to the slug; only a url being newly set or changed is judged.
+    url = frontmatter.get("url")
+    url_problem = None if url == current_url else convert.url_problem(url)
+    if url_problem is not None:
+        # ADR 015: the url's last segment names the image directory, so a
+        # segment that cannot be a directory name is refused here, not later
+        # at preview or publish (issue 28).
+        raise ApiError(
+            422,
+            "frontmatter_url_invalid",
+            f"frontmatter.url cannot be used: {url_problem}",
+            url=frontmatter.get("url"),
+        )
 
     title = frontmatter.get("title")
     if not isinstance(title, str) or not title.strip():
