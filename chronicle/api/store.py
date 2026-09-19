@@ -1178,10 +1178,24 @@ class Store:
 
         This is the window between `approve` and the run's PR existing, where
         `get_watch` is still None: neither an open PR nor a finished run says
-        the draft is being published, but it is."""
-        run = self.last_run(draft_id, kind="publish")
-        if run is not None and run.status in ("queued", "building"):
-            return run
+        the draft is being published, but it is.
+
+        Answered from the durable files, never the index (ADR 006): a run whose
+        approval wrote its files but died before the index update is still in
+        flight, and this is a safety gate. A queue entry lives from `_queue_run`
+        until `finish_run`, so the queue (which holds only unfinished runs) is
+        the cheap way to find candidates; the run record then decides, since a
+        crash between `finish_run`'s record write and its unlink leaves a
+        finished run with an entry."""
+        for entry in self.queued_entries("publish"):
+            if entry.get("draft_id") != draft_id:
+                continue
+            try:
+                run = self.get_run(str(entry.get("run_id")))
+            except ApiError:
+                continue
+            if run.status in ("queued", "building"):
+                return run
         return None
 
     @locked

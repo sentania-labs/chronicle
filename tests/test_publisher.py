@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from chronicle.api import publisher, watcher
@@ -390,3 +392,46 @@ def test_detach_is_refused_while_a_publish_run_is_in_flight(store: Store) -> Non
         store.detach_image(draft.id, image.image_id, "ghostwriter")
     assert caught.value.code == "publish_run_in_progress"
     assert [item.image_id for item in store.get_draft(draft.id).images] == [image.image_id]
+
+
+def test_publish_gate_reads_durable_files_when_the_index_lacks_the_run(store: Store) -> None:
+    """Codex review, P1: approval wrote the run and queue files but died before
+    the index update. The index is a cache (ADR 006), so save, attach, detach
+    and a re-approve must all still be refused from the files."""
+    draft, _ = store.create_draft("scott")
+    kept, _ = store.put_image(png_bytes(), "kept.png")
+    store.attach_image(draft.id, kept.image_id, "inline", "scott")
+    store.save_draft(draft.id, "scott", 0, {"title": "T"}, "![kept](kept.png)\n")
+    store.act_on_draft(draft.id, "submit", "scott", True)
+    _, run = store.act_on_draft(draft.id, "approve", "scott", True)
+    assert run is not None
+    other, _ = store.put_image(png_bytes((9, 9, 9)), "other.png")
+
+    store.index.conn.execute("DELETE FROM runs WHERE id = ?", (run.id,))
+    store.index.conn.commit()
+    assert store.last_run(draft.id, kind="publish") is None  # the stale cache
+
+    version = store.get_draft(draft.id).version_no
+    with pytest.raises(ApiError) as saved:
+        store.save_draft(draft.id, "ghostwriter", version, {"title": "T"}, "UNAPPROVED\n")
+    assert saved.value.code == "publish_run_in_progress"
+    with pytest.raises(ApiError) as attached:
+        store.attach_image(draft.id, other.image_id, "inline", "ghostwriter")
+    assert attached.value.code == "publish_run_in_progress"
+    with pytest.raises(ApiError) as detached:
+        store.detach_image(draft.id, kept.image_id, "ghostwriter")
+    assert detached.value.code == "publish_run_in_progress"
+    with pytest.raises(ApiError) as reapproved:
+        store.act_on_draft(draft.id, "approve", "scott", True)
+    assert reapproved.value.code == "publish_run_in_progress"
+
+    fresh = store.get_draft(draft.id)
+    assert fresh.version_no == version
+    assert [item.image_id for item in fresh.images] == [kept.image_id]
+
+    # A finished run whose queue entry survived a crash is not in flight.
+    store.finish_run(run.id, publisher.PUBLISHER_ACTOR, succeeded=False, result={})
+    store._queue_entry_path(run.id).write_text(
+        json.dumps({"run_id": run.id, "draft_id": draft.id, "kind": "publish"})
+    )
+    assert store.active_publish_run(draft.id) is None

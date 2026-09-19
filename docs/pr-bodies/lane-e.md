@@ -291,3 +291,24 @@ publisher's read-then-check window.
    the shape check the submission paths now use (`GET /v1/images/{image_id}`
    passes a URL path segment straight in). Not probed for exploitability here;
    worth a look.
+
+## Codex review round
+
+Finding (P1, `store.py`): `active_publish_run` read `last_run`, which goes
+through the SQLite index. If approval wrote the run and queue files but died
+before the index update, the gate saw no run, and an image attach or detach
+(which does not bump `version_no`) got past it and past the publisher's
+approved-version backstop.
+
+Changed: `active_publish_run` now scans the queue entries for the draft (a
+queue entry lives from `_queue_run` to `finish_run`, so the queue holds only
+unfinished runs) and confirms each against its run record, so a finished run
+with a leftover entry is not counted. No index read remains.
+
+The re-approve guard in `_act_on_draft_unlocked` had the same hole (it read
+`last_run` before this branch), and it now calls `active_publish_run`, so one
+fix covers it. Other reads added on this branch: `get_watch` is file-based;
+the editor's `last_run` calls only decide which button to show, and the
+store-side gate is authoritative, so they stay on the index.
+
+Test: `test_publish_gate_reads_durable_files_when_the_index_lacks_the_run`.
