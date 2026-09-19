@@ -945,17 +945,7 @@ class Store:
         # `approved`, and the run converts text nobody previewed or approved
         # (issue 41). A run that finishes releases the draft either way: a PR
         # is a watch, a failure returns the draft to `in_review`.
-        running = self._active_publish_run(draft_id)
-        if running is not None:
-            raise ApiError(
-                409,
-                "publish_run_in_progress",
-                f"draft {draft_id} was approved at version {draft.version_no} and its publish"
-                f" run is {running.status}; wait for it to open its pull request or fail"
-                " before saving",
-                run_id=running.id,
-                approved_version=running.approved_version,
-            )
+        self._refuse_while_publishing(draft, "saved")
         check_frontmatter(frontmatter)
 
         if base_version != draft.version_no:
@@ -1164,7 +1154,26 @@ class Store:
         )
         return run
 
-    def _active_publish_run(self, draft_id: str) -> Run | None:
+    def _refuse_while_publishing(self, draft: Draft, verb: str) -> None:
+        """409 `publish_run_in_progress` while a publish run is queued or
+        building for `draft`. Everything the run converts (the text, and the
+        attached image set) must stay what was approved until it has opened
+        its PR or failed, so `save_draft`, `attach_image` and `detach_image`
+        all ask this first."""
+        running = self.active_publish_run(draft.id)
+        if running is not None:
+            raise ApiError(
+                409,
+                "publish_run_in_progress",
+                f"draft {draft.id} was approved at version"
+                f" {running.approved_version or draft.version_no} and its"
+                f" publish run is {running.status}; it cannot be {verb} until the run has opened"
+                " its pull request or failed",
+                run_id=running.id,
+                approved_version=running.approved_version,
+            )
+
+    def active_publish_run(self, draft_id: str) -> Run | None:
         """The draft's publish run while it is queued or building, else None.
 
         This is the window between `approve` and the run's PR existing, where
@@ -1249,7 +1258,7 @@ class Store:
                     pr_url=watch.pr_url,
                     pr_number=watch.pr_number,
                 )
-            running = self._active_publish_run(draft_id)
+            running = self.active_publish_run(draft_id)
             if running is not None:
                 raise ApiError(
                     409,
@@ -1404,6 +1413,7 @@ class Store:
                 422, "image_role_unknown", f"role must be one of {', '.join(IMAGE_ROLES)}"
             )
         draft = self.get_draft(draft_id)
+        self._refuse_while_publishing(draft, "given a new image")
         image = self.get_image(image_id)
         conflict = next(
             (
@@ -1435,6 +1445,7 @@ class Store:
     @locked
     def detach_image(self, draft_id: str, image_id: str, actor: str) -> Draft:
         draft = self.get_draft(draft_id)
+        self._refuse_while_publishing(draft, "have an image detached")
         remaining = [item for item in draft.images if item.image_id != image_id]
         if len(remaining) == len(draft.images):
             raise ApiError(

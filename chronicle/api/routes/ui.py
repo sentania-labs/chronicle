@@ -383,7 +383,6 @@ def _offer_state(store: Store, draft: Draft, preview_run: Any) -> dict[str, bool
     page renders its buttons from this and the action route refuses a staged
     click from it (`ui_actions.staged_refusal`), so both read one computation."""
     watch = store.get_watch(draft.id)
-    publish_run = store.last_run(draft.id, kind="publish")
     return {
         "has_preview": _has_current_preview(preview_run, draft.version_no),
         "publish_pr_open": watch is not None and watch.kind == "publish",
@@ -396,8 +395,7 @@ def _offer_state(store: Store, draft: Draft, preview_run: Any) -> dict[str, bool
         # publish_pr_open check above can't see a run with no PR yet, so a
         # round C5 review found this button rendering and 409ing on every
         # click for exactly that window.
-        "publish_run_active": publish_run is not None
-        and publish_run.status in ("queued", "building"),
+        "publish_run_active": store.active_publish_run(draft.id) is not None,
     }
 
 

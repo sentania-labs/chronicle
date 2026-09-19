@@ -348,3 +348,45 @@ def test_republish_deletes_an_image_detached_since_the_last_publish(
     tree = ops.trees[commit["tree"]["sha"]]
     deleted_paths = {entry["path"] for entry in tree if entry["sha"] is None}
     assert image_paths[0] in deleted_paths
+
+
+def test_attach_and_detach_are_refused_while_a_publish_run_is_in_flight(store: Store) -> None:
+    """Review finding: image attach and detach change what the run converts
+    without bumping the version, so the save gate alone left that window open."""
+    draft, run = _approved_draft(store)
+    image, _ = store.put_image(png_bytes(), "sneaky.png")
+
+    with pytest.raises(ApiError) as attach_refused:
+        store.attach_image(draft.id, image.image_id, "inline", "ghostwriter")
+    assert attach_refused.value.status_code == 409
+    assert attach_refused.value.code == "publish_run_in_progress"
+    assert store.get_draft(draft.id).images == []
+
+    with pytest.raises(ApiError) as upload_refused:
+        store.put_and_attach_image(draft.id, png_bytes((9, 9, 9)), "other.png", "inline", "scott")
+    assert upload_refused.value.code == "publish_run_in_progress"
+    # A refused upload leaves no orphan image behind.
+    assert store.get_draft(draft.id).images == []
+
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    assert not any(
+        entry["path"].startswith("static/")
+        for entry in ops.trees[ops.commits[ops.refs[f"heads/{watch.branch}"]]["tree"]["sha"]]
+    )
+
+
+def test_detach_is_refused_while_a_publish_run_is_in_flight(store: Store) -> None:
+    draft, _ = store.create_draft("scott")
+    image, _ = store.put_image(png_bytes(), "kept.png")
+    store.attach_image(draft.id, image.image_id, "inline", "scott")
+    store.save_draft(draft.id, "scott", 0, {"title": "T"}, "![kept](kept.png)\n")
+    store.act_on_draft(draft.id, "submit", "scott", True)
+    store.act_on_draft(draft.id, "approve", "scott", True)
+
+    with pytest.raises(ApiError) as caught:
+        store.detach_image(draft.id, image.image_id, "ghostwriter")
+    assert caught.value.code == "publish_run_in_progress"
+    assert [item.image_id for item in store.get_draft(draft.id).images] == [image.image_id]
