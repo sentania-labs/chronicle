@@ -269,6 +269,21 @@ def test_seeded_frontmatter_of_the_wrong_type_is_dropped_with_a_warning_never_a_
     check_frontmatter(store.get_draft(draft.id).frontmatter)
 
 
+def test_a_seeded_url_that_cannot_name_an_image_directory_is_dropped_with_a_warning(
+    store: Store,
+) -> None:
+    """Issue 28: the same drop-and-warn rule as a wrong-typed key, so what was
+    seeded is what the save path accepts."""
+    text = "---\ntitle: Odd\nurl: /a/..\n---\nbody\n"
+    submission_id = make_claimed(store, [Material(name="post", text=text)])
+
+    draft, warnings = store.create_draft("scott", from_submission=submission_id)
+
+    assert draft.frontmatter == {"title": "Odd"}
+    assert len(warnings) == 1 and warnings[0].startswith("dropped frontmatter key 'url':")
+    check_frontmatter(store.get_draft(draft.id).frontmatter)
+
+
 def test_a_non_string_title_is_dropped_and_the_heading_supplies_it(store: Store) -> None:
     text = "---\ntitle: [a, b]\n---\n# Real Title\n\nbody\n"
     submission_id = make_claimed(store, [Material(name="post", text=text)])

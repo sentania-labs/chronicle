@@ -615,6 +615,9 @@ class Store:
                         f" (got {type(value).__name__})"
                     )
                     continue
+                if key == "url" and (problem := convert.url_problem(value)) is not None:
+                    warnings.append(f"dropped frontmatter key 'url': {problem}")
+                    continue
                 allowed[key] = value
             title = allowed.get("title")
             if not title:
@@ -702,6 +705,13 @@ class Store:
         # import reproduces the real blog's static/images/<dir>/ byte for
         # byte even when the two differ.
         draft.image_dir = convert.image_dir_name(allowed.get("url"), slug)
+        if (problem := convert.url_problem(allowed.get("url"))) is not None:
+            # The post is already on main, so the import cannot be refused for
+            # it; the url is kept as found and the directory falls back.
+            warnings.append(
+                f"frontmatter url is not usable as an image directory ({problem});"
+                f" images are pinned to static/images/{draft.image_dir}/ instead"
+            )
         # `_pin_slug`'s own image_dir_collision check never runs for an
         # import (it only fires when `draft.slug is None`, and this method
         # sets it directly), so a second import of the same post, or of a
@@ -2296,6 +2306,18 @@ def check_frontmatter(frontmatter: dict[str, Any]) -> None:
         expected = _frontmatter_type_problem(key, value)
         if expected is not None:
             raise _wrong_type(key, expected)
+
+    url_problem = convert.url_problem(frontmatter.get("url"))
+    if url_problem is not None:
+        # ADR 015: the url's last segment names the image directory, so a
+        # segment that cannot be a directory name is refused here, not later
+        # at preview or publish (issue 28).
+        raise ApiError(
+            422,
+            "frontmatter_url_invalid",
+            f"frontmatter.url cannot be used: {url_problem}",
+            url=frontmatter.get("url"),
+        )
 
     title = frontmatter.get("title")
     if not isinstance(title, str) or not title.strip():
