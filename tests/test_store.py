@@ -236,6 +236,32 @@ def test_slug_pin_sets_image_dir_from_slug_when_no_url(store: Store) -> None:
     assert previewed.image_dir == "a-post-about-drift"
 
 
+@pytest.mark.parametrize("url", ["/a/..", "/a/.", "/a/b\\c"])
+def test_save_refuses_a_url_whose_last_segment_is_not_a_directory_name(
+    store: Store, url: str
+) -> None:
+    """Issue 28: refused at save with a named code, before anything is pinned."""
+    draft, _ = store.create_draft("ghostwriter")
+    with pytest.raises(ApiError) as excinfo:
+        store.save_draft(draft.id, "ghostwriter", 0, {"title": "Probe", "url": url}, "body\n")
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.code == "frontmatter_url_invalid"
+    assert excinfo.value.extra["url"] == url
+    assert store.get_draft(draft.id).version_no == 0
+
+
+def test_slug_pin_falls_back_when_an_older_save_left_an_unusable_url(store: Store) -> None:
+    """A draft saved with `url: /a/..` before the save refused it still pins a
+    safe directory the first time it is previewed."""
+    draft, _ = store.create_draft("ghostwriter")
+    record = store.get_draft(draft.id)
+    record.frontmatter = {"title": "Probe", "url": "/a/.."}
+    record.title = "Probe"
+    store._write_json(store._draft_path(draft.id), record.model_dump(mode="json"))
+    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", False)
+    assert previewed.image_dir == "probe"
+
+
 def test_slug_pin_refuses_when_image_dir_exists_on_main(store: Store) -> None:
     (store.site_dir / "static" / "images" / "a-post-about-drift").mkdir(parents=True)
     draft, _ = store.create_draft("ghostwriter")

@@ -172,7 +172,9 @@ The UI uses the same API through a session (see section 11).
 - `GET /v1/drafts/{id}/versions` and `GET /v1/drafts/{id}/versions/{n}`
 - `GET /v1/drafts/{id}/changes?since={n}` returns the diffs and feedback
   entries after version `n`, by author. This is ghostwriter's first call
-  every session.
+  every session. Reference material seeded from a submission (feedback
+  entries with `action` `material`) is included at every `n`, not only
+  `n=0`: it is not review of any version, and a resuming writer still needs it.
 - `POST /v1/drafts/{id}/actions/{action}` where action is one of `submit`
   (to in_review), `preview`, `approve`, `request_revision` (with feedback),
   `reject` (with feedback), `restore`, `unpublish`. Returns a run id where a

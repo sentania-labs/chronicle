@@ -33,6 +33,26 @@ draft has one, and the pinned slug otherwise (a brand-new draft with no
 `url` yet, where slug and url-to-be already agree). One rule, no separate
 case for imported versus new drafts.
 
+The segment must be a plain directory name. `.`, `..`, anything containing
+a backslash or a control character, leading or trailing whitespace, `.git`,
+and the percent-encoded forms of the separators and dots (`%2e%2e`, `%5c`)
+are not: `static/images/../shot.png` is one level above
+the images directory, and a browser resolves an encoded `..` the same way.
+Amended 2026-09-18 (issue 28): `PUT /v1/drafts/{id}` refuses a `url` whose
+last segment fails this with 422 `frontmatter_url_invalid`, so the problem
+is named at the save that caused it rather than at a later preview or
+publish. Only a `url` being set or changed is judged: a draft's own current
+`url` is accepted again, because the editor re-sends the stored value with
+every save and an import keeps whatever main has, so refusing it would leave
+a draft that can never be saved. Where a refusal is impossible or too late, the pinned slug names
+the directory instead: an import from main (the post already exists, so the
+`url` is kept as found and `create_draft` returns a warning), a submission
+seed (the `url` key is dropped with a warning, like any other key the save
+path would refuse), a draft that saved such a `url` before the refusal
+existed (`_pin_slug` falls back), and a draft that already pinned a bad
+`image_dir` (`convert.convert` ignores it and derives the name again).
+`convert.usable_image_dir` and `convert.url_problem` are the one definition.
+
 This is pinned once, at the same moment a slug is pinned (`_fill_from_post`
 for an import, `_pin_slug` for a new draft's first preview or approve), and
 stored on `Draft.image_dir` rather than recomputed from `url` on every

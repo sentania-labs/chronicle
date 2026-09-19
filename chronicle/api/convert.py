@@ -51,6 +51,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import unquote
 
 import yaml
 
@@ -168,6 +169,51 @@ def post_url(draft: Draft, slug: str) -> str:
     return f"/{stamp.year:04d}/{stamp.month:02d}/{slug}/"
 
 
+def _last_segment(url: str) -> str | None:
+    segments = [part for part in url.strip().split("/") if part]
+    return segments[-1] if segments else None
+
+
+def _segment_problem(segment: str) -> str | None:
+    """Why `segment` cannot be one directory name under static/images/, or None.
+
+    Judged on the percent-decoded form as well, because a browser resolves
+    `/images/%2e%2e/shot.png` to `/shot.png`, so an encoded traversal is as
+    much a traversal as a literal one. A backslash is a separator on some
+    platforms and in browsers' URL parsing, so it is never part of a name.
+    """
+    if segment != segment.strip():
+        return f"{segment!r} has leading or trailing whitespace"
+    for candidate in (segment, unquote(segment)):
+        if candidate in (".", ".."):
+            return f"{segment!r} is a relative path segment, not a directory name"
+        if candidate.lower() == ".git":
+            return f"{segment!r} is a git metadata name that a tree cannot contain"
+        if "/" in candidate or "\\" in candidate:
+            return f"{segment!r} contains a path separator"
+        if any(ord(char) < 32 or ord(char) == 127 for char in candidate):
+            return f"{segment!r} contains a control character"
+    return None
+
+
+def usable_image_dir(name: str | None) -> bool:
+    """True when `name` is a single plain directory name (ADR 015)."""
+    return bool(name) and _segment_problem(name or "") is None
+
+
+def url_problem(url: str | None) -> str | None:
+    """Why a post's `url` cannot name its image directory, or None.
+
+    A blank url, or one with no segments (`/`), is not a problem: there is no
+    segment to misuse and the pinned slug names the directory. This is what
+    `Store.save_draft` refuses with 422 `frontmatter_url_invalid`.
+    """
+    if not isinstance(url, str) or not url.strip():
+        return None
+    segment = _last_segment(url)
+    return None if segment is None else _segment_problem(segment)
+
+
 def image_dir_name(url: str | None, fallback_slug: str) -> str:
     """ADR 015: the URL's last non-empty path segment, or the pinned slug.
 
@@ -175,11 +221,15 @@ def image_dir_name(url: str | None, fallback_slug: str) -> str:
     real post already used; a new draft may not have one yet), so this is
     the one place both `_fill_from_post` and `_pin_slug` in `store.py` call
     to agree on the same directory name a draft is going to keep for life.
+    A last segment that is not a plain directory name (`..`, `.`, a
+    backslash, an encoded form of either) yields the fallback slug instead;
+    a save refuses such a url up front (`url_problem`), so this only fires
+    for a draft saved before that, or an import from main.
     """
     if isinstance(url, str) and url.strip():
-        segments = [part for part in url.strip().split("/") if part]
-        if segments:
-            return segments[-1]
+        segment = _last_segment(url)
+        if segment is not None and _segment_problem(segment) is None:
+            return segment
     return fallback_slug
 
 
@@ -344,7 +394,14 @@ def convert(
     # `draft.image_dir` is pinned once, at the same moment the slug is
     # (ADR 015); this fallback only fires for a draft written before that
     # field existed, or a test that builds a Draft by hand.
-    image_dir = draft.image_dir or image_dir_name(draft.frontmatter.get("url"), slug)
+    # A pinned value that is not a plain directory name (a draft that pinned
+    # `..` before issue 28's fix) is never trusted: nothing valid was ever
+    # written under it, so the derived name stands in.
+    image_dir = (
+        draft.image_dir
+        if draft.image_dir and usable_image_dir(draft.image_dir)
+        else image_dir_name(draft.frontmatter.get("url"), slug)
+    )
     static_images_dir = f"{static_dir}/images" if static_dir else STATIC_IMAGES_DIR
     placed = placements(draft, image_dir, static_images_dir)
     by_ref, by_name = _rewrite_map(draft, placed)

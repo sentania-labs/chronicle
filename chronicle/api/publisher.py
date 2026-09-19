@@ -212,6 +212,16 @@ def _base_tree_sha(ops: GitHubRepoOps, default_branch: str) -> tuple[str, str]:
 def _publish(
     store: Store, ops: GitHubRepoOps, default_branch: str, draft: Draft, run: Run
 ) -> dict[str, Any]:
+    if run.approved_version is not None and draft.version_no != run.approved_version:
+        # `Store.save_draft` refuses new versions while this run is in flight,
+        # so this is the backstop for any other writer: never convert text
+        # that is not the version `approve` was given. The run fails and the
+        # draft returns to `in_review` with a feedback entry (issue 41).
+        raise PublishFailed(
+            "draft_moved_since_approval",
+            f"draft {draft.id} was approved at version {run.approved_version} but is now at"
+            f" version {draft.version_no}",
+        )
     if not draft.slug:
         raise PublishFailed("no_slug", f"draft {draft.id} has no pinned slug")
 
