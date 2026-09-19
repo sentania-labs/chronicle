@@ -188,7 +188,7 @@ def _retag(
 
 
 def _card_titles(html: str) -> list[str]:
-    return re.findall(r'<h3><a href="/content/drafts/[^"]+">([^<]*)</a></h3>', html)
+    return re.findall(r'<h3[^>]*><a href="/content/drafts/[^"]+">([^<]*)</a></h3>', html)
 
 
 def test_drafts_board_paginates_the_published_archive_at_fifty(
@@ -360,7 +360,7 @@ def test_drafts_board_status_filter_has_no_inline_handler(client: TestClient) ->
     response = client.get("/content/drafts")
     assert response.status_code == 200
     assert "onchange" not in response.text
-    assert '<button type="submit">Filter</button>' in response.text
+    assert '<button type="submit" class="lat-btn">Filter</button>' in response.text
     assert '<script src="/static/ui.js"></script>' in response.text
 
 
@@ -1317,7 +1317,7 @@ def test_import_says_so_plainly_when_every_post_is_tracked(
     assert "All 2 posts from the blog are already on the" in response.text
     assert 'href="/content/drafts"' in response.text
     assert "nothing to import" in response.text
-    assert "<table>" not in response.text
+    assert "<table" not in response.text
     assert "Import as post" not in response.text
 
 
@@ -1325,7 +1325,7 @@ def test_import_says_so_when_nothing_has_been_digested(client: TestClient) -> No
     response = client.get("/content/import")
     assert response.status_code == 200
     assert "No posts have been digested" in response.text
-    assert "<table>" not in response.text
+    assert "<table" not in response.text
 
 
 def test_import_post_for_an_already_tracked_post_explains_itself(
@@ -1363,7 +1363,7 @@ def test_import_image_folder_collision_reads_as_an_explanation(
     assert "static/images/clash/" in response.text
     assert "belongs to another post on this board" in response.text
     assert "already pinned by another draft" not in response.text
-    assert 'class="notice error"' in response.text
+    assert 'class="notice error lat-banner lat-banner--bad"' in response.text
 
 
 def test_import_still_creates_a_post_for_an_untracked_one(

@@ -24,16 +24,16 @@ def _import_html(*dates: str) -> str:
 
 def test_a_date_only_value_renders_unshifted() -> None:
     html = _import_html("2026-07-27")
-    assert "<td>2026-07-27</td>" in html
+    assert '<td class="lat-num">2026-07-27</td>' in html
 
 
 def test_a_full_stamp_renders_as_local_clock_time() -> None:
     # 03:30 UTC on 2020-07-08 is 22:30 CDT the evening before, in Chicago.
     html = _import_html("2020-07-08T03:30:00+00:00")
-    assert "<td>2020-07-07 22:30 CDT</td>" in html
+    assert '<td class="lat-num">2020-07-07 22:30 CDT</td>' in html
     assert "2020-07-08T03:30:00" not in html
 
 
 def test_a_space_separated_utc_stamp_from_a_real_blog_is_converted() -> None:
     html = _import_html("2005-06-10 17:37:40+00:00")
-    assert "<td>2005-06-10 12:37 CDT</td>" in html
+    assert '<td class="lat-num">2005-06-10 12:37 CDT</td>' in html

@@ -17,15 +17,16 @@ from posixpath import basename
 from typing import Any
 from urllib.parse import quote
 
+from . import ui_chrome
 from .pagination import Page
 from .ui_actions import DISABLED, Offer, offers_for
-from .ui_status import status_label
+from .ui_chrome import badge
+from .ui_status import status_label, status_tone
 from .ui_time import local_time
 
-STYLE_LINKS = (
-    '<link rel="stylesheet" href="/static/style.css">'
-    '<script src="/static/vendor/marked.min.js"></script>'
-)
+# `marked` rides in the head of every page; the stylesheets (Lattice, then
+# Chronicle's own) come from `ui_chrome.head`, shared with Admin.
+HEAD_SCRIPTS = '<script src="/static/vendor/marked.min.js"></script>'
 
 # Only the editor page loads EasyMDE (and its stylesheet); every asset is
 # vendored under /static/vendor and none reaches a CDN (THIRD_PARTY.md).
@@ -41,11 +42,15 @@ EDITOR_SCRIPTS = (
 # working records now start life already `published` by digest rather than
 # hand-drafted. The route path, `/content/drafts`, is unchanged this round;
 # see ADR 017 for why a storage/route rename is deferred.
+SUBMISSIONS_TAB = "/content/submissions"
+POSTS_TAB = "/content/drafts"
+IMPORT_TAB = "/content/import"
+PREVIEW_TAB = "/content/previews"
 NAV_LINKS = (
-    ("/content/submissions", "Submissions"),
-    ("/content/drafts", "Posts"),
-    ("/content/import", "Import"),
-    ("/content/previews", "Preview"),
+    (SUBMISSIONS_TAB, "Submissions"),
+    (POSTS_TAB, "Posts"),
+    (IMPORT_TAB, "Import"),
+    (PREVIEW_TAB, "Preview"),
 )
 
 BANNER_TEXT = (
@@ -54,9 +59,8 @@ BANNER_TEXT = (
 )
 
 
-def _nav() -> str:
-    links = "".join(f'<a href="{href}">{escape(label)}</a>' for href, label in NAV_LINKS)
-    return f"<nav>{links}</nav>"
+def _nav(active: str | None) -> str:
+    return ui_chrome.tabs(NAV_LINKS, active, label="Sections")
 
 
 def page(
@@ -64,17 +68,28 @@ def page(
     body: str,
     *,
     banner: bool,
+    active: str | None = None,
     notice: str | None = None,
     notice_kind: str = "error",
     editor: bool = False,
     editor_backup: bool = False,
 ) -> str:
-    """`editor` is the full editor page (EasyMDE and editor.js); `editor_backup`
+    """`active` is the href of the tab this page belongs to (one of the four
+    `*_TAB` constants), which is what marks it current in the tab strip.
+    `editor` is the full editor page (EasyMDE and editor.js); `editor_backup`
     is the conflict page, which only needs editor.js to keep the visitor's
     attempted text in the browser."""
-    banner_html = f'<p class="banner">{escape(BANNER_TEXT)}</p>' if banner else ""
-    notice_html = f'<p class="notice {notice_kind}">{escape(notice)}</p>' if notice else ""
-    head = STYLE_LINKS + (EDITOR_HEAD if editor else "")
+    # The internal-only warning is about exposure, so it is a `warn` banner,
+    # placed directly under the header as Lattice asks for a whole-screen one.
+    banner_html = (
+        f'<p class="banner {ui_chrome.banner_class("warn")}">{escape(BANNER_TEXT)}</p>'
+        if banner
+        else ""
+    )
+    notice_html = ui_chrome.notice(notice, notice_kind) if notice else ""
+    # EasyMDE's own sheet sits between Lattice and `style.css`, so Chronicle's
+    # overrides of it win on order as well as on specificity.
+    head = ui_chrome.head(extra_stylesheets=EDITOR_HEAD if editor else "", scripts=HEAD_SCRIPTS)
     if editor:
         scripts = EDITOR_SCRIPTS
     elif editor_backup:
@@ -82,13 +97,16 @@ def page(
     else:
         scripts = '<script src="/static/ui.js"></script>'
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>{escape(title)}</title>{head}</head>
+<html lang="en"><head><meta charset="utf-8"><title>{escape(title)}</title>{head}</head>
 <body{' class="wide"' if editor else ""}>
+{ui_chrome.header("Chronicle")}
+<div class="chr-page">
 {banner_html}
-{_nav()}
-<h1>{escape(title)}</h1>
+{_nav(active)}
+<h1 class="page-title">{escape(title)}</h1>
 {notice_html}
 {body}
+</div>
 {scripts}
 </body></html>"""
 
@@ -132,6 +150,17 @@ def _status_options(current: str | None) -> str:
 # --- Submissions -------------------------------------------------------
 
 
+def _table(head_cells: str, rows: str) -> str:
+    """A Lattice table in its scroll wrapper: an overflowing row scrolls the
+    table rather than the page. `head_cells` is the `<th>` cells, or empty for
+    a table with no header row."""
+    thead = f"<thead><tr>{head_cells}</tr></thead>" if head_cells else ""
+    return (
+        '<div class="lat-table-scroll">'
+        f'<table class="lat-table">{thead}<tbody>{rows}</tbody></table></div>'
+    )
+
+
 def submissions_list_page(pg: Page[dict[str, Any]], *, banner: bool) -> str:
     if not pg.items:
         rows = "<tr><td colspan=6>none</td></tr>"
@@ -139,22 +168,23 @@ def submissions_list_page(pg: Page[dict[str, Any]], *, banner: bool) -> str:
         rows = "".join(
             "<tr>"
             f'<td><a href="/content/submissions/{escape(s["id"])}">{escape(s["brief"][:80])}</a></td>'
-            f"<td>{escape(s['status'])}</td>"
+            f"<td>{badge(s['status'])}</td>"
             f"<td>{escape(s['from_'])}</td>"
             f"<td>{escape(local_time(s['created_at']))}</td>"
-            f"<td>{len(s['image_ids'])}</td>"
+            f'<td class="lat-num">{len(s["image_ids"])}</td>'
             f"<td>{escape(s['claimed_by'] or '-')}</td>"
             "</tr>"
             for s in pg.items
         )
+    heads = (
+        "<th>brief</th><th>status</th><th>from</th><th>created</th>"
+        '<th class="lat-num">images</th><th>claimed by</th>'
+    )
     body = f"""
-<table>
-<tr><th>brief</th><th>status</th><th>from</th><th>created</th><th>images</th><th>claimed by</th></tr>
-{rows}
-</table>
+{_table(heads, rows)}
 {_pagination_links(pg, "/content/submissions")}
 """
-    return page("Submissions", body, banner=banner)
+    return page("Submissions", body, banner=banner, active=SUBMISSIONS_TAB)
 
 
 def _submission_edit_form(submission: dict[str, Any]) -> str:
@@ -164,10 +194,12 @@ def _submission_edit_form(submission: dict[str, Any]) -> str:
     keeps them; `base_version` is what makes a stale save a 409."""
     rows = list(submission["materials"]) + [{"name": "", "url": None, "text": None}]
     material_rows = "".join(
-        "<fieldset>"
-        f'<label>Name <input name="material_name" value="{escape(m["name"])}"></label> '
-        f'<label>URL <input name="material_url" value="{escape(m.get("url") or "")}"></label>'
-        f'<br><label>Text<br><textarea name="material_text" rows="6" cols="80">\n'
+        '<fieldset class="chr-fieldset">'
+        '<div class="chr-row">'
+        f'<label class="lat-label">Name <input class="lat-input" name="material_name" value="{escape(m["name"])}"></label>'
+        f'<label class="lat-label">URL <input class="lat-input" name="material_url" value="{escape(m.get("url") or "")}"></label>'
+        "</div>"
+        f'<label class="lat-label">Text<textarea class="lat-textarea" name="material_text" rows="6">\n'
         f"{escape(m.get('text') or '')}</textarea></label>"
         "</fieldset>"
         for m in rows
@@ -177,15 +209,15 @@ def _submission_edit_form(submission: dict[str, Any]) -> str:
         for image_id in submission["image_ids"]
     )
     return f"""
+<form method="post" class="lat-card" action="/content/submissions/{escape(submission["id"])}/edit">
 <h2>Edit</h2>
-<form method="post" action="/content/submissions/{escape(submission["id"])}/edit">
 <input type="hidden" name="base_version" value="{submission["version_no"]}">
 {image_fields}
-<label for="brief">Brief</label><br>
-<textarea id="brief" name="brief" rows="4" cols="80">
+<label class="lat-label" for="brief">Brief</label>
+<textarea class="lat-textarea" id="brief" name="brief" rows="4">
 {escape(submission["brief"])}</textarea>
 {material_rows}
-<button type="submit">Save changes (version {submission["version_no"]})</button>
+<button type="submit" class="lat-btn">Save changes (version {submission["version_no"]})</button>
 </form>
 """
 
@@ -227,12 +259,13 @@ def submission_detail_page(
     if can_draft:
         actions.append(
             f'<form method="post" action="/content/submissions/{escape(submission["id"])}/draft">'
-            '<button type="submit">Create post from this submission</button></form>'
+            '<button type="submit" class="lat-btn lat-btn--primary">'
+            "Create post from this submission</button></form>"
         )
     if can_discard:
         actions.append(
             f'<form method="post" action="/content/submissions/{escape(submission["id"])}/discard">'
-            '<button type="submit">Discard</button></form>'
+            '<button type="submit" class="lat-btn lat-btn--danger">Discard</button></form>'
         )
     conflict_html = ""
     if conflict_diff is not None:
@@ -240,8 +273,10 @@ def submission_detail_page(
         # reloaded at the current version, and what the visitor tried to save
         # is shown below so nothing they wrote is lost.
         conflict_html += f"""
+<section class="lat-card">
 <h2>What changed underneath you</h2>
-<pre>{escape(conflict_diff) or "(no diff available)"}</pre>
+<pre class="lat-code">{escape(conflict_diff) or "(no diff available)"}</pre>
+</section>
 """
     if attempted is not None:
         # Also shown when the edit was refused for another reason (the
@@ -249,24 +284,32 @@ def submission_detail_page(
         attempted_materials = "".join(
             f"<li><strong>{escape(m['name'])}</strong>"
             + (f" ({escape(m['url'])})" if m.get("url") else "")
-            + (f"<pre>{escape(m['text'])}</pre>" if m.get("text") else "")
+            + (f'<pre class="lat-code">{escape(m["text"])}</pre>' if m.get("text") else "")
             + "</li>"
             for m in attempted.get("materials", [])
         )
         conflict_html += f"""
+<section class="lat-card">
 <h2>Your attempted text (not saved, for manual merging)</h2>
-<pre>{escape(attempted.get("brief", ""))}</pre>
+<pre class="lat-code">{escape(attempted.get("brief", ""))}</pre>
 <ul>{attempted_materials}</ul>
+</section>
 """
     body = f"""
-<p class="muted">status: {escape(submission["status"])}, version: {submission["version_no"]}, from: {escape(submission["from_"])},
+<p class="muted">status: {badge(submission["status"])}, version: {submission["version_no"]}, from: {escape(submission["from_"])},
 created: {escape(local_time(submission["created_at"]))}, claimed by: {escape(submission["claimed_by"] or "-")}</p>
+<section class="lat-card">
 <h2>Brief</h2>
-<p>{escape(submission["brief"])}</p>
+<p class="chr-prose">{escape(submission["brief"])}</p>
+</section>
+<section class="lat-card">
 <h2>Materials</h2>
 <ul>{materials or "<li>none</li>"}</ul>
+</section>
+<section class="lat-card">
 <h2>Images ({len(images)})</h2>
 <ul>{image_rows or "<li>none</li>"}</ul>
+</section>
 <div class="actions">{"".join(actions)}</div>
 {conflict_html}
 {_submission_edit_form(submission) if can_draft else ""}
@@ -275,6 +318,7 @@ created: {escape(local_time(submission["created_at"]))}, claimed by: {escape(sub
         f"Submission {submission['id']}",
         body,
         banner=banner,
+        active=SUBMISSIONS_TAB,
         notice=notice,
         notice_kind=notice_kind or ("ok" if notice else "error"),
     )
@@ -286,7 +330,8 @@ created: {escape(local_time(submission["created_at"]))}, claimed by: {escape(sub
 def _flag_badges(flags: list[dict[str, Any]]) -> str:
     if not flags:
         return ""
-    return "".join(f'<span class="tag">flag: {escape(f["type"])}</span>' for f in flags)
+    # A reconciliation flag is something to look at before carrying on: warn.
+    return "".join(badge(f"flag: {f['type']}", "warn") for f in flags)
 
 
 def _draft_card(
@@ -306,11 +351,15 @@ def _draft_card(
     claim = draft.get("claim")
     claim_text = f"held by {escape(claim['author'])}" if claim else "unclaimed"
     return f"""
-<div class="card">
-<h3><a href="/content/drafts/{escape(draft["id"])}">{escape(draft["title"] or "(untitled)")}</a></h3>
-<p class="muted">slug: {escape(draft["slug"] or "-")} | status: {escape(status_label(draft["status"]))} |
+<div class="lat-card card">
+<div class="chr-card-head">
+<h3 class="subhead"><a href="/content/drafts/{escape(draft["id"])}">{escape(draft["title"] or "(untitled)")}</a></h3>
+{badge(status_label(draft["status"]), status_tone(draft["status"]))}
+{_flag_badges(flags)}
+</div>
+<p class="muted">slug: {escape(draft["slug"] or "-")} |
 author: {escape(last_author)} | updated: {escape(local_time(draft["updated_at"]))} | claim: {claim_text}</p>
-<p class="muted">PR: {pr_link} | preview: {preview_link} {_flag_badges(flags)}</p>
+<p class="muted">PR: {pr_link} | preview: {preview_link}</p>
 </div>
 """
 
@@ -338,28 +387,32 @@ def drafts_board_page(
     # A search, a status filter of `published`, or a page past the first all
     # mean the visitor is looking for something in the archive, so it opens.
     archive_open = " open" if (q or status_filter == "published" or archive.page > 1) else ""
-    active_html = _cards(active) or "<p>nothing in flight.</p>"
-    archive_html = _cards(archive.items) or "<p>no published posts.</p>"
+    active_html = _cards(active) or '<p class="lat-banner">nothing in flight.</p>'
+    archive_html = _cards(archive.items) or '<p class="lat-banner">no published posts.</p>'
     body = f"""
 <form method="post" action="/content/drafts/new">
-<button type="submit">New post</button>
+<button type="submit" class="lat-btn lat-btn--primary">New post</button>
 </form>
-<form method="get" action="/content/drafts">
-<label for="status">Filter by status</label>
-<select id="status" name="status">{_status_options(status_filter)}</select>
-<label for="q">Search</label>
-<input type="text" id="q" name="q" value="{escape(q)}" placeholder="title or slug">
-<button type="submit">Filter</button>
+<form method="get" action="/content/drafts" class="chr-filter">
+<div class="chr-field">
+<label class="lat-label" for="status">Filter by status</label>
+<select class="lat-select" id="status" name="status">{_status_options(status_filter)}</select>
+</div>
+<div class="chr-field chr-grow">
+<label class="lat-label" for="q">Search</label>
+<input type="text" class="lat-input" id="q" name="q" value="{escape(q)}" placeholder="title or slug">
+</div>
+<button type="submit" class="lat-btn">Filter</button>
 </form>
 <h2>In flight ({len(active)})</h2>
-{active_html}
+<div class="chr-cards">{active_html}</div>
 <details id="published"{archive_open}>
 <summary>Published archive ({archive.total})</summary>
-{archive_html}
+<div class="chr-cards">{archive_html}</div>
 {_pagination_links(archive, "/content/drafts", extra=extra, anchor="published")}
 </details>
 """
-    return page("Posts", body, banner=banner)
+    return page("Posts", body, banner=banner, active=POSTS_TAB)
 
 
 # --- Import ---------------------------------------------------------------
@@ -388,46 +441,47 @@ def import_page(
             )
         return page(
             "Import published post",
-            f"<p>{reason}</p>",
+            f'<p class="lat-banner">{reason}</p>',
             banner=banner,
+            active=IMPORT_TAB,
             notice=notice,
             notice_kind="error",
         )
     rows = "".join(
         "<tr>"
-        f"<td>{escape(p['slug'])}</td>"
+        f'<td class="chr-mono">{escape(p["slug"])}</td>'
         f"<td>{escape(p['title'])}</td>"
         # A post's date is frontmatter and is often a bare YYYY-MM-DD. `local_time`
         # leaves that as its own date on purpose: a date has no instant, and
         # shifting it west of UTC would show the day before. Do not "fix" that
         # into a clock time. A full stamp is converted to local clock time.
-        f"<td>{escape(local_time(p['date']))}</td>"
+        f'<td class="lat-num">{escape(local_time(p["date"]))}</td>'
         '<td><form method="post" action="/content/import">'
         f'<input type="hidden" name="slug" value="{escape(p["slug"])}">'
         f'<input type="hidden" name="q" value="{escape(q)}">'
         f'<input type="hidden" name="page" value="{pg.page}">'
-        '<button type="submit">Import as post</button></form></td>'
+        '<button type="submit" class="lat-btn">Import as post</button></form></td>'
         "</tr>"
         for p in pg.items
     )
     extra = f"&q={quote(q)}" if q else ""
     body = f"""
 <p class="muted">Posts with no record here yet: {untracked_total}.</p>
-<form method="get" action="/content/import">
-<label for="q">Search published posts</label>
-<input type="text" id="q" name="q" value="{escape(q)}" placeholder="title or slug">
-<button type="submit">Search</button>
+<form method="get" action="/content/import" class="chr-filter">
+<div class="chr-field chr-grow">
+<label class="lat-label" for="q">Search published posts</label>
+<input type="text" class="lat-input" id="q" name="q" value="{escape(q)}" placeholder="title or slug">
+</div>
+<button type="submit" class="lat-btn">Search</button>
 </form>
-<table>
-<tr><th>slug</th><th>title</th><th>date</th><th></th></tr>
-{rows or "<tr><td colspan=4>no posts match.</td></tr>"}
-</table>
+{_table('<th>slug</th><th>title</th><th class="lat-num">date</th><th></th>', rows or "<tr><td colspan=4>no posts match.</td></tr>")}
 {_pagination_links(pg, "/content/import", extra=extra)}
 """
     return page(
         "Import published post",
         body,
         banner=banner,
+        active=IMPORT_TAB,
         notice=notice,
         notice_kind="error",
     )
@@ -461,9 +515,9 @@ def _frontmatter_fields(
         return escape(", ".join(str(v) for v in value))
 
     url_field = (
-        f'<input type="text" id="url" name="url" value="{val("url")}" readonly{join}>'
+        f'<input type="text" class="lat-input" id="url" name="url" value="{val("url")}" readonly{join}>'
         if slug
-        else f'<input type="text" id="url" name="url" value="{val("url")}"{join}>'
+        else f'<input type="text" class="lat-input" id="url" name="url" value="{val("url")}"{join}>'
     )
     stored_feature = frontmatter.get("featureImage")
     stored_feature = stored_feature if isinstance(stored_feature, str) else ""
@@ -515,23 +569,23 @@ def _frontmatter_fields(
             f'<option value="{escape(stored_feature)}" selected>{escape(stored_feature)}</option>'
         )
     title_field = (
-        f'<label for="title">Title</label>\n'
-        f'<input type="text" id="title" name="title" value="{val("title")}" required{join}>\n'
+        f'<label class="lat-label" for="title">Title</label>\n'
+        f'<input type="text" class="lat-input" id="title" name="title" value="{val("title")}" required{join}>\n'
         if include_title
         else ""
     )
-    return f"""{title_field}<label for="date">Date</label>
-<input type="text" id="date" name="date" value="{val("date")}" placeholder="YYYY-MM-DD"{join}>
-<label for="categories">Categories (comma-separated)</label>
-<input type="text" id="categories" name="categories" value="{list_val("categories")}"{join}>
-<label for="tags">Tags (comma-separated)</label>
-<input type="text" id="tags" name="tags" value="{list_val("tags")}"{join}>
-<label for="summary">Summary / description</label>
-<input type="text" id="summary" name="summary" value="{val("summary") or val("description")}"{join}>
-<label for="url">URL{" (read-only, slug is pinned)" if slug else ""}</label>
+    return f"""{title_field}<label class="lat-label" for="date">Date</label>
+<input type="text" class="lat-input" id="date" name="date" value="{val("date")}" placeholder="YYYY-MM-DD"{join}>
+<label class="lat-label" for="categories">Categories (comma-separated)</label>
+<input type="text" class="lat-input" id="categories" name="categories" value="{list_val("categories")}"{join}>
+<label class="lat-label" for="tags">Tags (comma-separated)</label>
+<input type="text" class="lat-input" id="tags" name="tags" value="{list_val("tags")}"{join}>
+<label class="lat-label" for="summary">Summary / description</label>
+<input type="text" class="lat-input" id="summary" name="summary" value="{val("summary") or val("description")}"{join}>
+<label class="lat-label" for="url">URL{" (read-only, slug is pinned)" if slug else ""}</label>
 {url_field}
-<label for="featureImage">Feature image</label>
-<select id="featureImage" name="featureImage"{join}><option value="">none</option>{feature_options}</select>
+<label class="lat-label" for="featureImage">Feature image</label>
+<select class="lat-select" id="featureImage" name="featureImage"{join}><option value="">none</option>{feature_options}</select>
 """
 
 
@@ -541,7 +595,7 @@ def image_url(draft_id: str, image_id: str) -> str:
 
 def _image_list(draft_id: str, images: list[dict[str, Any]]) -> str:
     if not images:
-        return "<p>no attached images.</p>"
+        return '<p class="lat-banner">no attached images.</p>'
     # data-image-filename / data-image-src are how the editor's live render
     # finds the bytes for a body reference like `![](feature.png)`: the
     # reference is a bare filename (what convert.py rewrites), which is not a
@@ -549,14 +603,14 @@ def _image_list(draft_id: str, images: list[dict[str, Any]]) -> str:
     rows = "".join(
         f'<tr data-image-filename="{escape(img["filename"])}" '
         f'data-image-src="{escape(image_url(draft_id, img["image_id"]))}">'
-        f"<td>{escape(img['filename'])}</td>"
+        f'<td class="chr-mono">{escape(img["filename"])}</td>'
         f"<td>{escape(img['role'])}</td>"
         f'<td><form method="post" action="/content/drafts/{escape(draft_id)}/images/{escape(img["image_id"])}/detach">'
-        '<button type="submit">Detach</button></form></td>'
+        '<button type="submit" class="lat-btn lat-btn--ghost">Detach</button></form></td>'
         "</tr>"
         for img in images
     )
-    return f"<table><tr><th>filename</th><th>role</th><th></th></tr>{rows}</table>"
+    return _table("<th>filename</th><th>role</th><th></th>", rows)
 
 
 STAGE_HINTS = {
@@ -568,13 +622,14 @@ STAGE_HINTS = {
 def _offer_button(draft_id: str, offer: Offer) -> str:
     if offer.state == DISABLED:
         return (
-            f'<span class="offer"><button type="button" class="offer-{escape(offer.action)}" '
+            f'<span class="offer"><button type="button" class="lat-btn offer-{escape(offer.action)}" '
             f'disabled title="{escape(offer.reason)}">{escape(offer.label)}</button> '
             f'<small class="offer-reason">{escape(offer.reason)}</small></span>'
         )
     reserved = ' <span class="reserved">(Scott only)</span>' if offer.reserved else ""
     action_url = f"/content/drafts/{escape(draft_id)}/actions/{offer.action}"
-    css = "primary" if offer.primary else "secondary"
+    # Lattice allows one primary per screen; `offers_for` marks at most one.
+    css = "lat-btn lat-btn--primary" if offer.primary else "lat-btn"
     # Steps the click runs beyond the action itself (a revise before a
     # preview, a submit before an approve) are said out loud, not hidden.
     staged = [STAGE_HINTS.get(step, step) for step in offer.steps[:-1]]
@@ -582,8 +637,8 @@ def _offer_button(draft_id: str, offer: Offer) -> str:
     if offer.feedback_required:
         return (
             f'<form method="post" action="{action_url}" class="action-form">'
-            f"<label>{escape(offer.label)}{reserved}</label>"
-            '<textarea name="feedback" required placeholder="feedback text (required)"></textarea>'
+            f'<label class="lat-label">{escape(offer.label)}{reserved}</label>'
+            '<textarea class="lat-textarea" name="feedback" required placeholder="feedback text (required)"></textarea>'
             f'<button type="submit" class="{css}">{escape(offer.label)}</button></form>'
         )
     return (
@@ -599,30 +654,38 @@ def _action_buttons(draft_id: str, offers: list[Offer]) -> str:
 
 def _feedback_log(entries: list[dict[str, Any]]) -> str:
     if not entries:
-        return "<p>no feedback yet.</p>"
+        return '<p class="lat-banner">no feedback yet.</p>'
     rows = "".join(
         f"<li><strong>v{e['version_no']} {escape(e['action'])}</strong> by {escape(e['author'])} "
         f"at {escape(local_time(e['created_at']))}: {escape(e['text'])}</li>"
         for e in entries
     )
-    return f"<ul>{rows}</ul>"
+    return f'<ul class="chr-log">{rows}</ul>'
 
 
 def _version_history(draft_id: str, versions: list[dict[str, Any]]) -> str:
     if not versions:
-        return "<p>no versions yet.</p>"
+        return '<p class="lat-banner">no versions yet.</p>'
     rows = "".join(
-        f"<li>v{v['version_no']} by {escape(v['author'])} at {escape(local_time(v['created_at']))}"
-        + (f": {escape(v['message'])}" if v.get("message") else "")
-        + f' (<a href="/content/drafts/{escape(draft_id)}/diff?from={v["version_no"] - 1}&to={v["version_no"]}">diff vs previous</a>)</li>'
+        "<tr>"
+        f'<td class="lat-num">v{v["version_no"]}</td>'
+        f"<td>{escape(v['author'])}</td>"
+        f"<td>{escape(local_time(v['created_at']))}</td>"
+        f'<td><a href="/content/drafts/{escape(draft_id)}/diff?from={v["version_no"] - 1}&to={v["version_no"]}">diff vs previous</a></td>'
+        "</tr>"
+        + (
+            f'<tr class="chr-note"><td></td><td colspan="3">{escape(v["message"])}</td></tr>'
+            if v.get("message")
+            else ""
+        )
         for v in versions
     )
-    return f"<ul>{rows}</ul>"
+    return _table('<th class="lat-num">v</th><th>author</th><th>saved</th><th></th>', rows)
 
 
 def _run_status(run: dict[str, Any] | None) -> str:
     if run is None:
-        return "<p>no runs yet.</p>"
+        return '<p class="lat-banner">no runs yet.</p>'
     return (
         f"<p>last run: {escape(run['kind'])}: {escape(run['status'])} at "
         f"{escape(local_time(run.get('finished_at') or run.get('started_at') or run['created_at']))} "
@@ -631,9 +694,10 @@ def _run_status(run: dict[str, Any] | None) -> str:
 
 
 def _status_pill(status: str) -> str:
-    return (
-        f'<span id="status-pill" data-refresh class="status-pill status-{escape(status)}">'
-        f"{escape(status_label(status))}</span>"
+    return badge(
+        status_label(status),
+        status_tone(status),
+        attrs=f' id="status-pill" data-refresh data-status="{escape(status)}"',
     )
 
 
@@ -645,19 +709,19 @@ def _post_info(
         claim_html = (
             f"<p>Claimed by {escape(claim['author'])} since {escape(local_time(claim['since']))}. "
             f'<form class="inline" method="post" action="/content/drafts/{escape(draft["id"])}/release">'
-            '<button type="submit">Release claim</button></form></p>'
+            '<button type="submit" class="lat-btn">Release claim</button></form></p>'
         )
     else:
         claim_html = (
             "<p>Unclaimed. "
             f'<form class="inline" method="post" action="/content/drafts/{escape(draft["id"])}/claim">'
-            '<button type="submit">Claim</button></form></p>'
+            '<button type="submit" class="lat-btn">Claim</button></form></p>'
         )
     preview_link = (
         f'<p><a href="{escape(preview_url)}">Last built preview</a></p>' if preview_url else ""
     )
     return (
-        '<section id="post-info" data-refresh class="panel">'
+        '<section id="post-info" data-refresh class="lat-card panel">'
         f"{claim_html}{preview_link}{_run_status(last_run)}</section>"
     )
 
@@ -675,10 +739,10 @@ def _panel(
     swaps for the server's fresh copy after a save or an upload, so what the
     panel shows never lags the record. The frontmatter panel opts out: it
     holds form fields the visitor may be typing into."""
-    badge = f' <span class="count">{count}</span>' if count is not None else ""
+    badge = f' <span class="count lat-pill"><b>{count}</b></span>' if count is not None else ""
     marker = " data-refresh" if refresh else ""
     return (
-        f'<details id="{panel_id}"{marker} class="panel"{" open" if open_ else ""}>'
+        f'<details id="{panel_id}"{marker} class="lat-card panel"{" open" if open_ else ""}>'
         f"<summary>{escape(title)}{badge}</summary>{inner}</details>"
     )
 
@@ -689,11 +753,11 @@ def _image_upload_form(draft_id: str, images: list[dict[str, Any]]) -> str:
     return f"""{_image_list(draft_id, images)}
 <form id="image-form" method="post" action="/content/drafts/{escape(draft_id)}/images" enctype="multipart/form-data">
 <div id="dropzone" class="dropzone">Drop an image on the editor or here, or choose one.</div>
-<label for="file">Upload image</label>
-<input type="file" id="file" name="file" accept="image/png,image/jpeg,image/gif,image/webp" required>
-<label for="role">Role</label>
-<select id="role" name="role"><option value="inline">inline (insert in body)</option><option value="feature">feature</option></select>
-<button type="submit" id="upload-btn">Upload and attach</button>
+<label class="lat-label" for="file">Upload image</label>
+<input type="file" class="lat-input" id="file" name="file" accept="image/png,image/jpeg,image/gif,image/webp" required>
+<label class="lat-label" for="role">Role</label>
+<select class="lat-select" id="role" name="role"><option value="inline">inline (insert in body)</option><option value="feature">feature</option></select>
+<button type="submit" id="upload-btn" class="lat-btn">Upload and attach</button>
 </form>"""
 
 
@@ -714,7 +778,7 @@ def editor_page(
 ) -> str:
     draft_id = escape(draft["id"])
     pr_open_notice = (
-        '<p id="pr-open-notice" data-refresh class="notice conflict">This post has an open '
+        f'<p id="pr-open-notice" data-refresh class="notice conflict {ui_chrome.banner_class("warn")}">This post has an open '
         "publish pull request; saving is refused until it merges or closes.</p>"
         if publish_pr_open
         else '<p id="pr-open-notice" data-refresh hidden></p>'
@@ -732,15 +796,15 @@ def editor_page(
     title_value = title_value if isinstance(title_value, str) else ""
     body = f"""
 <div id="editor-app" data-draft-id="{draft_id}" data-version="{draft["version_no"]}">
-<div id="backup-banner" class="backup-banner" role="alert" hidden>
+<div id="backup-banner" class="backup-banner {ui_chrome.banner_class("warn")}" role="alert" hidden>
 <span id="backup-banner-text"></span>
-<button type="button" id="backup-restore">Restore</button>
-<button type="button" id="backup-discard">Discard</button>
+<button type="button" id="backup-restore" class="lat-btn">Restore</button>
+<button type="button" id="backup-discard" class="lat-btn lat-btn--ghost">Discard</button>
 </div>
 {pr_open_notice}
 <div class="editor-bar" id="editor-bar">
 {_status_pill(draft["status"])}
-<button type="submit" id="save-btn" class="primary" form="{EDIT_FORM_ID}">Save</button>
+<button type="submit" id="save-btn" class="lat-btn" form="{EDIT_FORM_ID}">Save</button>
 <span id="save-state" class="save-state" data-state="idle" role="status" aria-live="polite">No unsaved changes</span>
 <span id="upload-state" class="upload-state" role="status" aria-live="polite"></span>
 </div>
@@ -749,10 +813,10 @@ def editor_page(
 <div id="action-panel" data-refresh class="actions">{_action_buttons(draft["id"], offers)}</div>
 <form id="{EDIT_FORM_ID}" method="post" action="/content/drafts/{draft_id}/save">
 <input type="hidden" id="base_version" name="base_version" value="{draft["version_no"]}">
-<label for="title">Title</label>
-<input type="text" id="title" name="title" value="{escape(title_value)}" required>
-<label for="body">Body (markdown)</label>
-<textarea id="body" name="body" data-editor="markdown">{escape(draft["body"])}</textarea>
+<label class="lat-label" for="title">Title</label>
+<input type="text" class="lat-input" id="title" name="title" value="{escape(title_value)}" required>
+<label class="lat-label" for="body">Body (markdown)</label>
+<textarea class="lat-textarea" id="body" name="body" data-editor="markdown">{escape(draft["body"])}</textarea>
 </form>
 </div>
 <aside class="editor-side">
@@ -769,6 +833,7 @@ def editor_page(
         f"Post: {draft['title'] or '(untitled)'}",
         body,
         banner=banner,
+        active=POSTS_TAB,
         notice=notice,
         notice_kind=notice_kind,
         editor=True,
@@ -793,7 +858,7 @@ def conflict_page(
     back. It then shows whichever of the three `backup-note-*` sentences is
     true; with no script none of them is claimed."""
     body = f"""
-<p class="notice conflict">Someone else saved post {escape(draft["id"])} to version
+<p class="notice conflict {ui_chrome.banner_class("warn")} chr-flow">Someone else saved post {escape(draft["id"])} to version
 {draft["version_no"]} while you were editing version {attempted["base_version"]}. Nothing was
 overwritten. Review the diff below, then use the reloaded form (now at the current version) to
 reapply anything from your attempted text on the right.
@@ -804,27 +869,38 @@ post, and it was left as it was: the attempted text on the right is not stored t
 anything you need from it now.</span>
 <span id="backup-note-unavailable" hidden>This browser could not store your text: it is only in the
 pane on the right, so copy anything you need from it now.</span></p>
+<section class="lat-card">
 <h2>What changed underneath you</h2>
-<pre>{escape(diff_summary) or "(no diff available)"}</pre>
+<pre class="lat-code">{escape(diff_summary) or "(no diff available)"}</pre>
+</section>
 <div class="columns">
 <div>
+<form method="post" class="lat-card" action="/content/drafts/{escape(draft["id"])}/save">
 <h2>Current version (reloaded, ready to reapply)</h2>
-<form method="post" action="/content/drafts/{escape(draft["id"])}/save">
 <input type="hidden" name="base_version" value="{draft["version_no"]}">
 {_frontmatter_fields(draft["frontmatter"], draft["images"], draft["slug"])}
-<label for="body">Body (markdown)</label>
-<textarea id="body" name="body">{escape(draft["body"])}</textarea>
-<button type="submit">Save (reapply from here)</button>
+<label class="lat-label" for="body">Body (markdown)</label>
+<textarea class="lat-textarea" id="body" name="body">{escape(draft["body"])}</textarea>
+<button type="submit" class="lat-btn lat-btn--primary">Save (reapply from here)</button>
 </form>
 </div>
 <div>
+<section class="lat-card">
 <h2>Your attempted text (not saved, for manual merging)</h2>
 {_attempted_frontmatter_summary(attempted.get("frontmatter", {}))}
-<pre id="attempted-body" data-draft-id="{escape(draft["id"])}" data-base-version="{attempted["base_version"]}" data-fields="{escape(json.dumps(attempted.get("fields", {})))}">{escape(attempted.get("body", ""))}</pre>
+<pre class="lat-code" id="attempted-body" data-draft-id="{escape(draft["id"])}" data-base-version="{attempted["base_version"]}" data-fields="{escape(json.dumps(attempted.get("fields", {})))}">{escape(attempted.get("body", ""))}</pre>
+</section>
 </div>
 </div>
 """
-    return page("Save conflict", body, banner=banner, notice_kind="conflict", editor_backup=True)
+    return page(
+        "Save conflict",
+        body,
+        banner=banner,
+        active=POSTS_TAB,
+        notice_kind="conflict",
+        editor_backup=True,
+    )
 
 
 def _attempted_frontmatter_summary(frontmatter: dict[str, Any]) -> str:
@@ -858,12 +934,18 @@ def diff_page(
     rendered = "\n".join(lines) or "(no differences)"
     body = f"""
 <p><a href="/content/drafts/{escape(draft_id)}">back to post</a></p>
-<pre>{rendered}</pre>
+<pre class="lat-code">{rendered}</pre>
 """
-    return page(f"Diff v{from_version} to v{to_version}", body, banner=banner)
+    return page(f"Diff v{from_version} to v{to_version}", body, banner=banner, active=POSTS_TAB)
 
 
 # --- Preview tab ------------------------------------------------------------
+
+
+def _toolchain_badge(drift: bool) -> str:
+    """The builder's Hugo against the site's: a mismatch is worth a look (warn),
+    a match is the ordinary case and says so quietly (ok)."""
+    return badge("drift", "warn") if drift else badge("match", "ok")
 
 
 def preview_list_page(rows: list[dict[str, Any]], *, banner: bool) -> str:
@@ -875,20 +957,21 @@ def preview_list_page(rows: list[dict[str, Any]], *, banner: bool) -> str:
             f'<td><a href="/content/drafts/{escape(r["draft_id"])}">{escape(r["title"])}</a></td>'
             f'<td><a href="{escape(r["preview_url"])}">{escape(r["preview_url"])}</a></td>'
             f"<td>{escape(local_time(r['built_at']))}</td>"
-            f"<td>{escape(str(r['wall_seconds']) if r['wall_seconds'] is not None else '-')}</td>"
-            f"<td>{'drift' if r['toolchain_drift'] else 'match'}</td>"
+            f'<td class="lat-num">{escape(str(r["wall_seconds"]) if r["wall_seconds"] is not None else "-")}</td>'
+            f"<td>{_toolchain_badge(r['toolchain_drift'])}</td>"
             f'<td><form method="post" action="/content/previews/{escape(r["draft_id"])}/rebuild">'
-            '<button type="submit">Rebuild</button></form></td>'
+            '<button type="submit" class="lat-btn">Rebuild</button></form></td>'
             "</tr>"
             for r in rows
         )
+    heads = (
+        "<th>post</th><th>preview</th><th>built</th>"
+        '<th class="lat-num">wall seconds</th><th>toolchain</th><th></th>'
+    )
     body = f"""
-<table>
-<tr><th>post</th><th>preview</th><th>built</th><th>wall seconds</th><th>toolchain</th><th></th></tr>
-{table}
-</table>
+{_table(heads, table)}
 """
-    return page("Preview", body, banner=banner)
+    return page("Preview", body, banner=banner, active=PREVIEW_TAB)
 
 
 def run_log_page(run: dict[str, Any], log_text: str, *, banner: bool) -> str:
@@ -897,6 +980,6 @@ def run_log_page(run: dict[str, Any], log_text: str, *, banner: bool) -> str:
 started: {escape(local_time(run.get("started_at")))} | finished: {escape(local_time(run.get("finished_at")))} |
 builder: {escape(run.get("builder_id") or "-")} | hugo: {escape(run.get("hugo_version") or "-")} |
 toolchain drift: {run.get("toolchain_drift")}</p>
-<pre>{escape(log_text) or "(no log captured yet)"}</pre>
+<pre class="lat-code">{escape(log_text) or "(no log captured yet)"}</pre>
 """
-    return page(f"Run {run['id']}", body, banner=banner)
+    return page(f"Run {run['id']}", body, banner=banner, active=PREVIEW_TAB)
