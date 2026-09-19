@@ -43,10 +43,6 @@ STATUS_TONES: dict[str, str] = {
     "rejected": "bad",
 }
 
-# A build or publish run's own status, the same way: success and failure are
-# state, queued and building are not.
-RUN_TONES: dict[str, str] = {"succeeded": "ok", "failed": "bad"}
-
 
 def status_label(status: str) -> str:
     return STATUS_LABELS.get(status, status)
@@ -54,7 +50,3 @@ def status_label(status: str) -> str:
 
 def status_tone(status: str) -> str:
     return STATUS_TONES.get(status, "")
-
-
-def run_tone(status: str) -> str:
-    return RUN_TONES.get(status, "")
