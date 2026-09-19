@@ -195,18 +195,49 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   the same dict `Store.act_on_draft` consults; adding a transition there is
   what makes it show up as a button, nothing in the UI layer needs updating
   to match.
-- **The UI's markdown preview pane is client-side only, filled by `ui.js`
-  from the visitor's own textarea, never by anything the server renders.**
-  Every value a UI template does interpolate goes through `html.escape`
-  first, same bar as `admin_templates.py`. A round C5 review found that a
-  draft's body is not trusted input even here: a different consumer token
-  can `PUT` a body containing an event-handler payload, and Scott's own
-  browser is what later renders it when he opens the editor. `ui.js` now
-  runs `marked.parse`'s output through a small hand-written DOM sanitiser
-  (strips script-bearing tags, `on*` attributes, and `javascript:` URLs)
-  before assigning it into the preview pane; do not remove that step to
-  "simplify" the preview, and do not add a second `innerHTML` assignment of
-  parsed markdown anywhere without the same treatment.
+- **The editor's live render is client-side only, filled by `editor.js` from
+  EasyMDE's own text, never by anything the server renders.** Every value a
+  UI template does interpolate goes through `html.escape` first, same bar as
+  `admin_templates.py`. A round C5 review found that a draft's body is not
+  trusted input even here: a different consumer token can `PUT` a body
+  containing an event-handler payload, and Scott's own browser is what later
+  renders it when he opens the editor. `editor.js`'s `previewRender` runs
+  `marked.parse`'s output through `ui.js`'s `sanitize` (strips script-bearing
+  tags, `on*` attributes, and `javascript:` URLs) before EasyMDE assigns it;
+  do not remove that step, and do not add a second `innerHTML` assignment of
+  parsed markdown anywhere without the same treatment. Both `ui.js` and
+  `editor.js` keep their pure helpers outside a `document` guard so
+  `tests/*.test.mjs` can `require` them (run by `tests/test_js.py`). EasyMDE
+  runs with `autoDownloadFontAwesome` and `spellChecker` off (its bundle names
+  CDN URLs, and CSP would block them); toolbar glyphs are text in
+  `style.css`, so a new toolbar button needs a glyph rule there.
+- **The editor's Preview and Publish offers are staged, and the table is
+  still the only decider.** `ui_actions.offers_for` renders an offer available
+  only if `transitions.plan_action` finds a path, and `Store.act_on_draft_staged`
+  (editor buttons only, never `/v1`) runs that path's steps under one lock:
+  Preview on a `published` post revises it first, Publish on a `previewed` one
+  submits it first. The lifecycle stays in the table, but the action route also
+  holds a click to the offer the page rendered for it
+  (`ui_actions.staged_refusal`, same `_offer_state` inputs): a disabled offer,
+  or an absent one for a staged click, is a 409, so "Preview first" and an open
+  unpublish PR are enforced where the page states them, not only on the button.
+  That check is the `guard` `act_on_draft_staged` runs under the store lock,
+  never a check before the call: a save landing in between would otherwise be
+  published unpreviewed. A preview counts only
+  while `built_version` equals the draft's version, so a save makes it stale
+  again. The draft status shown to a human goes through
+  `ui_status.status_label`; API values and filter query values stay raw.
+- **The image upload route answers JSON to `Accept: application/json`.**
+  `editor.js` gets the stored filename (a dedup can keep an earlier upload's
+  name), the markdown to insert, and a per-draft image URL for the live render.
+  The UI names uploads with `images.safe_upload_filename` (a stem with nothing
+  ASCII left keeps its extension and takes a short content hash), so the
+  reference the editor inserts is one `convert.py` resolves; the `/v1` route
+  still stores the name it is given. `Store.put_and_attach_image` does the
+  upload and the attach as one step, removes what it created if the attach is
+  refused, and refuses an inline reference to an already-stored image whose name
+  is not `images.is_plain_filename` (a dedup can land on a `/v1` or imported
+  name with spaces, which `convert.py`'s reference match cannot carry).
 - **`ui_deps.check_same_origin` treats an `Origin` header that does not
   resolve to this host as cross-origin, including the literal string
   `"null"` a sandboxed iframe sends.** A round C5 review found that

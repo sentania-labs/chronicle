@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
+from posixpath import basename
 
 from PIL import Image as PillowImage
 
@@ -68,3 +70,48 @@ def normalise(raw: bytes) -> NormalisedImage:
 
     mime, extension = ALLOWED_FORMATS[fmt]
     return NormalisedImage(buffer.getvalue(), mime, extension)
+
+
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+_UNSAFE_EXTENSION_CHARS = re.compile(r"[^A-Za-z0-9]+")
+_PLAIN_FILENAME = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def safe_upload_filename(name: str, content: bytes = b"") -> str:
+    """A filename a markdown reference and a Hugo static path can carry.
+
+    A body refers to an attached image by its bare filename, and a reference
+    with a space or a parenthesis in it is not one markdown parses as an image
+    (nor one `convert.py` matches). The editor's uploads are named here, once,
+    so what it inserts at the cursor is what the conversion later resolves.
+    Only the UI route calls this: the API stores the name it is given.
+
+    A stem with nothing left after cleaning (a name written entirely outside
+    ASCII) keeps its extension and takes a short hash of `content` as the stem,
+    so two such images on one post stay two different files.
+    """
+    base = basename(name.replace("\\", "/"))
+    stem, _, extension = base.rpartition(".") if "." in base else (base, "", "")
+    stem = _UNSAFE_FILENAME_CHARS.sub("-", stem).strip(".-")
+    extension = _UNSAFE_EXTENSION_CHARS.sub("", extension)
+    if not stem:
+        if not content:
+            return "upload"
+        stem = hashlib.sha256(content).hexdigest()[:10]
+    return f"{stem}.{extension}" if extension else stem
+
+
+def is_plain_filename(filename: str) -> bool:
+    """True if a bare markdown reference to `filename` parses and resolves.
+
+    `convert.py` finds an image reference as a run of characters with no
+    whitespace and no closing parenthesis, so a name outside this set cannot
+    be written into a body in a form both markdown and the conversion accept.
+    """
+    return _PLAIN_FILENAME.fullmatch(filename) is not None
+
+
+def alt_text_for(filename: str) -> str:
+    """Alt text for the reference the editor inserts: the filename's stem."""
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    return re.sub(r"[-_]+", " ", re.sub(r"[\[\]]", "", stem)).strip() or "image"

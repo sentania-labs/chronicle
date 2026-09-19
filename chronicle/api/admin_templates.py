@@ -11,6 +11,7 @@ from html import escape
 from typing import Any
 
 from .tokens import UI_TOKEN_NAME
+from .ui_status import status_label
 from .ui_time import local_time
 
 STYLE = """
@@ -204,7 +205,9 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
     submission_rows = "".join(
         row(name, count) for name, count in status["submissions_by_status"].items()
     )
-    draft_rows = "".join(row(name, count) for name, count in status["drafts_by_status"].items())
+    draft_rows = "".join(
+        row(status_label(name), count) for name, count in status["drafts_by_status"].items()
+    )
     theme_rows = (
         "".join(row(t["path"], t["commit"]) for t in status["toolchain"]["submodules"])
         or "<tr><td colspan=2>none</td></tr>"

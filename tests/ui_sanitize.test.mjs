@@ -1,9 +1,10 @@
 // Node-only regression test for the pure URL check in
-// chronicle/api/static/ui.js (isSafeUrl), not part of `make check` (this
-// project's toolchain is uv/pytest; node is not a CI dependency here). Run
-// manually with `node --test tests/ui_sanitize.test.mjs` when node is
-// available locally; the payload list itself is also documented in ui.js's
-// own comment so the coverage is legible without running node at all.
+// chronicle/api/static/ui.js (isSafeUrl). `sanitize` itself needs a DOM, which
+// node lacks; tests/test_js_dom.py runs it in headless Chrome. Run by tests/test_js.py as part of
+// `make check` when node is on PATH (skipped, with the reason, when it is
+// not), or directly with `node --test tests/ui_sanitize.test.mjs`. The payload
+// list itself is also documented in ui.js's own comment so the coverage is
+// legible without running node at all.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";

@@ -147,6 +147,57 @@ def resolve_draft(status: str, action: str, actor_is_ui: bool) -> Transition:
     return transition
 
 
+# The actions a click may run first, per requested action, so that the click
+# is legal from where the draft actually is. This is what lets the editor
+# offer Preview on a published post without a second lifecycle table: the
+# steps are found by walking DRAFT_TRANSITIONS, and only through the actions
+# named here. Anything not named stays an explicit, separate decision
+# (`restore` of a rejected post, a `revise` on the way to publish).
+#
+# - preview may `revise`: that is exactly what a save already does to a
+#   `published` or `revision_requested` draft, so asking for a preview is a
+#   save without the edit.
+# - approve may `submit`: the UI token is the reviewer, so a previewed draft
+#   goes to review and is approved in one click, each step still a recorded
+#   event.
+STAGING_ACTIONS: dict[str, tuple[str, ...]] = {
+    "preview": ("revise",),
+    "approve": ("submit",),
+}
+
+
+def plan_action(status: str, action: str, actor_is_ui: bool) -> tuple[str, ...] | None:
+    """The actions to run, in order, for `action` to happen from `status`.
+
+    `(action,)` when it is legal as it stands, a longer tuple ending in
+    `action` when only staging steps (STAGING_ACTIONS) stand in the way, and
+    None when there is no such path. Every step is checked against
+    DRAFT_TRANSITIONS, including the reserved-actor rule, so a plan is a
+    sequence `resolve_draft` will accept one step at a time; an offer built
+    from it can never be one the table would refuse.
+    """
+    if action in RESERVED_ACTIONS and not actor_is_ui:
+        return None
+    allowed = STAGING_ACTIONS.get(action, ())
+    frontier: list[tuple[str, tuple[str, ...]]] = [(status, ())]
+    seen = {status}
+    while frontier:
+        current, steps = frontier.pop(0)
+        if (current, action) in DRAFT_TRANSITIONS:
+            return (*steps, action)
+        for stage in allowed:
+            transition = DRAFT_TRANSITIONS.get((current, stage))
+            if transition is None or transition.feedback_required or transition.run_kind:
+                continue
+            if stage in RESERVED_ACTIONS and not actor_is_ui:
+                continue
+            if transition.to_status in seen:
+                continue
+            seen.add(transition.to_status)
+            frontier.append((transition.to_status, (*steps, stage)))
+    return None
+
+
 def resolve_submission(status: str, action: str) -> Transition:
     transition = SUBMISSION_TRANSITIONS.get((status, action))
     if transition is None:

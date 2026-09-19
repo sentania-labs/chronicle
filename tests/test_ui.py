@@ -873,6 +873,47 @@ def test_stale_save_conflict_preserves_full_attempted_frontmatter(
     assert "my summary" in response.text
 
 
+def test_conflict_page_hands_the_posted_fields_to_the_browser_backup(
+    client: TestClient, services: Services
+) -> None:
+    """The backup `editor.js` writes from the conflict page must carry the
+    title, tags and other fields the visitor edited, not `{}`: the fields are
+    the raw form values, the same shape the editor's own backup uses."""
+    import html as html_lib
+    import json
+    import re
+
+    draft_id = make_draft(services, "drafting", title="Original")
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(
+        draft_id, "ghostwriter", draft.version_no, {"title": "Landed"}, "landed body"
+    )
+    response = client.post(
+        f"/content/drafts/{draft_id}/save",
+        data={
+            "base_version": str(draft.version_no),
+            "title": "My title",
+            "categories": "lab, home",
+            "tags": "unifi",
+            "summary": "my summary",
+            "body": "my body",
+        },
+    )
+    assert response.status_code == 409
+    match = re.search(r'id="attempted-body"[^>]* data-fields="([^"]*)"', response.text)
+    assert match is not None
+    fields = json.loads(html_lib.unescape(match.group(1)))
+    assert fields == {
+        "title": "My title",
+        "categories": "lab, home",
+        "tags": "unifi",
+        "summary": "my summary",
+    }
+    # None of the three claims about the browser's copy is made without script.
+    for outcome in ("stored", "kept-other", "unavailable"):
+        assert re.search(rf'id="backup-note-{outcome}" hidden', response.text)
+
+
 def test_approve_button_hidden_while_publish_pr_open(
     client: TestClient, services: Services
 ) -> None:
@@ -913,15 +954,15 @@ def test_approve_button_hidden_while_publish_run_is_queued_or_building(
     services.store.index.upsert_run(run)  # _queue_run alone does not index it
 
     response = client.get(f"/content/drafts/{draft_id}")
-    assert "no actions available from this status" in response.text.lower()
+    assert f"/content/drafts/{draft_id}/actions/approve" not in response.text
 
     services.store.start_run(run.id, "publisher-1", "", False)
     response = client.get(f"/content/drafts/{draft_id}")
-    assert "no actions available from this status" in response.text.lower()
+    assert f"/content/drafts/{draft_id}/actions/approve" not in response.text
 
     services.store.finish_run(run.id, "publisher-1", True, {})
     response = client.get(f"/content/drafts/{draft_id}")
-    assert '<button type="submit">approve' in response.text.lower()
+    assert f"/content/drafts/{draft_id}/actions/approve" in response.text
 
 
 def test_banner_shown_by_default(client: TestClient) -> None:
