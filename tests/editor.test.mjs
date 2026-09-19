@@ -7,6 +7,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
 
 const require = createRequire(import.meta.url);
 const { pageTitles, sameState, backupVerdict, backupWriteAction, makeBackupStore, conflictBackupAction, backupMessage, uploadOutcome, lookupImageSrc, saveStateText } =
@@ -226,4 +228,115 @@ test("pageTitles reads the tab title and heading the server rendered (#36)", () 
 test("pageTitles gives nothing for a page with neither, so a partial page never blanks them", () => {
   assert.equal(pageTitles({ title: "", querySelector: () => null }), null);
   assert.equal(pageTitles(null), null);
+});
+
+// --- The wiring: run the real file against a stub page --------------------
+// The pure helpers above are declarations; the lines that call them after a
+// save are inside the file's DOM block. This runs the whole file in a vm
+// context whose `document` is just enough for the editor page, so removing the
+// title or heading update after an in-place save fails here (#36).
+const EDITOR_SOURCE = readFileSync(new URL("../chronicle/api/static/editor.js", import.meta.url), "utf8");
+
+function stubElement(props = {}) {
+  const handlers = {};
+  return Object.assign(
+    {
+      handlers,
+      value: "",
+      textContent: "",
+      hidden: false,
+      disabled: false,
+      elements: [],
+      attrs: {},
+      addEventListener(type, fn) {
+        (handlers[type] = handlers[type] || []).push(fn);
+      },
+      setAttribute(name, value) {
+        this.attrs[name] = value;
+      },
+      getAttribute(name) {
+        return name in this.attrs ? this.attrs[name] : null;
+      },
+    },
+    props
+  );
+}
+
+function loadEditorPage(savedPage) {
+  const ids = {
+    "editor-app": stubElement({ attrs: { "data-draft-id": "d1" } }),
+    "edit-form": stubElement({ action: "/content/drafts/d1" }),
+    body: stubElement({ value: "text" }),
+    base_version: stubElement({ value: "1" }),
+    "save-btn": stubElement(),
+    "save-state": stubElement(),
+  };
+  const heading = stubElement({ textContent: "Old heading" });
+  const document = {
+    title: "Old heading | Chronicle",
+    body: { classList: { add() {} } },
+    visibilityState: "visible",
+    getElementById: (id) => ids[id] || null,
+    querySelector: (sel) => (sel === "h1" ? heading : null),
+    querySelectorAll: () => [],
+    addEventListener() {},
+  };
+  const store = new Map();
+  const sandbox = {
+    document,
+    window: {
+      localStorage: {
+        getItem: (k) => (store.has(k) ? store.get(k) : null),
+        setItem: (k, v) => store.set(k, String(v)),
+        removeItem: (k) => store.delete(k),
+      },
+      addEventListener() {},
+      location: { pathname: "/content/drafts/d1" },
+      confirm: () => true,
+    },
+    fetch: () => Promise.resolve({ status: 200, text: () => Promise.resolve("<html>") }),
+    FormData: class {
+      *[Symbol.iterator]() {}
+    },
+    URLSearchParams,
+    DOMParser: class {
+      parseFromString() {
+        return savedPage;
+      }
+    },
+    setTimeout,
+    clearTimeout,
+  };
+  vm.runInNewContext(EDITOR_SOURCE, sandbox);
+  return { document, heading, form: ids["edit-form"], ids };
+}
+
+function serverPage({ title, heading }) {
+  const h1 = heading === null ? null : { textContent: heading };
+  return {
+    title,
+    getElementById: (id) => (id === "base_version" ? { value: "2" } : null),
+    querySelectorAll: () => [],
+    querySelector: (sel) => (sel === "h1" ? h1 : null),
+  };
+}
+
+async function submitSave(page) {
+  page.form.handlers.submit[0]({ preventDefault() {} });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+
+test("an in-place save refreshes the tab title and the page heading (#36)", async () => {
+  const page = loadEditorPage(serverPage({ title: "New heading | Chronicle", heading: "New heading" }));
+  await submitSave(page);
+  assert.equal(page.document.title, "New heading | Chronicle");
+  assert.equal(page.heading.textContent, "New heading");
+  assert.equal(page.ids.base_version.value, "2");
+});
+
+test("a save whose page carries neither title nor heading leaves both as they were", async () => {
+  const page = loadEditorPage(serverPage({ title: "", heading: null }));
+  await submitSave(page);
+  assert.equal(page.document.title, "Old heading | Chronicle");
+  assert.equal(page.heading.textContent, "Old heading");
 });
