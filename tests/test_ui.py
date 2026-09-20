@@ -1022,6 +1022,12 @@ def test_save_is_not_offered_while_a_publish_run_is_active_and_says_why(
         data={"base_version": str(version), "title": "t", "body": "b"},
     )
     assert refused.status_code == 409
+    # The refusal response is a full editor page, `#save-control` included,
+    # not just an error notice: this is what editor.js's non-conflict
+    # refusal branch must refresh so a stale, unlocked Save button is not
+    # left re-enabled by the busy-clear that follows (#45).
+    assert " disabled" in _save_button(refused.text)
+    assert "data-locked=" in _save_button(refused.text)
 
     services.store.start_run(run.id, "publisher-1", "", False)
     assert " disabled" in _save_button(client.get(f"/content/drafts/{draft_id}").text)

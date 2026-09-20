@@ -633,6 +633,13 @@ function saveStateText(state, detail) {
           document.close();
           return;
         }
+        // A non-conflict refusal (a publish run started, or a publish PR
+        // opened, after this page loaded) still renders a full editor page,
+        // `#save-control` included. Refresh it along with the other
+        // server-owned regions so a Save the store will keep refusing does
+        // not sit re-enabled until the visitor's next save, upload or
+        // staged action happens to refresh it (#45).
+        refreshRegions(doc);
         setState("error", noticeText(doc) || "the server refused the save");
       })
       .catch(function () {

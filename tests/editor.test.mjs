@@ -263,7 +263,7 @@ function stubElement(props = {}) {
   );
 }
 
-function loadEditorPage(savedPage, { locked = null } = {}) {
+function loadEditorPage(savedPage, { locked = null, status = 200 } = {}) {
   const ids = {
     "editor-app": stubElement({ attrs: { "data-draft-id": "d1" } }),
     "edit-form": stubElement({ action: "/content/drafts/d1" }),
@@ -310,7 +310,7 @@ function loadEditorPage(savedPage, { locked = null } = {}) {
     },
     fetch: (url) => {
       fetches.push(url);
-      return Promise.resolve({ status: 200, text: () => Promise.resolve("<html>") });
+      return Promise.resolve({ status, text: () => Promise.resolve("<html>") });
     },
     FormData: class {
       *[Symbol.iterator]() {}
@@ -373,6 +373,26 @@ test("an unlocked Save button still saves and is left enabled afterwards", async
   await submitSave(page);
   assert.equal(page.fetches.length, 1);
   assert.equal(page.ids["save-btn"].disabled, false);
+});
+
+test("a non-conflict refusal still refreshes the Save region, so a stale-unlocked button does not stay clickable (#45)", async () => {
+  // A publish run or PR can start between page load and the click landing;
+  // the store then refuses the save (409, no attempted-body, so this is not
+  // the stale-version conflict view) but still renders a full editor page
+  // with #save-control locked. Before the fix this branch never called
+  // refreshRegions, so setSaveBusy(false) re-enabled the old, still-unlocked
+  // button and the visitor could keep submitting saves the store refuses.
+  const freshSaveBtn = stubElement({ disabled: true, attrs: { "data-locked": "A publish run is in progress." } });
+  const doc = {
+    ...serverPage({ title: "x", heading: "x" }),
+    querySelectorAll: (sel) => (sel === "[data-refresh]" ? [{ id: "save-control", saveBtn: freshSaveBtn }] : []),
+  };
+  const page = loadEditorPage(doc, { status: 409 });
+  await submitSave(page);
+  assert.equal(page.fetches.length, 1);
+  assert.equal(page.ids["save-state"].attrs["data-state"], "error");
+  assert.equal(page.ids["save-btn"], freshSaveBtn);
+  assert.equal(page.ids["save-btn"].disabled, true);
 });
 
 test("a save response that swaps in a locked Save button is not re-enabled afterwards (#45)", async () => {
