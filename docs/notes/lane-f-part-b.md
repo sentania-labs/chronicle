@@ -330,3 +330,63 @@ session found, not a repeat of it.
   GitHub App or the standing `sentania-labs/chronicle-target` test-token
   target; out of scope for a UI-only live check) and the unpublish/merge
   watch path (same reason, and not part of this branch's changes).
+
+## Codex round (2026-09-20): finding 1 and finding 3 fixed, finding 2 filed instead
+
+An automated Codex review round on PR #50 filed three findings.
+
+- **Finding 1, fixed: the Save lock did not survive a non-conflict
+  refusal.** `chronicle/api/static/editor.js`'s `save()` only called
+  `refreshRegions(doc)` on the 200 branch. If a publish run started, or a
+  publish PR opened, after the editor page loaded but before the visitor
+  saved, the store's refusal still rendered a full editor page with
+  `#save-control` locked, but the JS never refreshed that region: the
+  `finally`-style busy-clear (`setSaveBusy(false)`) then re-enabled the
+  still-unlocked stale button, so the visitor could keep submitting saves
+  the store would keep refusing. Fixed by calling `refreshRegions(doc)` in
+  that branch, right where `doc` is already in scope, before the error
+  notice is set; the conflict path (409 with `attempted-body`, which
+  replaces the whole document itself) and the local backup path (untouched:
+  the backup write happens before the fetch, and none of the refreshed
+  regions hold the editor textarea or the backup logic) are both
+  unaffected. Covered two ways: a Python test extended
+  (`test_save_is_not_offered_while_a_publish_run_is_active_and_says_why`,
+  `tests/test_ui.py`) to assert the refusal response body itself carries
+  the locked `#save-control`, the contract the JS fix depends on; and a new
+  JS test (`tests/editor.test.mjs`) that drives a 409 non-conflict refusal
+  through the real file and asserts the Save button stays disabled
+  afterwards. Verified the new JS test fails against the unfixed code
+  (reverted the one-line call, watched it go red, restored it) before
+  trusting it.
+- **Finding 3, fixed: a consumer token could be issued under the name
+  `editor`.** The admin token-issue path (`/admin/tokens`, `/admin/api/tokens`)
+  and the `chronicle token issue` CLI each reserved only `ui`, the UI
+  backend's own token name. `commit_author` (`chronicle/api/tokens.py`) maps
+  the `ui` token's writes to the identity `editor`; a plain consumer token
+  issued under that literal name would write with the exact same version
+  author, event actor, claim holder and git author as the UI backend, which
+  defeats the attribution the mapping exists for. Fixed by adding
+  `RESERVED_TOKEN_NAMES = frozenset({UI_TOKEN_NAME, UI_COMMIT_AUTHOR})` to
+  `tokens.py` and switching all three issue paths from a single
+  `name == UI_TOKEN_NAME` check to `name in RESERVED_TOKEN_NAMES`, the same
+  mechanism the `ui` reservation already used, not a second one.
+  `docs/operations.md`'s one line documenting the reservation now names
+  both. Covered by three new tests mirroring the existing `ui`-rejection
+  tests exactly (CLI, `/admin/tokens`, `/admin/api/tokens`), plus one more:
+  a token minted directly through `TokenStore.issue("editor")` (bypassing
+  the routes, standing in for a token that existed before this reservation
+  shipped) still authenticates normally and does not stop `ensure_ui_token`
+  from running on the next process start. The reservation only guards the
+  issue routes going forward; nothing here revokes, renames, or refuses an
+  existing token already named `editor`, and nothing needs to, since the
+  routes are the only place the collision could be created.
+- **Finding 2, not fixed, filed instead.** Codex asked for a CRLF-stored
+  draft's body to be normalised at ingestion or comparison time, not just
+  the posted body `draft_save` already normalises. That is a change to what
+  lands in a stored record and in a publish PR against the real blog
+  repository: a behaviour change, not a fix to this branch's own work, and
+  the gap (finding C of the first fix round, above) has already been
+  disclosed honestly rather than fixed here. `store.py` was not touched.
+  The issue text (title, body, and what a fix would have to decide) is
+  written to a scratch file for Scott to open by hand; this round did not
+  open it.
