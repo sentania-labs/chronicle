@@ -114,6 +114,14 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   `httpx.MockTransport` can stand in; every test of the GitHub path (spec's
   requirement) sets it, and production code never does. `AdminServices` also
   accepts a `github_client` override at `.build()` for the same reason.
+- **A run nobody claims fails itself, and the gate covers both run kinds.**
+  `Store.active_publish_run` counts `publish` and `unpublish` runs, so a save,
+  attach or detach is refused while either is queued or building.
+  `publisher.expire_unclaimed_runs` (called by `run_loop` after `tick`, never
+  from inside it, because `tick` returns early when no target is configured)
+  fails a run still `queued` past `CHRONICLE_PUBLISH_QUEUE_TIMEOUT_SECONDS`
+  through `finish_run`, which is what unfreezes the draft. See
+  [docs/decisions/020-queued-publish-runs-time-out.md](docs/decisions/020-queued-publish-runs-time-out.md).
 - **Digest never deletes a post record.** A post on main that a later digest
   no longer finds is left alone; deciding it was actually removed is
   reconciliation's job (ADR 005, arriving C4), not digest's. Digest only
