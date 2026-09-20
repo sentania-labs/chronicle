@@ -243,6 +243,7 @@ def submission_detail_page(
     images: list[dict[str, Any]],
     *,
     banner: bool,
+    missing_image_ids: list[str] | None = None,
     notice: str | None = None,
     notice_kind: str | None = None,
     conflict_diff: str | None = None,
@@ -268,6 +269,14 @@ def submission_detail_page(
     )
     image_rows = "".join(
         f"<li>{escape(img['filename'])} ({img['bytes']} bytes)</li>" for img in images
+    )
+    # An id the image store does not hold is named in the list where the image
+    # should be, not only in the notice above the page (#45). It is not counted
+    # in the heading: that number is what the page can actually show.
+    image_rows += "".join(
+        f'<li class="chr-missing-image"><code>{escape(missing)}</code> '
+        f"{badge('Missing', 'warn')} not in the image store</li>"
+        for missing in missing_image_ids or []
     )
     can_draft = submission["status"] in ("new", "claimed")
     can_discard = submission["status"] in ("new", "claimed")

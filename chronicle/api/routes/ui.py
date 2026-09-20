@@ -143,6 +143,7 @@ def _submission_response(
         dumped,
         images,
         banner=banner_enabled(request),
+        missing_image_ids=missing,
         notice=notice,
         notice_kind=notice_kind,
         conflict_diff=conflict_diff,
