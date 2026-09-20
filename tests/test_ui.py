@@ -430,6 +430,46 @@ def _save_form(draft: Any, **overrides: str) -> dict[str, str]:
     return form
 
 
+def test_editor_save_stores_lf_and_a_crlf_post_does_not_mark_every_line_changed(
+    client: TestClient, services: Services
+) -> None:
+    """A browser posts every textarea line break as CRLF (#22). The record must
+    hold LF, and a save that changed one line must diff as one line."""
+    draft_id = make_draft(services, "drafting", title="Endings")
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(
+        draft_id, "scott", draft.version_no, {"title": "Endings"}, "one\ntwo\nthree\n"
+    )
+    draft = services.store.get_draft(draft_id)
+
+    posted = "one\r\nTWO\r\nthree\r\n"
+    response = client.post(
+        f"/content/drafts/{draft_id}/save", data=_save_form(draft, title="Endings", body=posted)
+    )
+    assert response.status_code == 200
+
+    saved = services.store.get_draft(draft_id)
+    assert saved.body == "one\nTWO\nthree\n"
+    assert "\r" not in saved.body
+    diff = services.store.diff_between(draft_id, draft.version_no, saved.version_no)
+    changed = [
+        line for line in diff.splitlines() if line[:1] in "+-" and line[:3] not in ("+++", "---")
+    ]
+    assert changed == ["-two", "+TWO"]
+
+
+def test_a_stale_save_conflict_keeps_the_attempted_body_in_lf(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "drafting")
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(draft_id, "scott", draft.version_no, {"title": "A Draft"}, "moved on")
+    stale = _save_form(draft, body="mine\r\nedited\r\n")
+    response = client.post(f"/content/drafts/{draft_id}/save", data=stale)
+    assert response.status_code == 409
+    assert "\r" not in response.text
+
+
 def test_save_preserves_description_key_when_summary_field_is_unchanged(
     client: TestClient, services: Services
 ) -> None:

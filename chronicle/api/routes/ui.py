@@ -162,6 +162,8 @@ def _crlf_to_lf(value: str) -> str:
     # A browser submits every textarea line break as CRLF. Left alone, that
     # would rewrite every line of a pasted post in the submission's diff and
     # stop a `---` frontmatter fence from matching when the draft is seeded.
+    # The draft editor's save uses it too: without it every UI save rewrote
+    # every line ending in the body and a version diff showed every line changed.
     return value.replace("\r\n", "\n")
 
 
@@ -535,7 +537,7 @@ async def draft_save(
     base_version = int(form.get("base_version", "0") or "0")
     draft = services.store.get_draft(draft_id)
     frontmatter = _build_frontmatter(draft.frontmatter, form, draft.slug)
-    body_text = form.get("body", "")
+    body_text = _crlf_to_lf(form.get("body", ""))
     try:
         services.store.save_draft(draft_id, consumer.name, base_version, frontmatter, body_text)
     except ApiError as exc:
