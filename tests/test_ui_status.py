@@ -214,6 +214,9 @@ def test_the_filter_lists_four_words_that_map_onto_all_eight_values() -> None:
     assert parse_status_filter(values["In review"]) == ["in_review", "approved"]
     assert parse_status_filter("previewed") == ["previewed"]
     assert parse_status_filter(None) == []
+    # A repeated status in a hand-typed URL does not double the list.
+    assert parse_status_filter("drafting,drafting") == ["drafting"]
+    assert parse_status_filter("drafting,previewed,drafting") == ["drafting", "previewed"]
 
 
 def test_board_filter_has_each_word_once_and_no_raw_status_text(

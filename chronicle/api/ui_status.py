@@ -100,8 +100,16 @@ def filter_options() -> list[tuple[str, str]]:
 
 
 def parse_status_filter(value: str | None) -> list[str]:
-    """The raw statuses a `?status=` value names: one, or a comma list."""
-    return [part for part in (value or "").split(",") if part]
+    """The raw statuses a `?status=` value names: one, or a comma list.
+
+    De-duplicated, order preserved, so a repeated status in a hand-typed URL
+    (`?status=drafting,drafting`) does not render its cards twice.
+    """
+    seen: dict[str, None] = {}
+    for part in (value or "").split(","):
+        if part:
+            seen[part] = None
+    return list(seen)
 
 
 # --- Detail ------------------------------------------------------------------
