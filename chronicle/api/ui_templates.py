@@ -274,7 +274,7 @@ def submission_detail_page(
     # should be, not only in the notice above the page (#45). It is not counted
     # in the heading: that number is what the page can actually show.
     image_rows += "".join(
-        f'<li class="chr-missing-image"><code>{escape(missing)}</code> '
+        f'<li><code>{escape(missing)}</code> '
         f"{badge('Missing', 'warn')} not in the image store</li>"
         for missing in missing_image_ids or []
     )

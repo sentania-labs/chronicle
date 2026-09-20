@@ -307,7 +307,7 @@ def test_a_missing_image_id_is_named_in_the_images_list_not_only_the_notice(
     section = section[: section.index("</section>")]
     assert "<h2>Images (1)</h2>" in section
     assert "real.png" in section
-    assert '<li class="chr-missing-image"><code>img_deadbeefdeadbeef</code>' in section
+    assert "<li><code>img_deadbeefdeadbeef</code>" in section
     assert "Missing" in section
     assert "not in the image store" in section
     # The notice above the page still says what saving does.
