@@ -7,9 +7,11 @@ URL the live render loads the bytes from.
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from chronicle.api.deps import Services
+from chronicle.api.errors import ApiError
 from chronicle.api.images import alt_text_for, is_plain_filename, normalise, safe_upload_filename
 
 from .conftest import png_bytes
@@ -157,6 +159,17 @@ def test_a_traversal_shaped_image_id_is_refused_without_touching_the_filesystem(
         response = client.get(f"/content/drafts/{draft_id}/images/{bad_id}/file")
         assert response.status_code < 500, (bad_id, response.status_code)
         assert response.status_code in (400, 404), (bad_id, response.status_code)
+
+
+def test_store_get_image_itself_refuses_a_traversal_shaped_id(services: Services) -> None:
+    # The route's own 404 above comes from the attached-images membership
+    # check running first; this pins the store's own guard (issue 47) so a
+    # future route that skips that check still cannot reach the filesystem
+    # with an id like "..".
+    for bad_id in ["../x", "..%2fx", "/etc/passwd", ".."]:
+        with pytest.raises(ApiError) as excinfo:
+            services.store.get_image(bad_id)
+        assert excinfo.value.status_code == 404
 
 
 def test_editor_page_exposes_attached_images_to_the_live_render(
