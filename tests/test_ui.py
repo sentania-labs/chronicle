@@ -765,6 +765,133 @@ def test_preview_list_and_rebuild_and_run_log(client: TestClient, services: Serv
     assert rebuild.status_code == 200
 
 
+def _base_run(**overrides: Any) -> dict[str, Any]:
+    run = {
+        "id": "run1",
+        "kind": "publish",
+        "status": "queued",
+        "started_at": None,
+        "finished_at": None,
+        "builder_id": None,
+        "hugo_version": None,
+        "toolchain_drift": False,
+        "result": None,
+    }
+    run.update(overrides)
+    return run
+
+
+def test_run_log_page_shows_queue_timeout_error_class_and_message() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run(
+        status="failed",
+        result={
+            "error_class": "publish_queue_timeout",
+            "message": "the publish run was not picked up within 900 seconds"
+            " (no GitHub target is configured, or the publisher is not running)",
+        },
+    )
+    html = tpl.run_log_page(run, "", banner=False)
+    assert "publish_queue_timeout" in html
+    assert "not picked up within 900 seconds" in html
+
+
+def test_run_log_page_shows_error_class_alone_without_fabricating_a_message() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run(status="failed", result={"error_class": "conversion_failed"})
+    html = tpl.run_log_page(run, "", banner=False)
+    assert "conversion_failed" in html
+    assert "None" not in html
+
+
+def test_run_log_page_does_not_show_a_failure_for_a_successful_run() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run(status="succeeded", result={"preview_url": "/preview/t/"})
+    html = tpl.run_log_page(run, "", banner=False)
+    assert "notice error" not in html
+
+
+def test_run_log_page_shows_a_successful_preview_runs_result() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run(
+        status="succeeded",
+        result={
+            "preview_url": "/preview/a-slug/",
+            "slug": "a-slug",
+            "wall_time_seconds": 12.345,
+        },
+    )
+    html = tpl.run_log_page(run, "", banner=False)
+    assert 'href="/preview/a-slug/"' in html
+    assert "/preview/a-slug/" in html
+    assert "a-slug" in html
+    assert "12.3s" in html
+    assert "notice error" not in html
+
+
+def test_run_log_page_shows_a_successful_publish_runs_result() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run(
+        status="succeeded",
+        result={
+            "branch": "post/a-slug",
+            "pr_number": 7,
+            "pr_url": "https://github.com/sentania-labs/blog/pull/7",
+            "commit_sha": "abcdef1234567890abcdef1234567890abcdef12",
+        },
+    )
+    html = tpl.run_log_page(run, "", banner=False)
+    assert "post/a-slug" in html
+    assert 'href="https://github.com/sentania-labs/blog/pull/7"' in html
+    assert "PR #7" in html
+    assert "abcdef1" in html
+    assert "abcdef1234567890abcdef1234567890abcdef12" not in html
+    assert "notice error" not in html
+
+
+def test_run_log_page_shows_a_successful_unpublish_runs_result() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run(
+        kind="unpublish",
+        status="succeeded",
+        result={
+            "branch": "post/other-slug",
+            "pr_number": 9,
+            "pr_url": "https://github.com/sentania-labs/blog/pull/9",
+            "commit_sha": "0123456789abcdef0123456789abcdef01234567",
+        },
+    )
+    html = tpl.run_log_page(run, "", banner=False)
+    assert "post/other-slug" in html
+    assert 'href="https://github.com/sentania-labs/blog/pull/9"' in html
+    assert "PR #9" in html
+    assert "0123456" in html
+    assert "notice error" not in html
+
+
+def test_run_log_page_shows_a_successful_run_with_no_result_keys() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run(status="succeeded", result={})
+    html = tpl.run_log_page(run, "", banner=False)
+    assert "notice error" not in html
+    assert "<ul>" not in html
+
+
+def test_run_log_page_renders_a_queued_run_with_no_result() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run()
+    html = tpl.run_log_page(run, "", banner=False)
+    assert "notice error" not in html
+
+
 # --- CSRF and banner ---------------------------------------------------------
 
 

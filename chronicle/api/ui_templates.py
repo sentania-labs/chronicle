@@ -978,12 +978,87 @@ def preview_list_page(rows: list[dict[str, Any]], *, banner: bool) -> str:
     return page("Preview", body, banner=banner, active=PREVIEW_TAB)
 
 
+def _format_wall_time(seconds: Any) -> str | None:
+    """A duration for a reader, not a raw float. Not a timestamp, so the
+    local-time rule does not apply here."""
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return None
+    if value < 60:
+        return f"{value:.1f}s"
+    minutes, rest = divmod(value, 60)
+    return f"{int(minutes)}m {rest:.0f}s"
+
+
+def _success_result_html(result: dict[str, Any]) -> str:
+    """A successful run's result shape varies by kind: preview runs carry
+    `preview_url`, `slug` and `wall_time_seconds`; publish and unpublish runs
+    carry `branch`, `pr_number`, `pr_url` and `commit_sha` (see publisher.py).
+    This only ever renders the specific known keys it recognizes, each
+    escaped, and silently skips whatever is missing. It never dumps the raw
+    dict: an unrecognized key is exactly the kind of unvetted content this
+    page must not render."""
+    rows = []
+    preview_url = result.get("preview_url")
+    if isinstance(preview_url, str) and preview_url:
+        safe_url = escape(preview_url)
+        rows.append(f'<li>preview: <a href="{safe_url}">{safe_url}</a></li>')
+    slug = result.get("slug")
+    if isinstance(slug, str) and slug:
+        rows.append(f"<li>slug: {escape(slug)}</li>")
+    wall_time = _format_wall_time(result.get("wall_time_seconds"))
+    if wall_time is not None:
+        rows.append(f"<li>wall time: {escape(wall_time)}</li>")
+    branch = result.get("branch")
+    if isinstance(branch, str) and branch:
+        rows.append(f"<li>branch: {escape(branch)}</li>")
+    pr_url = result.get("pr_url")
+    pr_number = result.get("pr_number")
+    if isinstance(pr_url, str) and pr_url:
+        safe_pr_url = escape(pr_url)
+        label = f"PR #{pr_number}" if isinstance(pr_number, int) else "PR"
+        rows.append(f'<li>pull request: <a href="{safe_pr_url}">{escape(label)}</a></li>')
+    elif isinstance(pr_number, int):
+        rows.append(f"<li>pull request: #{pr_number}</li>")
+    commit_sha = result.get("commit_sha")
+    if isinstance(commit_sha, str) and commit_sha:
+        # Short form, same 7-char abbreviation git itself defaults to: a
+        # reader wants a recognizable, copyable label here, not the full 40
+        # characters.
+        rows.append(f"<li>commit: {escape(commit_sha[:7])}</li>")
+    if not rows:
+        return ""
+    return f"<ul>{''.join(rows)}</ul>"
+
+
 def run_log_page(run: dict[str, Any], log_text: str, *, banner: bool) -> str:
+    # A queued run has no result at all; a failed one's result carries
+    # `error_class` and gets a notice; a successful one's result is
+    # rendered by `_success_result_html`, which only knows specific keys.
+    # `error_class` is the safe string this codebase surfaces in place of an
+    # exception's text (see `GitHubApiError`); `message`, when present, is a
+    # fixed, operator-facing string written by the caller (e.g. the
+    # queue-timeout sweep), never raw exception detail (see `Run.result`'s
+    # docstring in chronicle/api/models.py), so both are safe to render
+    # escaped.
+    result = run.get("result") or {}
+    error_class = result.get("error_class")
+    result_html = ""
+    if error_class:
+        text = str(error_class)
+        message = result.get("message")
+        if message:
+            text = f"{text}: {message}"
+        result_html = ui_chrome.notice(text, "error")
+    elif run.get("status") == "succeeded":
+        result_html = _success_result_html(result)
     body = f"""
 <p class="muted">kind: {escape(run["kind"])} | status: {escape(run["status"])} |
 started: {escape(local_time(run.get("started_at")))} | finished: {escape(local_time(run.get("finished_at")))} |
 builder: {escape(run.get("builder_id") or "-")} | hugo: {escape(run.get("hugo_version") or "-")} |
 toolchain drift: {run.get("toolchain_drift")}</p>
+{result_html}
 <pre class="lat-code">{escape(log_text) or "(no log captured yet)"}</pre>
 """
     return page(f"Run {run['id']}", body, banner=banner, active=PREVIEW_TAB)
