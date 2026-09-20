@@ -7,34 +7,27 @@ controls, so it is exercised here by loading the real `ui.js` into headless
 Chrome and reading the serialised result back out of the page.
 
 Skipped, with the reason stated, when no Chrome or Chromium is on PATH
-(`CHRONICLE_TEST_CHROME` names one explicitly). It is not asserted by any
-weaker stand-in: without a browser this file tests nothing, and says so.
+(`CHRONICLE_TEST_CHROME` names one explicitly), and a failure instead under
+CHRONICLE_REQUIRE_TEST_TOOLS=1, which CI sets (`conftest.py`). It is not
+asserted by any weaker stand-in: without a browser this file tests nothing,
+and says so.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from .conftest import find_chrome
+
 STATIC = Path(__file__).parent.parent / "chronicle" / "api" / "static"
 
-CHROME = os.environ.get("CHRONICLE_TEST_CHROME") or next(
-    (
-        found
-        for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
-        if (found := shutil.which(name))
-    ),
-    None,
-)
+CHROME = find_chrome()
 
-pytestmark = pytest.mark.skipif(
-    CHROME is None, reason="no Chrome or Chromium on PATH (set CHRONICLE_TEST_CHROME)"
-)
+pytestmark = pytest.mark.requires_tool("chrome")
 
 PAGE = """<!doctype html><meta charset="utf-8"><base href="http://localhost/">
 <script src="file://{ui_js}"></script>
