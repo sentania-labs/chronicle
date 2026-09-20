@@ -21,7 +21,15 @@ from . import ui_chrome
 from .pagination import Page
 from .ui_actions import DISABLED, Offer, offers_for
 from .ui_chrome import badge
-from .ui_status import status_label, status_tone
+from .ui_status import (
+    Detail,
+    came_back_from_review,
+    filter_options,
+    parse_status_filter,
+    status_details,
+    status_label,
+    status_tone,
+)
 from .ui_time import local_time
 
 # `marked` rides in the head of every page; the stylesheets (Lattice, then
@@ -136,15 +144,26 @@ def _pagination_links(pg: Page[Any], base_url: str, *, extra: str = "", anchor: 
 
 
 def _status_options(current: str | None) -> str:
-    from .models import DRAFT_STATUSES
-
+    """The board's filter: four words, each carrying the raw statuses it
+    covers as a comma list (`ui_status.filter_options`). A hand-typed
+    `?status=` that is not one of those (a single raw status) is kept as its
+    own selected option rather than shown as the wider word that contains it."""
     options = ['<option value="">all</option>']
-    for status in DRAFT_STATUSES:
-        selected = " selected" if status == current else ""
+    known = filter_options()
+    selected_value = ",".join(parse_status_filter(current))
+    for value, text in known:
+        selected = " selected" if value == selected_value else ""
+        options.append(f'<option value="{escape(value)}"{selected}>{escape(text)}</option>')
+    if selected_value and selected_value not in {value for value, _ in known}:
         options.append(
-            f'<option value="{status}"{selected}>{escape(status_label(status))}</option>'
+            f'<option value="{escape(selected_value)}" selected>'
+            f"{escape(selected_value)}</option>"
         )
     return "".join(options)
+
+
+def _detail_badges(details: list[Detail]) -> str:
+    return "".join(badge(d.text, d.tone) for d in details)
 
 
 # --- Submissions -------------------------------------------------------
@@ -339,6 +358,7 @@ def _draft_card(
     last_author: str,
     run_info: dict[str, Any] | None,
     flags: list[dict[str, Any]],
+    came_back: bool,
 ) -> str:
     published = draft.get("published") or {}
     pr_link = (
@@ -355,6 +375,7 @@ def _draft_card(
 <div class="chr-card-head">
 <h3 class="subhead"><a href="/content/drafts/{escape(draft["id"])}">{escape(draft["title"] or "(untitled)")}</a></h3>
 {badge(status_label(draft["status"]), status_tone(draft["status"]))}
+{_detail_badges(status_details(draft["status"], came_back=came_back))}
 {_flag_badges(flags)}
 </div>
 <p class="muted">slug: {escape(draft["slug"] or "-")} |
@@ -366,7 +387,10 @@ author: {escape(last_author)} | updated: {escape(local_time(draft["updated_at"])
 
 def _cards(rows: list[dict[str, Any]]) -> str:
     return "".join(
-        _draft_card(row["draft"], row["last_author"], row["run_info"], row["flags"]) for row in rows
+        _draft_card(
+            row["draft"], row["last_author"], row["run_info"], row["flags"], row["came_back"]
+        )
+        for row in rows
     )
 
 
@@ -638,7 +662,7 @@ def _offer_button(draft_id: str, offer: Offer) -> str:
             f'disabled title="{escape(offer.reason)}">{escape(offer.label)}</button> '
             f'<small class="offer-reason">{escape(offer.reason)}</small></span>'
         )
-    reserved = ' <span class="reserved">(Scott only)</span>' if offer.reserved else ""
+    reserved = ' <span class="reserved">(reviewer only)</span>' if offer.reserved else ""
     action_url = f"/content/drafts/{escape(draft_id)}/actions/{offer.action}"
     # Lattice allows one primary per screen; `offers_for` marks at most one.
     css = "lat-btn lat-btn--primary" if offer.primary else "lat-btn"
@@ -705,12 +729,16 @@ def _run_status(run: dict[str, Any] | None) -> str:
     )
 
 
-def _status_pill(status: str) -> str:
-    return badge(
+def _status_pill(status: str, details: list[Detail]) -> str:
+    """The four-word status, then what the finer statuses know as detail. Two
+    regions, both `data-refresh`, so a save or an action swaps in the server's
+    fresh copy of each."""
+    pill = badge(
         status_label(status),
         status_tone(status),
         attrs=f' id="status-pill" data-refresh data-status="{escape(status)}"',
     )
+    return f'{pill}<span id="status-detail" data-refresh>{_detail_badges(details)}</span>'
 
 
 def _post_info(
@@ -803,6 +831,18 @@ def editor_page(
         publish_run_active=publish_run_active,
         unpublish_pr_open=unpublish_pr_open,
     )
+    details = status_details(
+        draft["status"],
+        came_back=came_back_from_review(
+            draft["status"],
+            [entry["action"] for entry in feedback],
+            published=bool(draft.get("published")),
+        ),
+        has_preview=has_preview,
+        publish_run_active=publish_run_active,
+        publish_pr_open=publish_pr_open,
+        unpublish_pr_open=unpublish_pr_open,
+    )
     frontmatter = draft["frontmatter"]
     title_value = frontmatter.get("title", "")
     title_value = title_value if isinstance(title_value, str) else ""
@@ -815,7 +855,7 @@ def editor_page(
 </div>
 {pr_open_notice}
 <div class="editor-bar" id="editor-bar">
-{_status_pill(draft["status"])}
+{_status_pill(draft["status"], details)}
 <button type="submit" id="save-btn" class="lat-btn" form="{EDIT_FORM_ID}">Save</button>
 <span id="save-state" class="save-state" data-state="idle" role="status" aria-live="polite">No unsaved changes</span>
 <span id="upload-state" class="upload-state" role="status" aria-live="polite"></span>

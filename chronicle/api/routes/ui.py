@@ -27,6 +27,7 @@ from ..pagination import Page, paginate
 from ..store import Store
 from ..ui_actions import staged_refusal
 from ..ui_deps import banner_enabled, check_same_origin, get_services, require_ui_consumer
+from ..ui_status import came_back_from_review, parse_status_filter
 from ..ui_time import sort_key
 
 router = APIRouter(tags=["ui"])
@@ -319,6 +320,13 @@ def _board_row(
         "last_author": last_author,
         "run_info": run_info,
         "flags": flags_by_draft.get(draft.id, []),
+        # A reviewer's request outlives the status that first carried it, so
+        # the board reads it from the feedback log (`ui_status`).
+        "came_back": came_back_from_review(
+            draft.status,
+            [entry.action for entry in store.list_feedback(draft.id)],
+            published=bool(draft.published),
+        ),
     }
 
 
@@ -341,7 +349,14 @@ def drafts_board(
         if flag.draft_id:
             flags_by_draft.setdefault(flag.draft_id, []).append(_dump(flag))
 
-    drafts = store.list_drafts(status or None)
+    # `?status=` is one raw status, as it always was, or a comma list: the
+    # board's filter offers four words, and a word covers several statuses.
+    wanted = parse_status_filter(status)
+    drafts = (
+        [d for one in wanted for d in store.list_drafts(one)]
+        if wanted
+        else store.list_drafts(None)
+    )
     needle = q.strip().lower()
     if needle:
         drafts = [
