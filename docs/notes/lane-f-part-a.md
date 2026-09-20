@@ -26,24 +26,38 @@ so a save or action swaps it like the pill.
 
 ### How the came-back-from-review signal survives a preview (#37)
 
-The status was the only carrier, so a preview's staged `revise` erased it. It is
-now read from the feedback log, which a revise never touches
+The status was the only carrier, so a preview's staged `revise` erased it. It
+is now read from the feedback log, which a revise never touches
 (`ui_status.came_back_from_review`): the draft came back if its status is
-`revision_requested`, or if it is `drafting` or `previewed` and the newest
-review verdict in its feedback log (`request_revision` or `reject`) is
-`request_revision`. Resubmitting puts the draft In review, where the badge is
-not asked for, so that is what clears it. A later `reject` settles it too
-(reject then restore does not show it). The warn tone moved from the status
-badge to this detail badge. The board reads each row's feedback log
-(`_board_row`); nothing is stored and no record changes.
+`revision_requested`, or if it is `drafting` and the newest review verdict in
+its feedback log (`request_revision` or `reject`) is `request_revision`. A
+later `reject` settles it too (reject then restore does not show it). The warn
+tone moved from the status badge to this detail badge. The board reads each
+row's feedback log (`_board_row`); nothing is stored and no record changes.
 
-Known limit: a draft with a `published` record that is back in `drafting` or
-`previewed` never shows the badge from the log, because the log cannot order an
-old request against a publish (no timestamp for the publish is stored, and
-submit and approve leave no feedback entry). It shows only while the status is
-`revision_requested`. A publish, revise, sent-back, previewed post loses the
-badge. Fixing that needs a per-draft event lookup or a recorded submit, both in
-`store.py`.
+**Updated in the fix round (2026-09-19, see `docs/notes/lane-f-part-b.md`):**
+this original write-up said the badge also fired for `previewed`, on the same
+"newest verdict" read. That was wrong: `previewed` is reachable both straight
+from a fresh `revise` (still unanswered, the case this was meant to catch)
+and from a full resubmit round trip (`revise`, `preview`, `submit` back to
+`in_review`, a further preview success lands back on `previewed`) once the
+author has already answered the request, and `submit`/`approve` write no
+feedback entry, so the log cannot order the two. The reviewer caught this
+live: request_revision, preview, submit, preview success still showed the
+badge. The fix stops the badge firing for `previewed` at all, so a draft that
+is previewed once, straight out of `revision_requested`, and never
+resubmitted, now loses the badge as soon as that first preview succeeds,
+before the author submits it again. That known gap is accepted; fixing it
+properly needs the store to order a resubmit against a request, which is out
+of this lane's files.
+
+Known limit, unchanged by the fix round: a draft with a `published` record
+that is back in `drafting` never shows the badge from the log, because the
+log cannot order an old request against a publish (no timestamp for the
+publish is stored, and submit and approve leave no feedback entry). It shows
+only while the status is `revision_requested`. A publish, revise, sent-back
+post loses the badge. Fixing that needs a per-draft event lookup or a
+recorded submit, both in `store.py`.
 
 ### The filter
 
@@ -70,9 +84,13 @@ several rows), so it now sums per-status counts under the four words
 - `lint.py` docstring no longer cites `/home/scott/...`; it says the module
   was ported from the vault's blog lint script.
 - `docs/backup.md` example records use `editor`.
-- Comments in my files that named Scott (`deps.py`, `ui_deps.py`,
-  `ui_templates.py`, `ui.js`, `routes/ui.py`) now say the editor. ADRs, the spec
-  and `docs/screenshots/lattice-skin/README.md` are untouched.
+- Comments in my files that named Scott casually (`deps.py`, `ui_deps.py`,
+  `ui_templates.py`, `ui.js`) now say the editor. ADRs, the spec and
+  `docs/screenshots/lattice-skin/README.md` are untouched. **Missed at the
+  time, fixed in the fix round (2026-09-19):** `routes/ui.py`'s own module
+  docstring still stated the author contract as "authored `scott`", not a
+  casual mention; the reviewer caught it alongside the same stale statement
+  in `AGENTS.md` and the spec. See `docs/notes/lane-f-part-b.md`.
 
 ## Where the instructions were wrong or incomplete
 
