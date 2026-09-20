@@ -16,8 +16,11 @@ The three rules, checked against the real blog's 347 posts:
 - **Filename.** An imported draft keeps the file it came from
   (`source_post.path`), because its `url` is already public and the file
   name is part of the archive's shape. A new draft gets
-  `content/posts/<YYYY-MM-DD>-<slug>.md`, the pattern every post on main
-  uses.
+  `<section>/<YYYY-MM-DD>-<slug>.md`, the dated pattern every post on main
+  uses, where `<section>` is the directory the site's own posts live in
+  (`digest.read_new_post_dir_from_state`, ADR 017's issue 21 amendment: the
+  last digest's observed section, `content/posts` on the real blog). With no
+  digest state, or a fallback read, it is `content/posts`.
 - **`url`.** An imported draft keeps the `url` in its own frontmatter. A new
   draft gets `/<YYYY>/<MM>/<slug>/`, the dominant pattern on main (a
   handful of older posts carry `/<YYYY>/<MM>/<DD>/<slug>/`; Chronicle does
