@@ -29,11 +29,17 @@ alone.
 
 - **#22 CRLF.** `draft_save` now runs the body through the same `_crlf_to_lf`
   the submission edit form uses. The conflict view gets the normalised body
-  too. Tests: a CRLF post that changes one line stores LF and its version diff
-  is exactly one removed and one added line; a stale-save conflict page carries
-  no `\r`. Both fail without the fix. Only the body is normalised, as on the
+  too. Tests: posting a CRLF body over an LF-stored base stores LF and diffs
+  as exactly one removed and one added line; a stale-save conflict page
+  carries no `\r`. A separate test covers the other case directly: posting
+  over a base that was itself stored with CRLF (an import, or any writer
+  other than this route) still normalises the posted body to LF, so the
+  diff comes out as every line removed and re-added, not one. Three tests,
+  all fail without the fix. Only the body is normalised, as on the
   submission form. Consequence to know: a post imported from main with real
   CRLF endings will have every line ending rewritten on its first UI save.
+  Fixing that needs normalising on read or on import, which lives in
+  store.py; not done here.
 - **#45 first half.** The Save button is now in a `data-refresh` region
   (`#save-control`), disabled with a readable reason beside it while a publish
   run is queued or building. The instruction named the run case; the store

@@ -430,11 +430,14 @@ def _save_form(draft: Any, **overrides: str) -> dict[str, str]:
     return form
 
 
-def test_editor_save_stores_lf_and_a_crlf_post_does_not_mark_every_line_changed(
+def test_editor_save_stores_lf_when_posting_over_an_lf_base(
     client: TestClient, services: Services
 ) -> None:
     """A browser posts every textarea line break as CRLF (#22). The record must
-    hold LF, and a save that changed one line must diff as one line."""
+    hold LF, and a save that changed one line against an LF base must diff as
+    one line. This does not cover a base that was itself stored with CRLF
+    (an imported post, or a record written by a caller other than this
+    route): see the next test."""
     draft_id = make_draft(services, "drafting", title="Endings")
     draft = services.store.get_draft(draft_id)
     services.store.save_draft(
@@ -456,6 +459,37 @@ def test_editor_save_stores_lf_and_a_crlf_post_does_not_mark_every_line_changed(
         line for line in diff.splitlines() if line[:1] in "+-" and line[:3] not in ("+++", "---")
     ]
     assert changed == ["-two", "+TWO"]
+
+
+def test_editor_save_over_a_crlf_stored_base_rewrites_every_line(
+    client: TestClient, services: Services
+) -> None:
+    """A base stored with CRLF (an imported post, or any writer other than
+    this UI route, since only this route's _crlf_to_lf normalises on the way
+    in) is not the case the test above covers. This UI save normalises the
+    posted body to LF, so the diff is against a CRLF base and every line
+    comes out changed. This is disclosed, not fixed here: the fix is
+    normalising on read or on import, which lives in store.py."""
+    draft_id = make_draft(services, "drafting", title="Endings")
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(
+        draft_id, "scott", draft.version_no, {"title": "Endings"}, "one\r\ntwo\r\nthree\r\n"
+    )
+    draft = services.store.get_draft(draft_id)
+
+    posted = "one\r\nTWO\r\nthree\r\n"
+    response = client.post(
+        f"/content/drafts/{draft_id}/save", data=_save_form(draft, title="Endings", body=posted)
+    )
+    assert response.status_code == 200
+
+    saved = services.store.get_draft(draft_id)
+    assert saved.body == "one\nTWO\nthree\n"
+    diff = services.store.diff_between(draft_id, draft.version_no, saved.version_no)
+    changed = [
+        line for line in diff.splitlines() if line[:1] in "+-" and line[:3] not in ("+++", "---")
+    ]
+    assert changed == ["-one", "-two", "-three", "+one", "+TWO", "+three"]
 
 
 def test_a_stale_save_conflict_keeps_the_attempted_body_in_lf(
