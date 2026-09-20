@@ -257,6 +257,7 @@ function stubElement(props = {}) {
       getAttribute(name) {
         return name in this.attrs ? this.attrs[name] : null;
       },
+      replaceWith() {},
     },
     props
   );
@@ -271,6 +272,18 @@ function loadEditorPage(savedPage, { locked = null } = {}) {
     "save-btn": stubElement(locked === null ? {} : { disabled: true, attrs: { "data-locked": locked } }),
     "save-state": stubElement(),
   };
+  // #save-control is the data-refresh region save-btn lives in
+  // (`ui_templates._save_control`). Real `replaceWith` swaps the whole
+  // region into the live document, so a later `getElementById("save-btn")`
+  // sees whatever the fresh render put there; wire the same effect here.
+  ids["save-control"] = stubElement({
+    replaceWith(fresh) {
+      ids["save-control"] = fresh;
+      if (fresh.saveBtn) {
+        ids["save-btn"] = fresh.saveBtn;
+      }
+    },
+  });
   const fetches = [];
   const heading = stubElement({ textContent: "Old heading" });
   const document = {
@@ -360,4 +373,21 @@ test("an unlocked Save button still saves and is left enabled afterwards", async
   await submitSave(page);
   assert.equal(page.fetches.length, 1);
   assert.equal(page.ids["save-btn"].disabled, false);
+});
+
+test("a save response that swaps in a locked Save button is not re-enabled afterwards (#45)", async () => {
+  // A publish run can start between the click and the response landing; the
+  // fresh #save-control the save itself returns already renders locked, and
+  // setSaveBusy's own lock check (editor.js's setSaveBusy) is what stops the
+  // busy-clear at the end of save() from overriding that back to enabled.
+  const freshSaveBtn = stubElement({ disabled: true, attrs: { "data-locked": "A publish run is in progress." } });
+  const doc = {
+    ...serverPage({ title: "x", heading: "x" }),
+    querySelectorAll: (sel) => (sel === "[data-refresh]" ? [{ id: "save-control", saveBtn: freshSaveBtn }] : []),
+  };
+  const page = loadEditorPage(doc);
+  await submitSave(page);
+  assert.equal(page.fetches.length, 1);
+  assert.equal(page.ids["save-btn"], freshSaveBtn);
+  assert.equal(page.ids["save-btn"].disabled, true);
 });
