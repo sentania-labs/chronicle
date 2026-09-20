@@ -11,8 +11,13 @@ on 2026-09-20 between 08:39 and 08:45 CDT (America/Chicago).
   volumes, api on `127.0.0.1:8180` and preview on `127.0.0.1:8190`. The
   compose file was the repository's own with only the host ports and
   `CHRONICLE_EXTERNAL_URL` overridden (no GitHub App and no test-token mode
-  configured, so a publish run has nowhere to go and stays queued forever,
-  used deliberately for item 05 below).
+  configured, so a publish run had nowhere to go and stayed queued,
+  used deliberately for item 05 below). This stack was built before
+  `feat/store-burndown` merged, so a queued run stayed queued indefinitely.
+  On main today a queued run times out (ADR 020), which changes how long that
+  state lasts, not what the editor shows while the run is active: the Save
+  lock reads `active_publish_run`, which is true for a `queued` or `building`
+  run either way.
 - The stack digested the real blog clone (`/home/scott/claude/cloudsandunicorns`,
   copied into the api container, `chronicle digest` run against it): 346
   posts created and published as working records, Hugo 0.164.0, two theme
