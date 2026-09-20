@@ -253,10 +253,10 @@ def test_changes_since_carries_diffs_and_feedback(
     ).json()
     assert changes["current_version"] == 2
     assert [item["version_no"] for item in changes["versions"]] == [2]
-    assert changes["versions"][0]["author"] == "scott"
+    assert changes["versions"][0]["author"] == "editor"
     assert "scott rewrote it" in changes["versions"][0]["diff"]
     assert changes["feedback"][0]["text"] == "needs an opening"
-    assert changes["feedback"][0]["author"] == "scott"
+    assert changes["feedback"][0]["author"] == "editor"
 
 
 def test_feedback_text_cannot_forge_a_second_entry(
@@ -278,7 +278,7 @@ def test_feedback_text_cannot_forge_a_second_entry(
     assert len(changes["feedback"]) == 1
     entry = changes["feedback"][0]
     assert entry["action"] == "request_revision"
-    assert entry["author"] == "scott"
+    assert entry["author"] == "editor"
     assert entry["text"] == forged
 
 

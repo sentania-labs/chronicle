@@ -67,8 +67,8 @@ def test_successful_auth_stamps_last_used(
     assert after.last_used_at is not None
 
 
-def test_ui_token_commits_as_scott() -> None:
-    assert commit_author("ui") == "scott"
+def test_ui_token_commits_as_the_editor() -> None:
+    assert commit_author("ui") == "editor"
     assert commit_author("ghostwriter") == "ghostwriter"
 
 
@@ -81,15 +81,15 @@ def test_git_author_is_the_acting_token_end_to_end(
 
     saved = client.put(
         f"/v1/drafts/{draft_id}",
-        json={"base_version": 0, "frontmatter": {"title": "Scott edits"}, "body": "b"},
+        json={"base_version": 0, "frontmatter": {"title": "Editor edits"}, "body": "b"},
         headers=auth(ui_token),
     )
     assert saved.status_code == 200
-    assert gitrepo.log_authors(store.repo_dir, limit=1) == ["scott"]
+    assert gitrepo.log_authors(store.repo_dir, limit=1) == ["editor"]
     assert saved.json()["version_no"] == 1
 
     version = client.get(f"/v1/drafts/{draft_id}/versions/1", headers=auth(agent_token)).json()
-    assert version["author"] == "scott"
+    assert version["author"] == "editor"
 
 
 def test_interleaved_stores_both_land(data_dir: Path) -> None:
@@ -183,6 +183,46 @@ def test_admin_tokens_api_rejects_the_name_ui(admin_client: TestClient) -> None:
     response = admin_client.post("/admin/api/tokens", json={"name": "ui"})
     assert response.status_code == 422
     assert response.json()["error"] == "token_name_reserved"
+
+
+def test_cli_token_issue_editor_is_rejected(data_dir: Path, capsys) -> None:
+    """`editor` is the identity `commit_author` maps the `ui` token to; an
+    ordinary token issued under that name would write attributed exactly
+    like the UI, defeating the point of the mapping."""
+    (data_dir / "state").mkdir(parents=True, exist_ok=True)
+    assert cli_main(["--data-dir", str(data_dir), "token", "issue", "editor"]) == 1
+    err = capsys.readouterr().err
+    assert "reserved" in err
+    assert TokenStore(data_dir / "state").load() == []
+
+
+def test_admin_tokens_page_rejects_the_name_editor(admin_client: TestClient) -> None:
+    response = admin_client.post("/admin/tokens", data={"name": "editor"})
+    assert response.status_code == 422
+    assert "reserved" in response.text
+
+
+def test_admin_tokens_api_rejects_the_name_editor(admin_client: TestClient) -> None:
+    response = admin_client.post("/admin/api/tokens", json={"name": "editor"})
+    assert response.status_code == 422
+    assert response.json()["error"] == "token_name_reserved"
+
+
+def test_startup_tolerates_a_token_already_named_editor(data_dir: Path) -> None:
+    """The reservation only guards the issue routes going forward. A token
+    named `editor` minted before this reservation existed (or by any path
+    that bypasses the routes) must not stop `ensure_ui_token` from running
+    on the next process start, and must keep authenticating as itself."""
+    (data_dir / "state").mkdir(parents=True, exist_ok=True)
+    store = TokenStore(data_dir / "state")
+    preexisting = store.issue("editor")
+
+    store.ensure_ui_token()
+
+    record = store.authenticate(preexisting)
+    assert record is not None
+    assert record.name == "editor"
+    assert commit_author("editor") == "editor"
 
 
 def test_revoked_ui_token_stays_disabled_across_a_restart(

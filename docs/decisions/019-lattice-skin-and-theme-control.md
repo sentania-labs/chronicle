@@ -75,3 +75,21 @@ it would do nothing.
 - Static assets carry no `Cache-Control` (Starlette's `StaticFiles` sends only
   `Last-Modified` and `ETag`), so a browser may keep an old `style.css` for a
   while after an upgrade. Not addressed here; see the pull request body.
+
+## Amendment, 2026-09-19: two statements above no longer hold
+
+The decision text above is left as written. Two things in it were superseded.
+
+- **Status tones.** "Needs revision is `warn`" no longer describes the status
+  badge. The four-word status change (lane F part A, branch
+  `feat/ui-four-words`, closes #32 and #37) collapsed the UI's status wording
+  to Draft, In review, Published and Rejected, so there is no `Needs revision`
+  label. The `warn` tone moved to the `Came back from review` detail badge that
+  sits beside the status badge (`ui_status.status_details`). Published is still
+  `ok` and Rejected is still `bad`; in-progress statuses stay neutral. See
+  `docs/notes/lane-f-part-a.md`.
+- **Static caching.** The last consequence above says static assets carry no
+  `Cache-Control`. As of issue 35 every `/static` response carries
+  `Cache-Control: no-cache` (`main.RevalidatingStaticFiles`), so a browser
+  revalidates each use against the ETag and cannot run a stale asset across a
+  deploy. See `docs/notes/lane-f-part-b.md`.

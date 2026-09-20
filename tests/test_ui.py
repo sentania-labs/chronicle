@@ -166,10 +166,11 @@ def test_editor_renders_for_every_draft_status(
     assert_no_token_leak(board, agent_token)
 
 
-def test_reserved_actions_are_labelled_scott_only(client: TestClient, services: Services) -> None:
+def test_reserved_actions_are_labelled_editor_only(client: TestClient, services: Services) -> None:
     draft_id = make_draft(services, "in_review", title="Needs review")
     response = client.get(f"/content/drafts/{draft_id}")
-    assert "Scott only" in response.text
+    assert "(editor only)" in response.text
+    assert "Scott" not in response.text
     assert "request revision" in response.text.lower()
     assert "reject" in response.text.lower()
 
@@ -410,7 +411,7 @@ def test_editor_save_forwards_base_version_and_bumps_version(
     assert updated.body == "updated body"
 
     versions = services.store.list_versions(draft_id)
-    assert versions[-1].author == "scott"
+    assert versions[-1].author == "editor"
 
 
 def _save_form(draft: Any, **overrides: str) -> dict[str, str]:
@@ -427,6 +428,80 @@ def _save_form(draft: Any, **overrides: str) -> dict[str, str]:
     }
     form.update(overrides)
     return form
+
+
+def test_editor_save_stores_lf_when_posting_over_an_lf_base(
+    client: TestClient, services: Services
+) -> None:
+    """A browser posts every textarea line break as CRLF (#22). The record must
+    hold LF, and a save that changed one line against an LF base must diff as
+    one line. This does not cover a base that was itself stored with CRLF
+    (an imported post, or a record written by a caller other than this
+    route): see the next test."""
+    draft_id = make_draft(services, "drafting", title="Endings")
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(
+        draft_id, "scott", draft.version_no, {"title": "Endings"}, "one\ntwo\nthree\n"
+    )
+    draft = services.store.get_draft(draft_id)
+
+    posted = "one\r\nTWO\r\nthree\r\n"
+    response = client.post(
+        f"/content/drafts/{draft_id}/save", data=_save_form(draft, title="Endings", body=posted)
+    )
+    assert response.status_code == 200
+
+    saved = services.store.get_draft(draft_id)
+    assert saved.body == "one\nTWO\nthree\n"
+    assert "\r" not in saved.body
+    diff = services.store.diff_between(draft_id, draft.version_no, saved.version_no)
+    changed = [
+        line for line in diff.splitlines() if line[:1] in "+-" and line[:3] not in ("+++", "---")
+    ]
+    assert changed == ["-two", "+TWO"]
+
+
+def test_editor_save_over_a_crlf_stored_base_rewrites_every_line(
+    client: TestClient, services: Services
+) -> None:
+    """A base stored with CRLF (an imported post, or any writer other than
+    this UI route, since only this route's _crlf_to_lf normalises on the way
+    in) is not the case the test above covers. This UI save normalises the
+    posted body to LF, so the diff is against a CRLF base and every line
+    comes out changed. This is disclosed, not fixed here: the fix is
+    normalising on read or on import, which lives in store.py."""
+    draft_id = make_draft(services, "drafting", title="Endings")
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(
+        draft_id, "scott", draft.version_no, {"title": "Endings"}, "one\r\ntwo\r\nthree\r\n"
+    )
+    draft = services.store.get_draft(draft_id)
+
+    posted = "one\r\nTWO\r\nthree\r\n"
+    response = client.post(
+        f"/content/drafts/{draft_id}/save", data=_save_form(draft, title="Endings", body=posted)
+    )
+    assert response.status_code == 200
+
+    saved = services.store.get_draft(draft_id)
+    assert saved.body == "one\nTWO\nthree\n"
+    diff = services.store.diff_between(draft_id, draft.version_no, saved.version_no)
+    changed = [
+        line for line in diff.splitlines() if line[:1] in "+-" and line[:3] not in ("+++", "---")
+    ]
+    assert changed == ["-one", "-two", "-three", "+one", "+TWO", "+three"]
+
+
+def test_a_stale_save_conflict_keeps_the_attempted_body_in_lf(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "drafting")
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(draft_id, "scott", draft.version_no, {"title": "A Draft"}, "moved on")
+    stale = _save_form(draft, body="mine\r\nedited\r\n")
+    response = client.post(f"/content/drafts/{draft_id}/save", data=stale)
+    assert response.status_code == 409
+    assert "\r" not in response.text
 
 
 def test_save_preserves_description_key_when_summary_field_is_unchanged(
@@ -555,7 +630,9 @@ def test_version_diff_view(client: TestClient, services: Services) -> None:
 # --- Reserved actions produce scott-authored records -----------------------
 
 
-def test_reserved_action_via_ui_is_authored_scott(client: TestClient, services: Services) -> None:
+def test_reserved_action_via_ui_is_authored_by_the_editor(
+    client: TestClient, services: Services
+) -> None:
     draft_id = make_draft(services, "drafting", title="Reviewable")
     submitted = client.post(f"/content/drafts/{draft_id}/actions/submit")
     assert submitted.status_code == 200
@@ -570,12 +647,12 @@ def test_reserved_action_via_ui_is_authored_scott(client: TestClient, services: 
     assert draft.status == "revision_requested"
 
     feedback = services.store.list_feedback(draft_id)
-    assert feedback[-1].author == "scott"
+    assert feedback[-1].author == "editor"
     assert feedback[-1].text == "please add more detail"
 
     events, _cursor = services.store.events_since(0)
     reserved_events = [e for e in events if e.type == "draft.request_revision"]
-    assert reserved_events and reserved_events[-1].actor == "scott"
+    assert reserved_events and reserved_events[-1].actor == "editor"
 
 
 def test_reserved_action_without_feedback_is_rejected_and_editor_re_rendered(
@@ -628,88 +705,39 @@ def test_image_upload_enforces_size_and_type_like_the_api(
     assert len(services.store.get_draft(draft_id).images) == 0
 
 
-# --- Import -----------------------------------------------------------------
+# --- Draft warnings flash -----------------------------------------------------
 
 
-def test_import_search_and_create(client: TestClient, services: Services, data_dir: Path) -> None:
-    from chronicle.api.models import Post
-
-    services.store.apply_digest(
-        "scott",
-        [
-            Post(
-                slug="unifi-network",
-                path="content/posts/unifi.md",
-                title="My Unifi Network",
-                date="2026-01-01",
-                sha="abc",
-            ),
-            Post(
-                slug="other-post",
-                path="content/posts/other.md",
-                title="Something else",
-                date="2026-01-02",
-                sha="def",
-            ),
-        ],
-    )
-    (services.store.site_dir / "content" / "posts").mkdir(parents=True, exist_ok=True)
-    (services.store.site_dir / "content" / "posts" / "unifi.md").write_text(
-        "---\ntitle: My Unifi Network\n---\nbody\n", encoding="utf-8"
-    )
-
-    searched = client.get("/content/import?q=unifi")
-    assert searched.status_code == 200
-    assert "unifi-network" in searched.text
-    assert "other-post" not in searched.text
-
-    created = client.post("/content/import", data={"slug": "unifi-network"})
-    assert created.status_code == 200
-    draft_id = str(created.url).rstrip("/").rsplit("/", 1)[-1]
-    draft = services.store.get_draft(draft_id)
-    assert draft.slug == "unifi-network"
-
-
-def test_import_warnings_from_dropped_frontmatter_and_missing_image_render_on_the_editor(
-    client: TestClient, services: Services
+def test_draft_warnings_from_a_submission_render_on_the_editor_once(
+    client: TestClient, services: Services, agent_token: str
 ) -> None:
-    """Adversarial review finding: `create_draft`'s own warnings (dropped
-    unknown frontmatter keys, images it could not find) were discarded by
-    the redirect and never reached the editor, so an incomplete import
-    looked identical to a complete one."""
-    from chronicle.api.models import Post
+    """`create_draft`'s own warnings (a dropped unknown frontmatter key here)
+    ride one flash query parameter through the redirect to the editor, so an
+    incomplete seed does not look identical to a complete one. The flash is
+    one-shot: a plain reload shows nothing."""
+    submission = client.post(
+        "/v1/submissions",
+        json={
+            "brief": "b",
+            "materials": [
+                {
+                    "name": "post",
+                    "text": "---\ntitle: Lossy Post\nnotAnAllowedKey: surprise\n---\nbody\n",
+                }
+            ],
+        },
+        headers=auth(agent_token),
+    ).json()["id"]
 
-    services.store.apply_digest(
-        "scott",
-        [
-            Post(
-                slug="lossy-post",
-                path="content/posts/lossy.md",
-                title="Lossy Post",
-                date="2026-01-01",
-                sha="abc",
-            )
-        ],
-    )
-    (services.store.site_dir / "content" / "posts").mkdir(parents=True, exist_ok=True)
-    (services.store.site_dir / "content" / "posts" / "lossy.md").write_text(
-        "---\ntitle: Lossy Post\nnotAnAllowedKey: surprise\n---\n![missing](missing-image.png)\n",
-        encoding="utf-8",
-    )
-
-    created = client.post("/content/import", data={"slug": "lossy-post"})
+    created = client.post(f"/content/submissions/{submission}/draft")
     assert created.status_code == 200
     assert "warning" in created.text.lower()
     assert "notAnAllowedKey" in created.text
-    assert "missing-image.png" in created.text
 
     draft_id = str(created.url).rstrip("/").rsplit("/", 1)[-1].split("?", 1)[0]
     draft = services.store.get_draft(draft_id)
     assert "notAnAllowedKey" not in draft.frontmatter
-    assert draft.images == []
 
-    # A plain reload of the editor (no warnings query string) shows no
-    # leftover warning banner: the flash is one-shot, not sticky state.
     reload_ = client.get(f"/content/drafts/{draft_id}")
     assert "warning" not in reload_.text.lower()
 
@@ -965,6 +993,79 @@ def test_approve_button_hidden_while_publish_run_is_queued_or_building(
     assert f"/content/drafts/{draft_id}/actions/approve" in response.text
 
 
+def _save_button(html: str) -> str:
+    match = re.search(r'<button[^>]*id="save-btn"[^>]*>', html)
+    assert match, "no Save button in the page"
+    return match.group(0)
+
+
+def test_save_is_not_offered_while_a_publish_run_is_active_and_says_why(
+    client: TestClient, services: Services
+) -> None:
+    """The store refuses a save with 409 while a publish run is queued or
+    building (#45), so the editor must not offer one to fail on click."""
+    draft_id = make_draft(services, "approved")
+    assert "disabled" not in _save_button(client.get(f"/content/drafts/{draft_id}").text)
+
+    run = services.store._queue_run(draft_id, "publish")
+    services.store.index.upsert_run(run)
+    page = client.get(f"/content/drafts/{draft_id}").text
+    button = _save_button(page)
+    assert " disabled" in button
+    assert "data-locked=" in button
+    assert "A publish run is in progress, so saving is refused until it finishes." in page
+
+    # The refusal is the store's, so a hand-built POST still gets the 409.
+    version = services.store.get_draft(draft_id).version_no
+    refused = client.post(
+        f"/content/drafts/{draft_id}/save",
+        data={"base_version": str(version), "title": "t", "body": "b"},
+    )
+    assert refused.status_code == 409
+    # The refusal response is a full editor page, `#save-control` included,
+    # not just an error notice: this is what editor.js's non-conflict
+    # refusal branch must refresh so a stale, unlocked Save button is not
+    # left re-enabled by the busy-clear that follows (#45).
+    assert " disabled" in _save_button(refused.text)
+    assert "data-locked=" in _save_button(refused.text)
+
+    services.store.start_run(run.id, "publisher-1", "", False)
+    assert " disabled" in _save_button(client.get(f"/content/drafts/{draft_id}").text)
+
+    services.store.finish_run(run.id, "publisher-1", True, {})
+    assert "disabled" not in _save_button(client.get(f"/content/drafts/{draft_id}").text)
+
+
+def test_save_is_not_offered_while_a_publish_pr_is_open(
+    client: TestClient, services: Services
+) -> None:
+    from chronicle.api.models import WatchEntry
+
+    draft_id = make_draft(services, "approved", with_publish=True)
+    services.store.record_watch(
+        WatchEntry(
+            draft_id=draft_id,
+            kind="publish",
+            branch="post/a-draft",
+            pr_number=7,
+            pr_url="https://github.com/o/r/pull/7",
+            created_at="2026-09-17T00:00:00-05:00",
+        ),
+        "scott",
+    )
+    page = client.get(f"/content/drafts/{draft_id}").text
+    assert " disabled" in _save_button(page)
+    assert "A publish pull request is open, so saving is refused" in page
+
+
+def test_the_save_button_is_in_a_refreshed_region(client: TestClient, services: Services) -> None:
+    """A save or upload swaps `data-refresh` regions; the Save button has to be
+    one, or a lock that appears (or clears) mid-session would never show."""
+    draft_id = make_draft(services, "drafting")
+    page = client.get(f"/content/drafts/{draft_id}").text
+    assert re.search(r'<span id="save-control" data-refresh>\s*<button[^>]*id="save-btn"', page)
+
+
 def test_banner_shown_by_default(client: TestClient) -> None:
     response = client.get("/content/drafts")
     assert "internal-only and unauthenticated" in response.text
@@ -989,7 +1090,6 @@ def test_ui_token_never_appears_in_any_rendered_page(
         "/content/drafts",
         f"/content/drafts/{draft_id}",
         "/content/submissions",
-        "/content/import",
         "/content/previews",
     ]
     for path in pages:
@@ -1210,7 +1310,7 @@ def test_new_post_creates_a_blank_draft_and_redirects_into_the_editor(
     # Acts as the ui consumer's mapped identity, like every other UI write.
     events, _cursor = services.store.events_since(0)
     assert [(e.type, e.actor, e.draft_id) for e in events if e.draft_id == drafts[0].id] == [
-        ("draft.created", "scott", drafts[0].id)
+        ("draft.created", "editor", drafts[0].id)
     ]
 
     editor = client.get(response.headers["location"])
@@ -1238,173 +1338,35 @@ def test_new_post_needs_a_live_ui_token(client: TestClient, services: Services) 
     assert services.store.list_drafts() == []
 
 
-# --- Import filter ----------------------------------------------------------
+# --- The Import tab is gone (#20) ---------------------------------------------
 
 
-def _set_fields(services: Services, draft_id: str, **fields: Any) -> None:
-    store = services.store
-    draft = store.get_draft(draft_id)
-    for key, value in fields.items():
-        setattr(draft, key, value)
-    store._write_json(store._draft_path(draft.id), draft.model_dump(mode="json"))
-    store.index.upsert_draft(draft)
+def test_the_import_tab_and_its_routes_are_gone(client: TestClient) -> None:
+    """Digest already lands a record for every post on main, so the UI has no
+    front door for `from_post`; the capability stays on the API and in the store."""
+    assert client.get("/content/import").status_code == 404
+    assert client.post("/content/import", data={"slug": "x"}).status_code in (404, 405)
+    assert "/content/import" not in client.get("/content/drafts").text
 
 
-def _digest_posts(services: Services, *slugs: str) -> None:
-    services.store.apply_digest(
-        "scott",
-        [
-            Post(
-                slug=slug,
-                path=f"content/posts/{slug}.md",
-                title=f"Title of {slug}",
-                date="2026-01-01",
-                sha=f"sha-{slug}",
-            )
-            for slug in slugs
-        ],
-    )
+# --- Feedback log line breaks (#26) -----------------------------------------
 
 
-def test_import_lists_only_posts_no_draft_tracks(client: TestClient, services: Services) -> None:
-    _digest_posts(services, "by-slug", "by-source-path", "by-published-path", "loose")
-    slug_draft = make_draft(services, "published", title="t1")
-    _set_fields(services, slug_draft, slug="by-slug")
-    source_draft = make_draft(services, "published", title="t2")
-    _set_fields(
-        services,
-        source_draft,
-        slug="renamed-since",
-        source_post={"slug": "by-source-path", "path": "content/posts/by-source-path.md"},
-    )
-    published_draft = make_draft(services, "published", title="t3")
-    _set_fields(
-        services,
-        published_draft,
-        slug="also-renamed",
-        published={"post_path": "content/posts/by-published-path.md"},
-    )
-
-    html = client.get("/content/import").text
-    assert 'value="loose"' in html
-    for tracked in ("by-slug", "by-source-path", "by-published-path"):
-        assert f'value="{tracked}"' not in html
-    assert "Import as post" in html
-    assert "Posts with no record here yet: 1." in html
+NOTE = "first line\r\nsecond <b>line</b>\n\n<script>alert(1)</script> & done"
 
 
-def test_import_search_only_searches_the_untracked_posts(
+def test_feedback_log_renders_line_breaks_without_opening_an_html_hole(
     client: TestClient, services: Services
 ) -> None:
-    _digest_posts(services, "tracked-race", "loose-race")
-    tracked = make_draft(services, "published")
-    _set_fields(services, tracked, slug="tracked-race")
+    draft_id = make_draft(services, "in_review")
+    services.store.act_on_draft(draft_id, "request_revision", "editor", True, feedback=NOTE)
 
-    html = client.get("/content/import?q=race").text
-    assert 'value="loose-race"' in html
-    assert 'value="tracked-race"' not in html
-
-
-def test_import_says_so_plainly_when_every_post_is_tracked(
-    client: TestClient, services: Services
-) -> None:
-    _digest_posts(services, "one", "two")
-    for slug in ("one", "two"):
-        _set_fields(services, make_draft(services, "published"), slug=slug)
-
-    response = client.get("/content/import")
-    assert response.status_code == 200
-    assert "All 2 posts from the blog are already on the" in response.text
-    assert 'href="/content/drafts"' in response.text
-    assert "nothing to import" in response.text
-    assert "<table" not in response.text
-    assert "Import as post" not in response.text
-
-
-def test_import_says_so_when_nothing_has_been_digested(client: TestClient) -> None:
-    response = client.get("/content/import")
-    assert response.status_code == 200
-    assert "No posts have been digested" in response.text
-    assert "<table" not in response.text
-
-
-def test_import_post_for_an_already_tracked_post_explains_itself(
-    client: TestClient, services: Services
-) -> None:
-    _digest_posts(services, "already-here")
-    tracked = make_draft(services, "published")
-    _set_fields(services, tracked, slug="already-here")
-    before = len(services.store.list_drafts())
-
-    response = client.post("/content/import", data={"slug": "already-here"})
-    assert response.status_code == 409
-    assert "already a post on the Posts tab" in response.text
-    assert "image_dir_collision" not in response.text
-    assert "already pinned by another draft" not in response.text
-    assert len(services.store.list_drafts()) == before
-
-
-def test_import_image_folder_collision_reads_as_an_explanation(
-    client: TestClient, services: Services
-) -> None:
-    """The recovery path still runs, and its one remaining 409 (another post
-    owns the image folder this import would claim) no longer surfaces the raw
-    collision text."""
-    _digest_posts(services, "clash")
-    site_posts = services.store.site_dir / "content" / "posts"
-    site_posts.mkdir(parents=True, exist_ok=True)
-    (site_posts / "clash.md").write_text("---\ntitle: Clash\n---\nbody\n", encoding="utf-8")
-    owner = make_draft(services, "published", title="Owner")
-    _set_fields(services, owner, slug="someone-else", image_dir="clash")
-
-    response = client.post("/content/import", data={"slug": "clash"})
-    assert response.status_code == 409
-    assert "Could not import clash" in response.text
-    assert "static/images/clash/" in response.text
-    assert "belongs to another post on this board" in response.text
-    assert "already pinned by another draft" not in response.text
-    assert 'class="notice error lat-banner lat-banner--bad"' in response.text
-
-
-def test_import_still_creates_a_post_for_an_untracked_one(
-    client: TestClient, services: Services
-) -> None:
-    _digest_posts(services, "recover-me")
-    site_posts = services.store.site_dir / "content" / "posts"
-    site_posts.mkdir(parents=True, exist_ok=True)
-    (site_posts / "recover-me.md").write_text("---\ntitle: Recover\n---\nbody\n", encoding="utf-8")
-
-    response = client.post("/content/import", data={"slug": "recover-me"}, follow_redirects=False)
-    assert response.status_code == 303
-    assert [d.slug for d in services.store.list_drafts()] == ["recover-me"]
-
-
-def test_import_refusal_keeps_the_visitors_search_and_page(
-    client: TestClient, services: Services
-) -> None:
-    """A refused import re-renders the list the visitor was on, not page one
-    of an unfiltered list, and the listing's own forms carry both values."""
-    _digest_posts(services, "already-here", "other-race", "second-race")
-    _set_fields(services, make_draft(services, "published"), slug="already-here")
-
-    listed = client.get("/content/import?q=race").text
-    assert 'name="q" value="race"' in listed
-    assert 'name="page" value="1"' in listed
-
-    response = client.post(
-        "/content/import", data={"slug": "already-here", "q": "race", "page": "1"}
-    )
-    assert response.status_code == 409
-    assert 'value="race"' in response.text
-    assert 'value="other-race"' in response.text
-    assert "Title of already-here" not in response.text
-
-
-def test_import_refusal_tolerates_a_garbage_page(client: TestClient, services: Services) -> None:
-    _digest_posts(services, "already-here", "loose")
-    _set_fields(services, make_draft(services, "published"), slug="already-here")
-    response = client.post(
-        "/content/import", data={"slug": "already-here", "q": "", "page": "banana"}
-    )
-    assert response.status_code == 409
-    assert 'value="loose"' in response.text
+    html = client.get(f"/content/drafts/{draft_id}").text
+    log = html[html.index('<ul class="chr-log">') :]
+    log = log[: log.index("</ul>")]
+    assert "first line<br>second &lt;b&gt;line&lt;/b&gt;<br><br>&lt;script&gt;" in log
+    assert "alert(1)&lt;/script&gt; &amp; done" in log
+    # Only the breaks the renderer added are real tags; nothing the note wrote is.
+    assert "<script>" not in log
+    assert "<b>" not in log
+    assert log.count("<br>") == 3

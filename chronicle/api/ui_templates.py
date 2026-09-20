@@ -21,7 +21,14 @@ from . import ui_chrome
 from .pagination import Page
 from .ui_actions import DISABLED, Offer, offers_for
 from .ui_chrome import badge
-from .ui_status import status_label, status_tone
+from .ui_status import (
+    Detail,
+    filter_options,
+    parse_status_filter,
+    status_details,
+    status_label,
+    status_tone,
+)
 from .ui_time import local_time
 
 # `marked` rides in the head of every page; the stylesheets (Lattice, then
@@ -37,19 +44,17 @@ EDITOR_SCRIPTS = (
     '<script src="/static/editor.js"></script>'
 )
 
-# User-facing label only: "Drafts" reads "Posts" everywhere Scott sees it
-# (ADR 017), since he intends to hold other content types here too and most
+# User-facing label only: "Drafts" reads "Posts" everywhere the editor sees it
+# (ADR 017), since the editor intends to hold other content types here too and most
 # working records now start life already `published` by digest rather than
 # hand-drafted. The route path, `/content/drafts`, is unchanged this round;
 # see ADR 017 for why a storage/route rename is deferred.
 SUBMISSIONS_TAB = "/content/submissions"
 POSTS_TAB = "/content/drafts"
-IMPORT_TAB = "/content/import"
 PREVIEW_TAB = "/content/previews"
 NAV_LINKS = (
     (SUBMISSIONS_TAB, "Submissions"),
     (POSTS_TAB, "Posts"),
-    (IMPORT_TAB, "Import"),
     (PREVIEW_TAB, "Preview"),
 )
 
@@ -136,15 +141,25 @@ def _pagination_links(pg: Page[Any], base_url: str, *, extra: str = "", anchor: 
 
 
 def _status_options(current: str | None) -> str:
-    from .models import DRAFT_STATUSES
-
+    """The board's filter: four words, each carrying the raw statuses it
+    covers as a comma list (`ui_status.filter_options`). A hand-typed
+    `?status=` that is not one of those (a single raw status) is kept as its
+    own selected option rather than shown as the wider word that contains it."""
     options = ['<option value="">all</option>']
-    for status in DRAFT_STATUSES:
-        selected = " selected" if status == current else ""
+    known = filter_options()
+    selected_value = ",".join(parse_status_filter(current))
+    for value, text in known:
+        selected = " selected" if value == selected_value else ""
+        options.append(f'<option value="{escape(value)}"{selected}>{escape(text)}</option>')
+    if selected_value and selected_value not in {value for value, _ in known}:
         options.append(
-            f'<option value="{status}"{selected}>{escape(status_label(status))}</option>'
+            f'<option value="{escape(selected_value)}" selected>{escape(selected_value)}</option>'
         )
     return "".join(options)
+
+
+def _detail_badges(details: list[Detail]) -> str:
+    return "".join(badge(d.text, d.tone) for d in details)
 
 
 # --- Submissions -------------------------------------------------------
@@ -227,6 +242,7 @@ def submission_detail_page(
     images: list[dict[str, Any]],
     *,
     banner: bool,
+    missing_image_ids: list[str] | None = None,
     notice: str | None = None,
     notice_kind: str | None = None,
     conflict_diff: str | None = None,
@@ -236,7 +252,7 @@ def submission_detail_page(
         # A submission's material url is unvalidated input (chronicle.api.
         # models.Material.url is a bare str); escape() alone leaves the
         # scheme untouched, so a `javascript:` value would still render as
-        # a clickable link that runs on Scott's click (found in a round C5
+        # a clickable link that runs on the editor's click (found in a round C5
         # review). Only ever emit an anchor for a scheme a browser will
         # navigate to, not execute.
         if url.lower().startswith(("http://", "https://")):
@@ -245,13 +261,20 @@ def submission_detail_page(
 
     materials = "".join(
         f"<li><strong>{escape(m['name'])}</strong>"
-        + (f": {escape(m['text'])}" if m.get("text") else "")
+        + (f": {_multiline(m['text'])}" if m.get("text") else "")
         + (material_link(m["url"]) if m.get("url") else "")
         + "</li>"
         for m in submission["materials"]
     )
     image_rows = "".join(
         f"<li>{escape(img['filename'])} ({img['bytes']} bytes)</li>" for img in images
+    )
+    # An id the image store does not hold is named in the list where the image
+    # should be, not only in the notice above the page (#45). It is not counted
+    # in the heading: that number is what the page can actually show.
+    image_rows += "".join(
+        f"<li><code>{escape(missing)}</code> {badge('Missing', 'warn')} not in the image store</li>"
+        for missing in missing_image_ids or []
     )
     can_draft = submission["status"] in ("new", "claimed")
     can_discard = submission["status"] in ("new", "claimed")
@@ -339,6 +362,7 @@ def _draft_card(
     last_author: str,
     run_info: dict[str, Any] | None,
     flags: list[dict[str, Any]],
+    came_back: bool,
 ) -> str:
     published = draft.get("published") or {}
     pr_link = (
@@ -355,6 +379,7 @@ def _draft_card(
 <div class="chr-card-head">
 <h3 class="subhead"><a href="/content/drafts/{escape(draft["id"])}">{escape(draft["title"] or "(untitled)")}</a></h3>
 {badge(status_label(draft["status"]), status_tone(draft["status"]))}
+{_detail_badges(status_details(draft["status"], came_back=came_back))}
 {_flag_badges(flags)}
 </div>
 <p class="muted">slug: {escape(draft["slug"] or "-")} |
@@ -366,7 +391,10 @@ author: {escape(last_author)} | updated: {escape(local_time(draft["updated_at"])
 
 def _cards(rows: list[dict[str, Any]]) -> str:
     return "".join(
-        _draft_card(row["draft"], row["last_author"], row["run_info"], row["flags"]) for row in rows
+        _draft_card(
+            row["draft"], row["last_author"], row["run_info"], row["flags"], row["came_back"]
+        )
+        for row in rows
     )
 
 
@@ -413,90 +441,6 @@ def drafts_board_page(
 </details>
 """
     return page("Posts", body, banner=banner, active=POSTS_TAB)
-
-
-# --- Import ---------------------------------------------------------------
-
-
-def _frontmatter_date(raw: str) -> str:
-    """A post's frontmatter date for a human: local clock time when it parses
-    as ISO, else the author's own text unchanged."""
-    shown = local_time(raw)
-    return raw if shown == "-" else shown
-
-
-def import_page(
-    pg: Page[dict[str, Any]],
-    q: str,
-    *,
-    banner: bool,
-    posts_total: int,
-    untracked_total: int,
-    notice: str | None = None,
-) -> str:
-    """`posts_total` is every post the store knows; `untracked_total` is those
-    no draft record tracks yet, the only ones this tab lists. With none left
-    it says so plainly instead of drawing an empty table, and says why."""
-    if untracked_total == 0:
-        if posts_total == 0:
-            reason = "No posts have been digested from the blog yet, so there is nothing to import."
-        else:
-            reason = (
-                f"All {posts_total} posts from the blog are already on the "
-                '<a href="/content/drafts">Posts tab</a>, so there is nothing to import. '
-                "This tab only lists a post that has no record here yet."
-            )
-        return page(
-            "Import published post",
-            f'<p class="lat-banner">{reason}</p>',
-            banner=banner,
-            active=IMPORT_TAB,
-            notice=notice,
-            notice_kind="error",
-        )
-    rows = "".join(
-        "<tr>"
-        f'<td class="chr-mono">{escape(p["slug"])}</td>'
-        f"<td>{escape(p['title'])}</td>"
-        # A post's date is frontmatter and is often a bare YYYY-MM-DD. `local_time`
-        # leaves that as its own date on purpose: a date has no instant, and
-        # shifting it west of UTC would show the day before. Do not "fix" that
-        # into a clock time. A full stamp is converted to local clock time.
-        # Anything `local_time` cannot read (`July 4, 2026`) shows the author's
-        # own text, and an empty date stays an empty cell, never a dash.
-        # A naive stamp (`2026-07-24 12:00:00`) is assumed UTC here, the store's
-        # convention in `parse_stamp`; Hugo reads it in the site's timezone, so
-        # the shown time can differ from Hugo's by the site's offset.
-        f'<td class="lat-num">{escape(_frontmatter_date(p["date"]))}</td>'
-        '<td><form method="post" action="/content/import">'
-        f'<input type="hidden" name="slug" value="{escape(p["slug"])}">'
-        f'<input type="hidden" name="q" value="{escape(q)}">'
-        f'<input type="hidden" name="page" value="{pg.page}">'
-        '<button type="submit" class="lat-btn">Import as post</button></form></td>'
-        "</tr>"
-        for p in pg.items
-    )
-    extra = f"&q={quote(q)}" if q else ""
-    body = f"""
-<p class="muted">Posts with no record here yet: {untracked_total}.</p>
-<form method="get" action="/content/import" class="chr-filter">
-<div class="chr-field chr-grow">
-<label class="lat-label" for="q">Search published posts</label>
-<input type="text" class="lat-input" id="q" name="q" value="{escape(q)}" placeholder="title or slug">
-</div>
-<button type="submit" class="lat-btn">Search</button>
-</form>
-{_table('<th>slug</th><th>title</th><th class="lat-num">date</th><th></th>', rows or "<tr><td colspan=4>no posts match.</td></tr>")}
-{_pagination_links(pg, "/content/import", extra=extra)}
-"""
-    return page(
-        "Import published post",
-        body,
-        banner=banner,
-        active=IMPORT_TAB,
-        notice=notice,
-        notice_kind="error",
-    )
 
 
 # --- Editor ---------------------------------------------------------------
@@ -638,7 +582,7 @@ def _offer_button(draft_id: str, offer: Offer) -> str:
             f'disabled title="{escape(offer.reason)}">{escape(offer.label)}</button> '
             f'<small class="offer-reason">{escape(offer.reason)}</small></span>'
         )
-    reserved = ' <span class="reserved">(Scott only)</span>' if offer.reserved else ""
+    reserved = ' <span class="reserved">(editor only)</span>' if offer.reserved else ""
     action_url = f"/content/drafts/{escape(draft_id)}/actions/{offer.action}"
     # Lattice allows one primary per screen; `offers_for` marks at most one.
     css = "lat-btn lat-btn--primary" if offer.primary else "lat-btn"
@@ -664,12 +608,19 @@ def _action_buttons(draft_id: str, offers: list[Offer]) -> str:
     return "".join(_offer_button(draft_id, offer) for offer in offers)
 
 
+def _multiline(text: str) -> str:
+    """`text` as HTML with its line breaks kept. Escape first, then turn the
+    newlines into `<br>`: the other way round would escape the tags this adds.
+    CRLF and a lone CR each count as one line break."""
+    return escape(text.replace("\r\n", "\n").replace("\r", "\n")).replace("\n", "<br>")
+
+
 def _feedback_log(entries: list[dict[str, Any]]) -> str:
     if not entries:
         return '<p class="lat-banner">no feedback yet.</p>'
     rows = "".join(
         f"<li><strong>v{e['version_no']} {escape(e['action'])}</strong> by {escape(e['author'])} "
-        f"at {escape(local_time(e['created_at']))}: {escape(e['text'])}</li>"
+        f"at {escape(local_time(e['created_at']))}: {_multiline(e['text'])}</li>"
         for e in entries
     )
     return f'<ul class="chr-log">{rows}</ul>'
@@ -705,12 +656,16 @@ def _run_status(run: dict[str, Any] | None) -> str:
     )
 
 
-def _status_pill(status: str) -> str:
-    return badge(
+def _status_pill(status: str, details: list[Detail]) -> str:
+    """The four-word status, then what the finer statuses know as detail. Two
+    regions, both `data-refresh`, so a save or an action swaps in the server's
+    fresh copy of each."""
+    pill = badge(
         status_label(status),
         status_tone(status),
         attrs=f' id="status-pill" data-refresh data-status="{escape(status)}"',
     )
+    return f'{pill}<span id="status-detail" data-refresh>{_detail_badges(details)}</span>'
 
 
 def _post_info(
@@ -773,6 +728,34 @@ def _image_upload_form(draft_id: str, images: list[dict[str, Any]]) -> str:
 </form>"""
 
 
+def _save_control(publish_run_active: bool, publish_pr_open: bool) -> str:
+    """The Save button, or the reason it is not offered. `Store.save_draft`
+    refuses while a publish run is queued or building and while a publish PR is
+    open (both 409), so the button is disabled with the reason beside it rather
+    than rendered to fail on click. It is a `data-refresh` region so a swap after
+    an upload or a save keeps it true; `data-locked` carries the reason for
+    `editor.js`, which must refuse Ctrl+S the same way."""
+    reason = (
+        "A publish run is in progress, so saving is refused until it finishes."
+        if publish_run_active
+        else "A publish pull request is open, so saving is refused until it merges or closes."
+        if publish_pr_open
+        else ""
+    )
+    if not reason:
+        return (
+            '<span id="save-control" data-refresh>'
+            f'<button type="submit" id="save-btn" class="lat-btn" form="{EDIT_FORM_ID}">Save</button>'
+            "</span>"
+        )
+    return (
+        '<span id="save-control" data-refresh>'
+        f'<button type="submit" id="save-btn" class="lat-btn" form="{EDIT_FORM_ID}" '
+        f'disabled data-locked="{escape(reason)}" title="{escape(reason)}">Save</button> '
+        f'<small class="offer-reason">{escape(reason)}</small></span>'
+    )
+
+
 def editor_page(
     draft: dict[str, Any],
     versions: list[dict[str, Any]],
@@ -781,6 +764,7 @@ def editor_page(
     preview_url: str | None,
     *,
     banner: bool,
+    came_back: bool = False,
     has_preview: bool = False,
     publish_pr_open: bool = False,
     publish_run_active: bool = False,
@@ -803,6 +787,14 @@ def editor_page(
         publish_run_active=publish_run_active,
         unpublish_pr_open=unpublish_pr_open,
     )
+    details = status_details(
+        draft["status"],
+        came_back=came_back,
+        has_preview=has_preview,
+        publish_run_active=publish_run_active,
+        publish_pr_open=publish_pr_open,
+        unpublish_pr_open=unpublish_pr_open,
+    )
     frontmatter = draft["frontmatter"]
     title_value = frontmatter.get("title", "")
     title_value = title_value if isinstance(title_value, str) else ""
@@ -815,8 +807,8 @@ def editor_page(
 </div>
 {pr_open_notice}
 <div class="editor-bar" id="editor-bar">
-{_status_pill(draft["status"])}
-<button type="submit" id="save-btn" class="lat-btn" form="{EDIT_FORM_ID}">Save</button>
+{_status_pill(draft["status"], details)}
+{_save_control(publish_run_active, publish_pr_open)}
 <span id="save-state" class="save-state" data-state="idle" role="status" aria-live="polite">No unsaved changes</span>
 <span id="upload-state" class="upload-state" role="status" aria-live="polite"></span>
 </div>

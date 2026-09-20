@@ -3,9 +3,10 @@
 Every mutating route here calls the same `Store` methods the `/v1` routes
 call, through a `Consumer` built from the ui token the same way a real bearer
 call would be (`require_ui_consumer`), so every version, event, and commit
-this surface produces is authored `scott` exactly as C1 defines. Nothing here
-touches a session cookie or `/admin`; nothing under `/admin` is reachable
-from here either.
+this surface produces is authored `editor` (ADR 014's amendment; records
+written before that change still say `scott`). Nothing here touches a
+session cookie or `/admin`; nothing under `/admin` is reachable from here
+either.
 """
 
 from __future__ import annotations
@@ -22,11 +23,12 @@ from .. import ui_templates as tpl
 from ..deps import Consumer, Services
 from ..errors import ApiError
 from ..images import MAX_IMAGE_BYTES, alt_text_for, safe_upload_filename
-from ..models import Draft, Material, Post, Submission
+from ..models import Draft, Material, Submission
 from ..pagination import Page, paginate
 from ..store import Store
 from ..ui_actions import staged_refusal
 from ..ui_deps import banner_enabled, check_same_origin, get_services, require_ui_consumer
+from ..ui_status import came_back_from_review, parse_status_filter
 from ..ui_time import sort_key
 
 router = APIRouter(tags=["ui"])
@@ -142,6 +144,7 @@ def _submission_response(
         dumped,
         images,
         banner=banner_enabled(request),
+        missing_image_ids=missing,
         notice=notice,
         notice_kind=notice_kind,
         conflict_diff=conflict_diff,
@@ -161,6 +164,8 @@ def _crlf_to_lf(value: str) -> str:
     # A browser submits every textarea line break as CRLF. Left alone, that
     # would rewrite every line of a pasted post in the submission's diff and
     # stop a `---` frontmatter fence from matching when the draft is seeded.
+    # The draft editor's save uses it too: without it every UI save rewrote
+    # every line ending in the body and a version diff showed every line changed.
     return value.replace("\r\n", "\n")
 
 
@@ -307,18 +312,28 @@ def draft_new(
 
 
 def _board_row(
-    services: Services, draft: Draft, flags_by_draft: dict[str, list[dict[str, Any]]]
+    services: Services,
+    draft: Draft,
+    flags_by_draft: dict[str, list[dict[str, Any]]],
+    seqs_by_draft: dict[str, tuple[int | None, int | None]],
 ) -> dict[str, Any]:
     store = services.store
     versions = store.list_versions(draft.id)
     last_author = versions[-1].author if versions else "-"
     last_preview = store.last_run(draft.id, kind="preview")
     run_info = {"preview_url": _preview_url(last_preview)} if last_preview else None
+    request_seq, answered_seq = seqs_by_draft.get(draft.id, (None, None))
     return {
         "draft": _dump(draft),
         "last_author": last_author,
         "run_info": run_info,
         "flags": flags_by_draft.get(draft.id, []),
+        # A reviewer's request outlives the status that first carried it, so
+        # this reads the event stream (`ui_status`, `Index.revision_answer_seqs`)
+        # rather than the draft's current status alone.
+        "came_back": came_back_from_review(
+            draft.status, request_seq=request_seq, answered_seq=answered_seq
+        ),
     }
 
 
@@ -341,7 +356,12 @@ def drafts_board(
         if flag.draft_id:
             flags_by_draft.setdefault(flag.draft_id, []).append(_dump(flag))
 
-    drafts = store.list_drafts(status or None)
+    # `?status=` is one raw status, as it always was, or a comma list: the
+    # board's filter offers four words, and a word covers several statuses.
+    wanted = parse_status_filter(status)
+    drafts = (
+        [d for one in wanted for d in store.list_drafts(one)] if wanted else store.list_drafts(None)
+    )
     needle = q.strip().lower()
     if needle:
         drafts = [
@@ -364,9 +384,14 @@ def drafts_board(
     # only loaded for the visible page: after a digest the archive is hundreds
     # of records and the board should not read every one to show fifty.
     visible = paginate(archive, page)
-    active_rows = [_board_row(services, d, flags_by_draft) for d in active]
+    # One query for every draft id the page will render, not one per card:
+    # `events` carries no index on its JSON fields, so this is a single scan
+    # of the table rather than a scan per row.
+    page_draft_ids = [d.id for d in active] + [d.id for d in visible.items]
+    seqs_by_draft = store.index.revision_answer_seqs(page_draft_ids)
+    active_rows = [_board_row(services, d, flags_by_draft, seqs_by_draft) for d in active]
     archive_pg = Page(
-        items=[_board_row(services, d, flags_by_draft) for d in visible.items],
+        items=[_board_row(services, d, flags_by_draft, seqs_by_draft) for d in visible.items],
         page=visible.page,
         page_size=visible.page_size,
         total=visible.total,
@@ -415,6 +440,12 @@ def _editor_response(
     last_run = store.last_run(draft_id)
     preview_run = store.last_run(draft_id, kind="preview")
     preview_url = _preview_url(preview_run)
+    request_seq, answered_seq = store.index.revision_answer_seqs([draft_id]).get(
+        draft_id, (None, None)
+    )
+    came_back = came_back_from_review(
+        draft.status, request_seq=request_seq, answered_seq=answered_seq
+    )
     html = tpl.editor_page(
         _dump(draft),
         versions,
@@ -422,6 +453,7 @@ def _editor_response(
         _dump(last_run) if last_run else None,
         preview_url,
         banner=banner,
+        came_back=came_back,
         **_offer_state(store, draft, preview_run),
         notice=notice,
         notice_kind=notice_kind,
@@ -484,7 +516,7 @@ def _build_frontmatter(
         # write `pinned_slug` into frontmatter here: a `github`-authored
         # save (`Store.record_github_version`) can legitimately carry a
         # different `slug` key than `draft.slug`, and overwriting it would
-        # silently revert content Scott wrote on GitHub, which is exactly
+        # silently revert content the editor wrote on GitHub, which is exactly
         # what reconciliation exists to flag, not correct automatically.
         if existing.get("url"):
             frontmatter["url"] = existing["url"]
@@ -522,7 +554,7 @@ async def draft_save(
     base_version = int(form.get("base_version", "0") or "0")
     draft = services.store.get_draft(draft_id)
     frontmatter = _build_frontmatter(draft.frontmatter, form, draft.slug)
-    body_text = form.get("body", "")
+    body_text = _crlf_to_lf(form.get("body", ""))
     try:
         services.store.save_draft(draft_id, consumer.name, base_version, frontmatter, body_text)
     except ApiError as exc:
@@ -748,119 +780,6 @@ def draft_image_detach(
 ) -> RedirectResponse:
     services.store.detach_image(draft_id, image_id, consumer.name)
     return RedirectResponse(f"/content/drafts/{draft_id}", status_code=303)
-
-
-# --- Import ---------------------------------------------------------------
-
-
-def _untracked_posts(store: Store) -> tuple[list[Post], list[Post]]:
-    """(every post, the posts no draft record tracks yet).
-
-    Same rule as `Store._create_published_drafts_from_digest`, which holds
-    the other copy of it (store.py is owned elsewhere, so the two are kept in
-    step by hand: change one, change both). A post is tracked when its slug is
-    some draft's slug, or its path is some draft's `source_post` path or
-    `published` post path. Digest lands a record for each post it sees, so on
-    a digested blog this is usually empty; what is left is the recovery case
-    (a post digest could not import).
-    """
-    posts = store.list_posts()
-    drafts = store.list_drafts()
-    tracked_slugs = {d.slug for d in drafts if d.slug}
-    tracked_paths = {(d.source_post or {}).get("path") for d in drafts if d.source_post} | {
-        (d.published or {}).get("post_path") for d in drafts if d.published
-    }
-    untracked = [p for p in posts if p.slug not in tracked_slugs and p.path not in tracked_paths]
-    return posts, untracked
-
-
-def _import_listing(services: Services, q: str, page: int) -> tuple[Page[dict[str, Any]], int, int]:
-    """(the page to render, how many posts exist, how many are untracked)."""
-    posts, untracked = _untracked_posts(services.store)
-    needle = q.strip().lower()
-    shown = untracked
-    if needle:
-        shown = [p for p in shown if needle in p.slug.lower() or needle in p.title.lower()]
-    posts_dump = [_dump(p) for p in sorted(shown, key=lambda p: p.date, reverse=True)]
-    return paginate(posts_dump, page), len(posts), len(untracked)
-
-
-@router.get("/content/import", response_class=HTMLResponse)
-def import_search(
-    request: Request,
-    q: str = "",
-    page: int = Query(1, ge=1),
-    services: Services = Depends(get_services),
-) -> HTMLResponse:
-    pg, posts_total, untracked_total = _import_listing(services, q, page)
-    return HTMLResponse(
-        tpl.import_page(
-            pg,
-            q,
-            banner=banner_enabled(request),
-            posts_total=posts_total,
-            untracked_total=untracked_total,
-        )
-    )
-
-
-def _import_refusal(
-    services: Services, request: Request, message: str, status_code: int, q: str, page: int
-) -> Any:
-    pg, posts_total, untracked_total = _import_listing(services, q, page)
-    return HTMLResponse(
-        tpl.import_page(
-            pg,
-            q,
-            banner=banner_enabled(request),
-            notice=message,
-            posts_total=posts_total,
-            untracked_total=untracked_total,
-        ),
-        status_code=status_code,
-    )
-
-
-@router.post("/content/import")
-async def import_create(
-    request: Request,
-    _origin: None = Depends(check_same_origin),
-    consumer: Consumer = Depends(require_ui_consumer),
-    services: Services = Depends(get_services),
-) -> Any:
-    form = await request.form()
-    slug = str(form.get("slug", ""))
-    q = str(form.get("q", ""))
-    try:
-        page = max(1, int(str(form.get("page", "1"))))
-    except ValueError:
-        page = 1
-    posts, untracked = _untracked_posts(services.store)
-    if any(p.slug == slug for p in posts) and not any(p.slug == slug for p in untracked):
-        # A stale tab or a hand-built POST: the list no longer offers this
-        # post, because a record for it already exists.
-        return _import_refusal(
-            services,
-            request,
-            f"{slug} is already a post on the Posts tab, so there is nothing to import. "
-            "Open it from there.",
-            409,
-            q,
-            page,
-        )
-    try:
-        draft, warnings = services.store.create_draft(consumer.name, from_post=slug)
-    except ApiError as exc:
-        message = exc.message
-        if exc.code == "image_dir_collision":
-            folder = exc.extra.get("image_dir") or slug
-            message = (
-                f"Could not import {slug}: its image folder (static/images/{folder}/) belongs "
-                "to another post on this board. Nothing was created. If that post is this "
-                "one, it is already on the Posts tab."
-            )
-        return _import_refusal(services, request, message, exc.status_code, q, page)
-    return _redirect_to_draft(draft.id, warnings)
 
 
 # --- Preview tab ------------------------------------------------------------

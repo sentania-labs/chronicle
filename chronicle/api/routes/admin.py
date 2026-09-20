@@ -49,7 +49,7 @@ from ..errors import ApiError
 from ..github_client import GitHubApiError, build_manifest, manifest_target_url
 from ..models import RECONCILE_RESOLUTIONS
 from ..reconcile import run_once_logged as run_reconcile
-from ..tokens import UI_TOKEN_NAME
+from ..tokens import RESERVED_TOKEN_NAMES
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 api_router = APIRouter(prefix="/admin/api", tags=["admin-api"])
@@ -539,11 +539,9 @@ async def tokens_issue(
         return HTMLResponse(
             tpl.tokens_page(_token_rows(services), "a name is required"), status_code=422
         )
-    if name == UI_TOKEN_NAME:
+    if name in RESERVED_TOKEN_NAMES:
         return HTMLResponse(
-            tpl.tokens_page(
-                _token_rows(services), f"{UI_TOKEN_NAME!r} is reserved for the UI backend"
-            ),
+            tpl.tokens_page(_token_rows(services), f"{name!r} is reserved for the UI backend"),
             status_code=422,
         )
     token = services.tokens.issue(name)
@@ -807,9 +805,9 @@ def tokens_issue_json(
     admin: AdminServices = Depends(require_admin_session_json),
     services: Services = Depends(get_services),
 ) -> dict[str, Any]:
-    if payload.name == UI_TOKEN_NAME:
+    if payload.name in RESERVED_TOKEN_NAMES:
         raise ApiError(
-            422, "token_name_reserved", f"{UI_TOKEN_NAME!r} is reserved for the UI backend"
+            422, "token_name_reserved", f"{payload.name!r} is reserved for the UI backend"
         )
     token = services.tokens.issue(payload.name)
     return {"name": payload.name, "token": token}

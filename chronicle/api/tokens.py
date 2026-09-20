@@ -33,7 +33,15 @@ TOKENS_LOCK_FILE_NAME = "tokens.lock"
 UI_TOKEN_FILE_NAME = "ui_token.txt"
 UI_DISABLED_FILE_NAME = "ui_disabled"
 UI_TOKEN_NAME = "ui"
-UI_COMMIT_AUTHOR = "scott"
+# Whoever is at the keyboard behind the `ui` token. A role, not a person: this
+# lands in git history, in version authors, and as a claim holder.
+UI_COMMIT_AUTHOR = "editor"
+# Names an admin cannot issue an ordinary consumer token under. `ui` is the
+# UI backend's own token name; `editor` is the identity `commit_author` maps
+# it to. An ordinary token named `editor` would write with the exact same
+# version author, event actor, claim holder and git author as the UI, which
+# defeats the attribution the mapping exists for.
+RESERVED_TOKEN_NAMES = frozenset({UI_TOKEN_NAME, UI_COMMIT_AUTHOR})
 TOKEN_BYTES = 32
 
 
@@ -183,5 +191,5 @@ class TokenStore:
 
 
 def commit_author(token_name: str) -> str:
-    """The git author a consumer commits as; the UI backend commits as Scott."""
+    """The git author a consumer commits as; the UI backend commits as the editor."""
     return UI_COMMIT_AUTHOR if token_name == UI_TOKEN_NAME else token_name

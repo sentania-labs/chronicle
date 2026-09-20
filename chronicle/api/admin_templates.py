@@ -12,7 +12,7 @@ from typing import Any
 
 from . import ui_chrome
 from .tokens import UI_TOKEN_NAME
-from .ui_status import status_label
+from .ui_status import label_counts
 from .ui_time import local_time
 
 STATUS_TAB = "/admin"
@@ -240,8 +240,9 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
     submission_rows = "".join(
         row(name, count) for name, count in status["submissions_by_status"].items()
     )
+    # The four words a reader sees, not the state machine's eight statuses.
     draft_rows = "".join(
-        row(status_label(name), count) for name, count in status["drafts_by_status"].items()
+        row(label, count) for label, count in label_counts(status["drafts_by_status"]).items()
     )
     theme_rows = (
         "".join(row(t["path"], t["commit"]) for t in status["toolchain"]["submodules"])

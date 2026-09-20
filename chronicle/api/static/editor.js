@@ -286,7 +286,6 @@ function saveStateText(state, detail) {
 
   var draftId = app.getAttribute("data-draft-id");
   var baseInput = document.getElementById("base_version");
-  var saveBtn = document.getElementById("save-btn");
   var stateEl = document.getElementById("save-state");
   var uploadEl = document.getElementById("upload-state");
   var backupKey = BACKUP_PREFIX + draftId;
@@ -553,8 +552,36 @@ function saveStateText(state, detail) {
     return notice ? notice.textContent.trim() : "";
   }
 
+  // The Save button sits in a `data-refresh` region, so a swap replaces the
+  // element: always look it up, never hold one. The server marks it
+  // `data-locked` while it would refuse a save (a publish run or PR in flight);
+  // Ctrl+S must honour that the same as the disabled button does.
+  function saveButton() {
+    return document.getElementById("save-btn");
+  }
+
+  function saveLockReason() {
+    var button = saveButton();
+    if (button && button.getAttribute("data-locked") !== null) {
+      return button.getAttribute("data-locked") || "saving is refused right now";
+    }
+    return null;
+  }
+
+  function setSaveBusy(busy) {
+    var button = saveButton();
+    if (button && saveLockReason() === null) {
+      button.disabled = busy;
+    }
+  }
+
   function save() {
     if (saving) {
+      return;
+    }
+    var locked = saveLockReason();
+    if (locked !== null) {
+      setState("error", locked);
       return;
     }
     saving = true;
@@ -564,7 +591,7 @@ function saveStateText(state, detail) {
     var sent = currentState();
     flushBackup();
     setState("saving");
-    saveBtn.disabled = true;
+    setSaveBusy(true);
     // The same POST the form makes: same URL, same fields, same origin, the
     // browser adds Origin, and the server authenticates the ui token itself.
     fetch(form.action, {
@@ -606,6 +633,13 @@ function saveStateText(state, detail) {
           document.close();
           return;
         }
+        // A non-conflict refusal (a publish run started, or a publish PR
+        // opened, after this page loaded) still renders a full editor page,
+        // `#save-control` included. Refresh it along with the other
+        // server-owned regions so a Save the store will keep refusing does
+        // not sit re-enabled until the visitor's next save, upload or
+        // staged action happens to refresh it (#45).
+        refreshRegions(doc);
         setState("error", noticeText(doc) || "the server refused the save");
       })
       .catch(function () {
@@ -613,7 +647,7 @@ function saveStateText(state, detail) {
       })
       .then(function () {
         saving = false;
-        saveBtn.disabled = false;
+        setSaveBusy(false);
       });
   }
 

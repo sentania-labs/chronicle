@@ -159,7 +159,7 @@ body. `n` starts at 1; there is no `versions/0.json`.
 {
   "draft_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
   "version_no": 1,
-  "author": "scott",
+  "author": "editor",
   "created_at": "2026-08-01T09:30:00-05:00",
   "base_version": 0,
   "message": "first draft",
@@ -177,7 +177,7 @@ values for one draft must be a contiguous run starting at 1 with no gaps;
 One JSON object per line (JSONL, not a JSON array), append-only:
 
 ```json
-{"draft_id": "a1b2...", "author": "scott", "created_at": "2026-08-01T11:00:00-05:00", "action": "request_revision", "version_no": 1, "text": "tighten the opening paragraph"}
+{"draft_id": "a1b2...", "author": "editor", "created_at": "2026-08-01T11:00:00-05:00", "action": "request_revision", "version_no": 1, "text": "tighten the opening paragraph"}
 ```
 
 Required: all fields. `action` is whatever action produced the feedback

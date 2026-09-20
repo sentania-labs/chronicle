@@ -286,3 +286,37 @@ class Index:
             "SELECT payload FROM events WHERE seq > ? ORDER BY seq LIMIT ?", (cursor, limit)
         )
         return [Event.model_validate_json(row["payload"]) for row in rows]
+
+    # Statuses that a `to_status` an author's own hands never wrote: the
+    # first is a reviewer sending the draft back, the rest are every event
+    # type that leaves the author's side (a submit to review, and the
+    # terminal outcomes review can end in). See `ui_status.came_back_from_review`.
+    _REVIEW_ANSWERED_TO_STATUSES = ("in_review", "approved", "published", "rejected", "unpublished")
+
+    def revision_answer_seqs(
+        self, draft_ids: list[str]
+    ) -> dict[str, tuple[int | None, int | None]]:
+        """Per draft id, the newest event seq moving it to `revision_requested`
+        and the newest event seq moving it out of the author's hands again
+        (a submit back to review, or review ending in approval, publish,
+        rejection or unpublish). One query for the whole set of ids, not one
+        per id: `events` has no index on a JSON field, so this is a single
+        scan of the table rather than a scan per draft. A draft with no
+        events at all is absent from the result; one with events but no
+        matching `to_status` still appears, with both seqs None."""
+        if not draft_ids:
+            return {}
+        placeholders = ",".join("?" for _ in draft_ids)
+        answered = ",".join("?" for _ in self._REVIEW_ANSWERED_TO_STATUSES)
+        rows = self.conn.execute(
+            "SELECT json_extract(payload, '$.draft_id') AS draft_id,"
+            "       MAX(CASE WHEN json_extract(payload, '$.to_status') = 'revision_requested'"
+            "                THEN seq END) AS request_seq,"
+            f"      MAX(CASE WHEN json_extract(payload, '$.to_status') IN ({answered})"
+            "                THEN seq END) AS answered_seq"
+            " FROM events"
+            f" WHERE json_extract(payload, '$.draft_id') IN ({placeholders})"
+            " GROUP BY draft_id",
+            (*self._REVIEW_ANSWERED_TO_STATUSES, *draft_ids),
+        )
+        return {row["draft_id"]: (row["request_seq"], row["answered_seq"]) for row in rows}

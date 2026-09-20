@@ -85,9 +85,10 @@ the image store. An index is derived from the files and rebuildable.
 
 - One per save. `{draft_id, version_no, author, created_at, base_version,
   message}` plus the content at that version, committed to git.
-- `author` is the consumer token name or `scott` for the UI. This is the
+- `author` is the consumer token name or `editor` for the UI. This is the
   calibration signal: ghostwriter reads the diff between its version and
-  Scott's next one.
+  the editor's next one. Records written before this name changed still
+  say `scott` and are not rewritten; see ADR 014's amendment.
 
 **Feedback**
 
@@ -212,7 +213,11 @@ Served at the root of the instance's hostname. Three tabs.
 - **Content**: submissions queue, drafts by status, the editor (markdown
   with frontmatter fields, image attach, save with conflict handling, claim
   indicator), and the action buttons Scott needs: request revision with
-  feedback, reject, approve, unpublish, restore, import a published post.
+  feedback, reject, approve, unpublish, restore. There is no import tab: digest
+  already records every post on main, so a manual import would front
+  something that has already happened. Importing a published post into a
+  draft (`from_post`) remains a capability of the API and of reconciliation's
+  `import_as_draft` resolution, with no UI of its own.
 - **Preview**: the static output of the latest preview build per draft,
   served under a preview path by slug, plus the run log for a failed build.
 - **Admin**: section 10.
@@ -378,7 +383,7 @@ path to preview. Clearly marked as a reference, not the lab's deployment.
   saves versions with `base_version`, reads `/changes` at the start of each
   session, moves drafts to `in_review`, uploads feature art.
 - **Scott**: UI. Reviews, edits, requests revisions, approves, rejects,
-  unpublishes, imports published posts.
+  unpublishes.
 - **lab-admin** (and any other agent): token. Posts a submission with
   notes and screenshots. Nothing else.
 - **Dashboard**: token, read-only. Shows counts and links into the service.

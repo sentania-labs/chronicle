@@ -67,10 +67,12 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   sets `GIT_AUTHOR_*` and `GIT_COMMITTER_*` and pins `GIT_CONFIG_GLOBAL` and
   `GIT_CONFIG_SYSTEM` to `/dev/null` on every call, because the api container
   and CI have no global git config and must never inherit the host's. The
-  `ui` token acts as `scott` in everything the domain records (commit author,
-  version author, claim holder); that mapping lives in `Consumer`
+  `ui` token acts as `editor` in everything the domain records (commit
+  author, version author, claim holder); that mapping lives in `Consumer`
   (`chronicle/api/deps.py`), so the store receives the acting name already
-  resolved and does no translation of its own.
+  resolved and does no translation of its own. Records written before this
+  name changed still say `scott` and are not rewritten; see ADR 014's
+  amendment.
 - **A save can change a draft's status.** `PUT /v1/drafts/{id}` on a draft in
   `revision_requested` or `published` moves it to `drafting`. That is not one
   of the API's named actions, so it is modelled as the `revise` action in

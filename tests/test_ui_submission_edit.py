@@ -104,7 +104,7 @@ def test_edit_form_saves_through_the_ui_consumer_and_normalises_line_breaks(
     assert record["materials"][0]["text"] == "line one\nline two"
     assert record["materials"][2]["text"] == "a new note"
     version = services.store.get_submission_version(submission_id, 2)
-    assert version.author == "scott"
+    assert version.author == "editor"
 
 
 def test_clearing_a_material_row_removes_it(client: TestClient, agent_token: str) -> None:
@@ -285,3 +285,52 @@ def test_an_edit_on_a_submission_drafted_in_another_tab_keeps_what_was_typed(
     assert "my carefully typed brief" in response.text
     assert "a paragraph I do not want to lose" in response.text
     assert "What changed underneath you" not in response.text
+
+
+def test_a_missing_image_id_is_named_in_the_images_list_not_only_the_notice(
+    client: TestClient, agent_token: str, services: Services
+) -> None:
+    """A record from before create checked its image ids can name an image the
+    store does not hold (#45). The id shows in the Images list where the image
+    would be, marked missing, and the count still says what is actually shown."""
+    from .conftest import png_bytes
+
+    submission_id = make_submission(client, agent_token)
+    image, _created = services.store.put_image(png_bytes(), "real.png")
+    path = services.store._submission_path(submission_id)
+    record = services.store._read_json(path)
+    record["image_ids"] = [image.image_id, "img_deadbeefdeadbeef"]
+    services.store._write_json(path, record)
+
+    page = client.get(f"/content/submissions/{submission_id}").text
+    section = page[page.index("<h2>Images (") :]
+    section = section[: section.index("</section>")]
+    assert "<h2>Images (1)</h2>" in section
+    assert "real.png" in section
+    assert "<li><code>img_deadbeefdeadbeef</code>" in section
+    assert "Missing" in section
+    assert "not in the image store" in section
+    # The notice above the page still says what saving does.
+    assert "Saving this submission removes them." in page
+
+
+def test_a_missing_image_id_is_escaped_where_it_is_shown(
+    client: TestClient, agent_token: str, services: Services
+) -> None:
+    submission_id = make_submission(client, agent_token)
+    path = services.store._submission_path(submission_id)
+    record = services.store._read_json(path)
+    record["image_ids"] = ["<script>alert(1)</script>"]
+    services.store._write_json(path, record)
+
+    page = client.get(f"/content/submissions/{submission_id}").text
+    assert "<script>alert(1)" not in page
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+
+
+def test_a_multi_line_material_keeps_its_line_breaks_on_the_detail_page(
+    client: TestClient, agent_token: str
+) -> None:
+    submission_id = make_submission(client, agent_token)
+    page = client.get(f"/content/submissions/{submission_id}").text
+    assert "<strong>notes</strong>: line one<br>line two" in page

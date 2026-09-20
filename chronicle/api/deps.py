@@ -22,9 +22,9 @@ from .tokens import UI_TOKEN_NAME, TokenStore, commit_author
 class Consumer:
     """Who is acting: the token that authenticated, and the name it acts under.
 
-    The `ui` token is Scott at the keyboard (ADR 004), so everything the
+    The `ui` token is the editor at the keyboard (ADR 004), so everything the
     domain records about it (version author, commit author, claim holder) says
-    `scott`. `token_name` stays raw because authorization asks a different
+    `editor`. `token_name` stays raw because authorization asks a different
     question: which token is this, not who is behind it.
     """
 

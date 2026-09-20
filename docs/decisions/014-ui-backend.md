@@ -118,3 +118,15 @@ submitting here on a visitor's behalf.
   outright), not a side effect to work around.
 - The UI backend never needs its own health check separate from the api's:
   it lives in the same process, behind the same `/healthz` and `/readyz`.
+
+## Amendment, 2026-09-19: the ui token now authors `editor`, not `scott`
+
+The decision text above is left as written; the mapping it describes has
+changed. `UI_COMMIT_AUTHOR` (`chronicle/api/tokens.py`) now resolves the
+`ui` token to `editor`, a role name rather than a person, so every version,
+event, and git commit a UI action produces from this date forward is
+authored `editor`. Everything the decision text above says about in-process
+authentication, the actor `require_ui_consumer` resolves, and revocation as
+a kill switch still holds; only the resulting name changed. History is
+mixed: records written before this change still say `scott` and are not
+rewritten. See `docs/notes/lane-f-part-b.md`.
