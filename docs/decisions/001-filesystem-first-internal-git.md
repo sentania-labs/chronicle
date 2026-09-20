@@ -54,3 +54,14 @@ it: every row would need to be the durable copy of something a person wrote,
 which contradicts filesystem-first. A database mirror rebuildable from
 `repo/` remains open for a later round if query performance demands it, the
 same way coppermind's PostgreSQL mirrors its notes filesystem.
+
+## Amendment, 2026-09-19: the UI's commit author is now `editor`, not `scott`
+
+The decision text above is left as written. It names every commit as
+"authored by the consumer token name or `scott` for the UI"; the `ui` token
+now resolves to `editor` (`chronicle/api/tokens.py`, ADR 014's amendment), a
+role name rather than a person, so a commit the UI produces from this date
+forward carries that name instead. Nothing else about filesystem-first or
+the internal git history changes. History is mixed: commits and versions
+written before this change still say `scott` and are not rewritten. See
+`docs/notes/lane-f-part-b.md`.

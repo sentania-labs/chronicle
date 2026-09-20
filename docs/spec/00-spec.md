@@ -85,9 +85,10 @@ the image store. An index is derived from the files and rebuildable.
 
 - One per save. `{draft_id, version_no, author, created_at, base_version,
   message}` plus the content at that version, committed to git.
-- `author` is the consumer token name or `scott` for the UI. This is the
+- `author` is the consumer token name or `editor` for the UI. This is the
   calibration signal: ghostwriter reads the diff between its version and
-  Scott's next one.
+  the editor's next one. Records written before this name changed still
+  say `scott` and are not rewritten; see ADR 014's amendment.
 
 **Feedback**
 

@@ -3,9 +3,10 @@
 Every mutating route here calls the same `Store` methods the `/v1` routes
 call, through a `Consumer` built from the ui token the same way a real bearer
 call would be (`require_ui_consumer`), so every version, event, and commit
-this surface produces is authored `scott` exactly as C1 defines. Nothing here
-touches a session cookie or `/admin`; nothing under `/admin` is reachable
-from here either.
+this surface produces is authored `editor` (ADR 014's amendment; records
+written before that change still say `scott`). Nothing here touches a
+session cookie or `/admin`; nothing under `/admin` is reachable from here
+either.
 """
 
 from __future__ import annotations
