@@ -91,6 +91,45 @@ def test_run_queue_entry_is_written_for_a_preview(store: Store) -> None:
     assert entry["enqueued_at"]
 
 
+def test_revision_answer_seqs_orders_a_request_against_what_answers_it(store: Store) -> None:
+    """`Index.revision_answer_seqs`: the seq a request last landed, and the
+    seq the draft was last moved out of the author's hands, per draft id.
+    Both are None for a draft with neither kind of event yet."""
+    draft, _ = store.create_draft("ghostwriter")
+    store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
+    store.act_on_draft(draft.id, "submit", "ghostwriter", actor_is_ui=False)
+    seqs = store.index.revision_answer_seqs([draft.id])
+    request_seq, answered_seq = seqs[draft.id]
+    assert request_seq is None
+    assert answered_seq is not None
+
+    store.act_on_draft(
+        draft.id, "request_revision", "editor", actor_is_ui=True, feedback="tighten it"
+    )
+    seqs = store.index.revision_answer_seqs([draft.id])
+    request_seq, answered_seq_after_request = seqs[draft.id]
+    assert request_seq is not None
+    assert answered_seq_after_request is not None
+    assert request_seq > answered_seq_after_request
+
+    # A resubmit is a newer answer than the request, in the same table.
+    current_version = store.get_draft(draft.id).version_no
+    store.save_draft(draft.id, "ghostwriter", current_version, FRONTMATTER, "revised body")
+    store.act_on_draft(draft.id, "submit", "ghostwriter", actor_is_ui=False)
+    seqs = store.index.revision_answer_seqs([draft.id])
+    request_seq_final, answered_seq_final = seqs[draft.id]
+    assert request_seq_final == request_seq
+    assert answered_seq_final is not None and answered_seq_final > request_seq_final
+
+    # A draft that was never sent back or submitted has neither seq, even
+    # though it does have events (creation) of its own.
+    other, _ = store.create_draft("ghostwriter")
+    assert store.index.revision_answer_seqs([other.id]) == {other.id: (None, None)}
+
+    # A draft id with no events at all is absent from the result.
+    assert store.index.revision_answer_seqs(["no-such-draft"]) == {}
+
+
 def test_reindex_rebuilds_every_row_from_the_files(store: Store, data_dir: Path) -> None:
     ids = seed(store)
     store.start_run(ids["run"], "test-builder", "0.164.0", toolchain_drift=False)

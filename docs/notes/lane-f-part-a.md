@@ -26,38 +26,39 @@ so a save or action swaps it like the pill.
 
 ### How the came-back-from-review signal survives a preview (#37)
 
-The status was the only carrier, so a preview's staged `revise` erased it. It
-is now read from the feedback log, which a revise never touches
-(`ui_status.came_back_from_review`): the draft came back if its status is
+The status was the only carrier, so a preview's staged `revise` erased it.
+
+**Superseded by the second fix round (2026-09-20, see
+`docs/notes/lane-f-part-b.md`).** The two write-ups below (the original, and
+the first fix round's feedback-log patch) are kept for history but no longer
+describe the code. `ui_status.came_back_from_review` now reads event order,
+not the feedback log, and both known gaps recorded here are closed: the
+badge is exact for `previewed` (a fresh, unanswered preview shows it; a
+previewed draft that already went through a resubmit does not), and a
+published record no longer forces the badge off, because the events table
+orders an old request against a later submit or publish exactly.
+
+Original write-up, now historical: it is now read from the feedback log,
+which a revise never touches: the draft came back if its status is
 `revision_requested`, or if it is `drafting` and the newest review verdict in
 its feedback log (`request_revision` or `reject`) is `request_revision`. A
 later `reject` settles it too (reject then restore does not show it). The warn
 tone moved from the status badge to this detail badge. The board reads each
 row's feedback log (`_board_row`); nothing is stored and no record changes.
 
-**Updated in the fix round (2026-09-19, see `docs/notes/lane-f-part-b.md`):**
-this original write-up said the badge also fired for `previewed`, on the same
-"newest verdict" read. That was wrong: `previewed` is reachable both straight
-from a fresh `revise` (still unanswered, the case this was meant to catch)
-and from a full resubmit round trip (`revise`, `preview`, `submit` back to
-`in_review`, a further preview success lands back on `previewed`) once the
-author has already answered the request, and `submit`/`approve` write no
-feedback entry, so the log cannot order the two. The reviewer caught this
-live: request_revision, preview, submit, preview success still showed the
-badge. The fix stops the badge firing for `previewed` at all, so a draft that
-is previewed once, straight out of `revision_requested`, and never
-resubmitted, now loses the badge as soon as that first preview succeeds,
-before the author submits it again. That known gap is accepted; fixing it
-properly needs the store to order a resubmit against a request, which is out
-of this lane's files.
-
-Known limit, unchanged by the fix round: a draft with a `published` record
-that is back in `drafting` never shows the badge from the log, because the
-log cannot order an old request against a publish (no timestamp for the
-publish is stored, and submit and approve leave no feedback entry). It shows
-only while the status is `revision_requested`. A publish, revise, sent-back
-post loses the badge. Fixing that needs a per-draft event lookup or a
-recorded submit, both in `store.py`.
+First fix round (2026-09-19), also now historical: this original write-up
+said the badge also fired for `previewed`, on the same "newest verdict"
+read. That was wrong: `previewed` is reachable both straight from a fresh
+`revise` (still unanswered, the case this was meant to catch) and from a
+full resubmit round trip (`revise`, `preview`, `submit` back to `in_review`,
+a further preview success lands back on `previewed`) once the author has
+already answered the request, and `submit`/`approve` write no feedback
+entry, so the log cannot order the two. The reviewer caught this live:
+request_revision, preview, submit, preview success still showed the badge.
+That round's fix stopped the badge firing for `previewed` at all, accepting
+the loss of #37's own case one step early, and recorded a matching known
+limit for a draft with a `published` record stuck in `drafting`. The second
+fix round closes both instead of accepting them; see part-b for how.
 
 ### The filter
 

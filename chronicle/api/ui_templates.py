@@ -23,7 +23,6 @@ from .ui_actions import DISABLED, Offer, offers_for
 from .ui_chrome import badge
 from .ui_status import (
     Detail,
-    came_back_from_review,
     filter_options,
     parse_status_filter,
     status_details,
@@ -765,6 +764,7 @@ def editor_page(
     preview_url: str | None,
     *,
     banner: bool,
+    came_back: bool = False,
     has_preview: bool = False,
     publish_pr_open: bool = False,
     publish_run_active: bool = False,
@@ -789,11 +789,7 @@ def editor_page(
     )
     details = status_details(
         draft["status"],
-        came_back=came_back_from_review(
-            draft["status"],
-            [entry["action"] for entry in feedback],
-            published=bool(draft.get("published")),
-        ),
+        came_back=came_back,
         has_preview=has_preview,
         publish_run_active=publish_run_active,
         publish_pr_open=publish_pr_open,

@@ -214,3 +214,71 @@ the CRLF-stored-base rewrite needs normalisation in `store.py` (finding C),
 and the token-name collision needs a reserved-name policy in
 `chronicle/api/tokens.py` (finding B's nit). Neither is in this lane's file
 list; both are left for whichever lane owns those files next.
+
+## Second fix round (2026-09-20): the previewed badge, closed exactly
+
+Finding A's fix round accepted a known gap rather than closing #37 for real:
+a draft previewed straight out of `revision_requested`, never resubmitted,
+lost the badge one step earlier than before, because the feedback log has
+no entry for `submit` or `approve` and so cannot order a resubmit against an
+old request. `models.py`'s `Event` (`draft_id`, `from_status`, `to_status`,
+`seq`, `ts`) can: `store._append_event` writes one for every status change,
+`submit` and `approve` included, so the event stream orders a resubmit
+against a request exactly where the feedback log could not.
+
+- **What changed.** `chronicle/api/index.py` gets one new read-only method,
+  `Index.revision_answer_seqs(draft_ids)`: for each draft id, the newest
+  event seq with `to_status == "revision_requested"`, and the newest event
+  seq with `to_status` in `("in_review", "approved", "published",
+  "rejected", "unpublished")`, meaning the draft was moved back out of the
+  author's hands. One SQL query, `GROUP BY` the JSON `draft_id` field,
+  covering every id the caller asks for at once. Nothing else in
+  `index.py` changed: no schema, no new table, no write path, so the
+  other lane touching `store.py` cannot conflict with this file.
+  `ui_status.came_back_from_review` now takes `request_seq` and
+  `answered_seq` instead of a feedback-action list: `revision_requested` is
+  still true unconditionally (reaching that status this round always is the
+  fact), `drafting` and `previewed` are true exactly when `request_seq` is
+  newer than `answered_seq` (or there is no answer yet), and every other
+  status is false without looking at either seq. `routes/ui.py` computes
+  the seqs (through `services.store.index`, never touching `store.py`) and
+  passes the resulting bool into both `_board_row` and the editor page;
+  `ui_templates.py`'s `editor_page` now takes `came_back` as a plain
+  argument instead of computing it itself, so there is exactly one place
+  that reads the event stream for this fact, not two.
+- **Both required scenarios, and all the old ones.** request_revision,
+  revise, preview succeeds (status `previewed`, never resubmitted): the
+  request event outranks nothing, badge shows. Same start, then resubmit
+  (to `in_review`) and preview succeeds again (status `previewed` a second
+  time): the resubmit's event is newer than the request's, badge does not
+  show, even though the status is identical to the first case. Both are
+  covered by name in `tests/test_ui_status.py`
+  (`test_came_back_shows_once_previewed_straight_out_of_revision_requested`,
+  `test_came_back_does_not_show_after_a_full_resubmit_round_trip`), driven
+  through the real routes and a real `finish_run`, not `make_draft`'s
+  status override. `revision_requested` showing, `drafting` after a revise
+  showing, and a reject settling it are unchanged (the existing tests for
+  those still pass); a resubmit to plain `in_review` was already false
+  because that status is not one of the three this check even looks at.
+- **The published-record gap is closed too, not just reported.** The first
+  fix round's note said this needed a per-draft event lookup living in
+  `store.py`. It does not: `Index.revision_answer_seqs` reads the events
+  `store.py` already writes, from `index.py`, which this lane does own.
+  A request that predates a publish is now ordered against it exactly (the
+  submit that had to happen before that publish is always the older event),
+  so the `published` parameter is gone from `came_back_from_review`
+  entirely rather than kept as a forced-False special case.
+- **Cost on a board page.** One call to `revision_answer_seqs` per page
+  load in `drafts_board`, covering every active draft plus the visible
+  archive page's ids in a single query, not one query per card. The query
+  itself is a full scan of the `events` table (there is no index on a JSON
+  field, and adding one would be a schema change this lane was told to
+  avoid), but it is one scan for the whole page, not a scan repeated per
+  row. The editor's single-draft page makes the same call for just its one
+  id, which is the "one indexed query per row" shape for a page with
+  exactly one row.
+- **The docstring.** `ui_status.came_back_from_review`'s docstring is
+  rewritten to describe the event-ordering check as it now stands; the
+  parts about `previewed` never claiming the fact, and a published record
+  being unsettleable, are deleted rather than layered under new text, since
+  neither is true of the code anymore.

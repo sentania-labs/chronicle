@@ -90,32 +90,35 @@ def test_the_facts_the_finer_statuses_carried_are_detail() -> None:
     assert status_details("published", unpublish_pr_open=True) == [Detail("Unpublish PR open")]
 
 
-def test_came_back_is_read_from_the_log_once_the_status_has_moved_on() -> None:
-    assert came_back_from_review("revision_requested", [])
-    # A save moved it to drafting: the request stands.
-    assert came_back_from_review("drafting", ["request_revision"])
-    assert not came_back_from_review("drafting", [])
-    assert not came_back_from_review("drafting", ["material", "publish_failed"])
-    # A later rejection is the newest verdict, so the request is settled.
-    assert not came_back_from_review("drafting", ["request_revision", "reject"])
-    assert came_back_from_review("drafting", ["reject", "request_revision"])
-    # In review is a status that already says so, and published/rejected are done.
+def test_came_back_is_read_from_event_order_not_the_status_alone() -> None:
+    # revision_requested is the fact directly, regardless of the seqs.
+    assert came_back_from_review("revision_requested", request_seq=None, answered_seq=None)
+    assert came_back_from_review("revision_requested", request_seq=2, answered_seq=5)
+    # request_seq newer than answered_seq (or no answer at all): open.
+    assert came_back_from_review("drafting", request_seq=5, answered_seq=None)
+    assert came_back_from_review("previewed", request_seq=5, answered_seq=2)
+    # No request at all: never open.
+    assert not came_back_from_review("drafting", request_seq=None, answered_seq=None)
+    assert not came_back_from_review("drafting", request_seq=None, answered_seq=2)
+    # A later answer (submit, approve, publish, reject or unpublish) settles it.
+    assert not came_back_from_review("drafting", request_seq=2, answered_seq=5)
+    assert not came_back_from_review("previewed", request_seq=2, answered_seq=5)
+    # Only these three statuses can carry an open request; everything else is
+    # False without even looking at the seqs.
     for status in ("in_review", "approved", "published", "rejected", "unpublished"):
-        assert not came_back_from_review(status, ["request_revision"])
-    # previewed never claims the fact: it cannot be told apart from a resubmit
-    # that has already answered the request (see the docstring).
-    assert not came_back_from_review("previewed", ["request_revision"])
-    # A draft with a published record cannot be ordered against its request.
-    assert not came_back_from_review("drafting", ["request_revision"], published=True)
-    assert came_back_from_review("revision_requested", [], published=True)
+        assert not came_back_from_review(status, request_seq=5, answered_seq=None)
 
 
 def test_came_back_does_not_reappear_after_a_resubmit_and_preview() -> None:
-    # The reviewer's scenario: request_revision, then a preview (drafting),
-    # then a resubmit (in_review), then a further preview success lands back
-    # on previewed. submit and approve write no feedback entry, so the log
-    # still ends on request_revision even though the request was answered.
-    assert not came_back_from_review("previewed", ["request_revision"])
+    # The reviewer's scenario: request_revision (seq 2), then a preview
+    # (drafting), then a resubmit to in_review (seq 4), then a further
+    # preview success lands back on previewed. The resubmit is the newer
+    # event, so the request is answered even though the status is previewed
+    # again, exactly as it was on the first pass through revision_requested.
+    assert not came_back_from_review("previewed", request_seq=2, answered_seq=4)
+    # Straight out of revision_requested with no resubmit yet, previewed does
+    # still show it: this is the case #37 was closed for.
+    assert came_back_from_review("previewed", request_seq=5, answered_seq=2)
 
 
 def test_board_shows_the_four_word_status_with_the_detail_beside_it(
@@ -165,6 +168,63 @@ def test_a_preview_does_not_erase_that_a_reviewer_sent_it_back(
     board = client.get("/content/drafts").text
     assert "Came back from review" not in board
     assert ">In review</span>" in board
+
+
+def _finish_queued_preview(services: Services, draft_id: str) -> None:
+    store = services.store
+    draft = store.get_draft(draft_id)
+    run = store.last_run(draft_id, kind="preview")
+    assert run is not None
+    store.start_run(run.id, "builder-1", "0.164.0", False, built_version=draft.version_no)
+    store.finish_run(run.id, "builder-1", True, {"preview_url": f"/preview/{draft.slug}/"})
+
+
+def test_came_back_shows_once_previewed_straight_out_of_revision_requested(
+    client: TestClient, services: Services
+) -> None:
+    """The event-ordering fix, first half: request revision, revise (via
+    Preview), and a successful build lands the draft on `previewed` with no
+    resubmit yet. The request is still open, so the badge must show."""
+    draft_id = make_draft(services, "in_review", title="Reviewed")
+    client.post(
+        f"/content/drafts/{draft_id}/actions/request_revision", data={"feedback": "tighten it"}
+    )
+    client.post(f"/content/drafts/{draft_id}/actions/preview")
+    _finish_queued_preview(services, draft_id)
+    assert services.store.get_draft(draft_id).status == "previewed"
+
+    board = client.get("/content/drafts").text
+    assert ">Came back from review</span>" in board
+    editor = client.get(f"/content/drafts/{draft_id}").text
+    assert ">Came back from review</span>" in editor
+
+
+def test_came_back_does_not_show_after_a_full_resubmit_round_trip(
+    client: TestClient, services: Services
+) -> None:
+    """The event-ordering fix, second half, and the reviewer's own scenario
+    (part-b, fix round finding A): request revision, revise, preview, a real
+    resubmit back to in_review, then a further preview success lands on
+    `previewed` again. The resubmit answers the request, so the badge must
+    not show even though the status is the same `previewed` as the first case."""
+    draft_id = make_draft(services, "in_review", title="Reviewed")
+    client.post(
+        f"/content/drafts/{draft_id}/actions/request_revision", data={"feedback": "tighten it"}
+    )
+    client.post(f"/content/drafts/{draft_id}/actions/preview")
+    _finish_queued_preview(services, draft_id)
+    assert services.store.get_draft(draft_id).status == "previewed"
+
+    client.post(f"/content/drafts/{draft_id}/actions/submit")
+    assert services.store.get_draft(draft_id).status == "in_review"
+    client.post(f"/content/drafts/{draft_id}/actions/preview")
+    _finish_queued_preview(services, draft_id)
+    assert services.store.get_draft(draft_id).status == "previewed"
+
+    board = client.get("/content/drafts").text
+    assert "Came back from review" not in board
+    editor = client.get(f"/content/drafts/{draft_id}").text
+    assert "Came back from review" not in editor
 
 
 def test_a_rejected_then_restored_draft_did_not_come_back(

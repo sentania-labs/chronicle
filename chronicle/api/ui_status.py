@@ -20,7 +20,6 @@ rather than failing a whole page over one record; the test is the guard.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .models import DRAFT_STATUSES
@@ -126,52 +125,39 @@ PUBLISHING = "Publishing"
 PUBLISH_PR_OPEN = "Publish PR open"
 UNPUBLISH_PR_OPEN = "Unpublish PR open"
 
-# A reviewer's request for changes is a fact about the draft that outlives the
-# status: a preview or a save moves `revision_requested` on to `drafting`, and
-# the request is still unanswered until the author resubmits. These are the
-# feedback actions that settle it either way.
-_VERDICTS = ("request_revision", "reject")
-
 
 def came_back_from_review(
-    status: str, feedback_actions: Iterable[str], *, published: bool = False
+    status: str, *, request_seq: int | None, answered_seq: int | None
 ) -> bool:
     """True while a reviewer's request for changes is still unanswered.
 
-    `revision_requested` is that fact directly. A save moves the draft on to
-    `drafting`, where the status forgets it, so it is read from the feedback
-    log instead: the newest review verdict is a request for changes. A
-    rejection recorded after the request settles it too (`reject` is the
-    newest verdict, so this is false).
+    Read from the event stream (`Index.revision_answer_seqs`), not the
+    feedback log: `request_seq` is the newest event that moved the draft to
+    `revision_requested`, `answered_seq` the newest event that moved it back
+    out of the author's hands (a submit to `in_review`, or review ending in
+    `approved`, `published`, `rejected` or `unpublished`). The request is
+    still open exactly when it happened more recently than any such answer,
+    which is an ordering question the event stream settles exactly: every
+    status change writes one (`store._append_event`), including `submit` and
+    `approve`, which the feedback log never recorded and which is what made
+    the older, log-only version of this check unable to tell a fresh
+    `revise` apart from an answered resubmit once both landed on
+    `previewed`, or tell a stale request apart from one a later publish had
+    already answered. Neither gap needs a special case now: the event
+    ordering resolves both, `previewed` included.
 
-    This deliberately stops at `drafting` and never claims the fact for
-    `previewed`. `drafting` is only ever reached from `revision_requested`,
-    `published` or a restore, so while the status is `drafting` the request
-    genuinely has not been resubmitted. `previewed` is not that clean: a
-    preview taken straight from a fresh `revise` reaches it (still
-    unanswered), but so does a full resubmit round trip (`revise`, `preview`,
-    `submit` back to `in_review`, then a further preview success lands on
-    `previewed` again) once the author has answered the request. `submit`
-    and `approve` write no feedback entry, so nothing in the log orders a
-    resubmit against an earlier request, and `store.py`, which owns that
-    log, is out of reach here. Rather than show a stale badge on an answered
-    draft, the badge no longer fires for `previewed` at all, which means a
-    draft that was previewed once, straight out of `revision_requested`, and
-    never resubmitted, stops showing "Came back from review" as soon as that
-    first preview succeeds, before the author submits it again.
-
-    A draft that has a published record is the one case the log cannot settle
-    either: the request may predate a publish, and nothing in the log orders
-    the two. It is read as answered rather than showing a stale warning on a
-    post that was revised long after; `revision_requested` itself is still
-    shown.
+    `revision_requested` is that fact directly, true regardless of the seqs:
+    reaching that status this round always is the request. `drafting` and
+    `previewed` are where the seqs decide it, since both are reached whether
+    or not a resubmit came in between; every other status is never open.
     """
     if status == "revision_requested":
         return True
-    if status != "drafting" or published:
+    if status not in ("drafting", "previewed"):
         return False
-    verdicts = [action for action in feedback_actions if action in _VERDICTS]
-    return bool(verdicts) and verdicts[-1] == "request_revision"
+    if request_seq is None:
+        return False
+    return answered_seq is None or request_seq > answered_seq
 
 
 @dataclass(frozen=True)

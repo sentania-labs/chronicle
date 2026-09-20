@@ -312,24 +312,27 @@ def draft_new(
 
 
 def _board_row(
-    services: Services, draft: Draft, flags_by_draft: dict[str, list[dict[str, Any]]]
+    services: Services,
+    draft: Draft,
+    flags_by_draft: dict[str, list[dict[str, Any]]],
+    seqs_by_draft: dict[str, tuple[int | None, int | None]],
 ) -> dict[str, Any]:
     store = services.store
     versions = store.list_versions(draft.id)
     last_author = versions[-1].author if versions else "-"
     last_preview = store.last_run(draft.id, kind="preview")
     run_info = {"preview_url": _preview_url(last_preview)} if last_preview else None
+    request_seq, answered_seq = seqs_by_draft.get(draft.id, (None, None))
     return {
         "draft": _dump(draft),
         "last_author": last_author,
         "run_info": run_info,
         "flags": flags_by_draft.get(draft.id, []),
         # A reviewer's request outlives the status that first carried it, so
-        # the board reads it from the feedback log (`ui_status`).
+        # this reads the event stream (`ui_status`, `Index.revision_answer_seqs`)
+        # rather than the draft's current status alone.
         "came_back": came_back_from_review(
-            draft.status,
-            [entry.action for entry in store.list_feedback(draft.id)],
-            published=bool(draft.published),
+            draft.status, request_seq=request_seq, answered_seq=answered_seq
         ),
     }
 
@@ -381,9 +384,14 @@ def drafts_board(
     # only loaded for the visible page: after a digest the archive is hundreds
     # of records and the board should not read every one to show fifty.
     visible = paginate(archive, page)
-    active_rows = [_board_row(services, d, flags_by_draft) for d in active]
+    # One query for every draft id the page will render, not one per card:
+    # `events` carries no index on its JSON fields, so this is a single scan
+    # of the table rather than a scan per row.
+    page_draft_ids = [d.id for d in active] + [d.id for d in visible.items]
+    seqs_by_draft = store.index.revision_answer_seqs(page_draft_ids)
+    active_rows = [_board_row(services, d, flags_by_draft, seqs_by_draft) for d in active]
     archive_pg = Page(
-        items=[_board_row(services, d, flags_by_draft) for d in visible.items],
+        items=[_board_row(services, d, flags_by_draft, seqs_by_draft) for d in visible.items],
         page=visible.page,
         page_size=visible.page_size,
         total=visible.total,
@@ -432,6 +440,12 @@ def _editor_response(
     last_run = store.last_run(draft_id)
     preview_run = store.last_run(draft_id, kind="preview")
     preview_url = _preview_url(preview_run)
+    request_seq, answered_seq = store.index.revision_answer_seqs([draft_id]).get(
+        draft_id, (None, None)
+    )
+    came_back = came_back_from_review(
+        draft.status, request_seq=request_seq, answered_seq=answered_seq
+    )
     html = tpl.editor_page(
         _dump(draft),
         versions,
@@ -439,6 +453,7 @@ def _editor_response(
         _dump(last_run) if last_run else None,
         preview_url,
         banner=banner,
+        came_back=came_back,
         **_offer_state(store, draft, preview_run),
         notice=notice,
         notice_kind=notice_kind,
