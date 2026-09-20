@@ -765,6 +765,63 @@ def test_preview_list_and_rebuild_and_run_log(client: TestClient, services: Serv
     assert rebuild.status_code == 200
 
 
+def _base_run(**overrides: Any) -> dict[str, Any]:
+    run = {
+        "id": "run1",
+        "kind": "publish",
+        "status": "queued",
+        "started_at": None,
+        "finished_at": None,
+        "builder_id": None,
+        "hugo_version": None,
+        "toolchain_drift": False,
+        "result": None,
+    }
+    run.update(overrides)
+    return run
+
+
+def test_run_log_page_shows_queue_timeout_error_class_and_message() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run(
+        status="failed",
+        result={
+            "error_class": "publish_queue_timeout",
+            "message": "the publish run was not picked up within 900 seconds"
+            " (no GitHub target is configured, or the publisher is not running)",
+        },
+    )
+    html = tpl.run_log_page(run, "", banner=False)
+    assert "publish_queue_timeout" in html
+    assert "not picked up within 900 seconds" in html
+
+
+def test_run_log_page_shows_error_class_alone_without_fabricating_a_message() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run(status="failed", result={"error_class": "conversion_failed"})
+    html = tpl.run_log_page(run, "", banner=False)
+    assert "conversion_failed" in html
+    assert "None" not in html
+
+
+def test_run_log_page_does_not_show_a_failure_for_a_successful_run() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run(status="succeeded", result={"preview_url": "/preview/t/"})
+    html = tpl.run_log_page(run, "", banner=False)
+    assert "notice error" not in html
+
+
+def test_run_log_page_renders_a_queued_run_with_no_result() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run()
+    html = tpl.run_log_page(run, "", banner=False)
+    assert "notice error" not in html
+
+
 # --- CSRF and banner ---------------------------------------------------------
 
 

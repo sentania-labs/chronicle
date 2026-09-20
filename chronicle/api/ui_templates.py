@@ -979,11 +979,28 @@ def preview_list_page(rows: list[dict[str, Any]], *, banner: bool) -> str:
 
 
 def run_log_page(run: dict[str, Any], log_text: str, *, banner: bool) -> str:
+    # A queued run has no result at all, and a successful one's result is
+    # whatever the build returned (shape varies by kind); neither is a
+    # failure, so only a result carrying `error_class` gets a notice here.
+    # `error_class` is the safe string this codebase surfaces in place of an
+    # exception's text (see `GitHubApiError`); `message`, when present, is a
+    # fixed, non-leaking string written by the caller (e.g. the queue-timeout
+    # sweep), never raw exception detail, so both are safe to render escaped.
+    result = run.get("result") or {}
+    error_class = result.get("error_class")
+    result_html = ""
+    if error_class:
+        text = str(error_class)
+        message = result.get("message")
+        if message:
+            text = f"{text}: {message}"
+        result_html = ui_chrome.notice(text, "error")
     body = f"""
 <p class="muted">kind: {escape(run["kind"])} | status: {escape(run["status"])} |
 started: {escape(local_time(run.get("started_at")))} | finished: {escape(local_time(run.get("finished_at")))} |
 builder: {escape(run.get("builder_id") or "-")} | hugo: {escape(run.get("hugo_version") or "-")} |
 toolchain drift: {run.get("toolchain_drift")}</p>
+{result_html}
 <pre class="lat-code">{escape(log_text) or "(no log captured yet)"}</pre>
 """
     return page(f"Run {run['id']}", body, banner=banner, active=PREVIEW_TAB)
