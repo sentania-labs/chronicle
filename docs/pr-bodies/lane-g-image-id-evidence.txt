@@ -1,0 +1,170 @@
+Probe, issue 47 (Store.get_image builds a path from an unchecked image id).
+Run 2026-09-19, about 23:31 America/Chicago, against a real uvicorn on 127.0.0.1:8391 (branch
+feat/store-burndown at 31f38b6, before any change), fresh data directory under /tmp/laneg.
+Consumer token redacted; every request otherwise verbatim (curl --path-as-is, so the client does
+not normalise the path). Response headers date/server are dropped; the rest is unedited.
+Convention followed: docs/pr-bodies/lane-g-queue-timeout-evidence.txt.
+The probe script is reproduced in the "after" half's header so both runs are the same requests.
+
+How the path is built: images_dir / id[:2] / f"{id}.json". A file named X.json planted OUTSIDE
+data/images is reachable when id[:2] is ".." and the id itself is one path segment (no slash),
+because "images/../" + "..." + ".json" is data/...json. Ids that carry a slash never reach the
+store: the router's {image_id} parameter does not match "/" (literal or after percent-decoding).
+
+################################################################
+# BEFORE THE FIX
+################################################################
+
+== planted files (outside data/images):
+/tmp/laneg/probe.7RY7Ue/planted-image.json  (valid Image-shaped record)
+/tmp/laneg/probe.7RY7Ue/secret.json         (not an Image record)
+/tmp/laneg/probe.7RY7Ue/a/data/...json      (valid Image-shaped record, inside data/ but outside data/images/)
+== api up on 127.0.0.1:8391: {"service":"chronicle-api","status":"ok","version":"dev"}
+== consumer token issued (redacted)
+
+-- control: an id that does not exist
+> curl --path-as-is -i -H 'Authorization: Bearer <redacted>' http://127.0.0.1:8391/v1/images/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+HTTP/1.1 404 Not Found
+content-length: 113
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"error":"image_not_found","message":"no image aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+
+-- literal ../ (two levels, reaches $ROOT/planted-image.json)
+> curl --path-as-is -i -H 'Authorization: Bearer <redacted>' http://127.0.0.1:8391/v1/images/../../planted-image
+HTTP/1.1 404 Not Found
+content-length: 43
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"error":"not_found","message":"Not Found"}
+
+-- literal ../ x3
+> curl --path-as-is -i -H 'Authorization: Bearer <redacted>' http://127.0.0.1:8391/v1/images/../../../planted-image
+HTTP/1.1 404 Not Found
+content-length: 43
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"error":"not_found","message":"Not Found"}
+
+-- percent-encoded %2f
+> curl --path-as-is -i -H 'Authorization: Bearer <redacted>' http://127.0.0.1:8391/v1/images/..%2f..%2fplanted-image
+HTTP/1.1 404 Not Found
+content-length: 43
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"error":"not_found","message":"Not Found"}
+
+-- percent-encoded %2F, non-image target
+> curl --path-as-is -i -H 'Authorization: Bearer <redacted>' http://127.0.0.1:8391/v1/images/..%2F..%2Fsecret
+HTTP/1.1 404 Not Found
+content-length: 43
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"error":"not_found","message":"Not Found"}
+
+-- double-encoded %252f
+> curl --path-as-is -i -H 'Authorization: Bearer <redacted>' http://127.0.0.1:8391/v1/images/..%252f..%252fplanted-image
+HTTP/1.1 404 Not Found
+content-length: 72
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"error":"image_not_found","message":"no image ..%2f..%2fplanted-image"}
+
+-- encoded dots %2e%2e%2f
+> curl --path-as-is -i -H 'Authorization: Bearer <redacted>' http://127.0.0.1:8391/v1/images/%2e%2e%2f%2e%2e%2fplanted-image
+HTTP/1.1 404 Not Found
+content-length: 43
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"error":"not_found","message":"Not Found"}
+
+-- encoded dots, no slash: %2e%2e
+> curl --path-as-is -i -H 'Authorization: Bearer <redacted>' http://127.0.0.1:8391/v1/images/%2e%2e
+HTTP/1.1 200 OK
+content-length: 88
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"image_id":"DOTDOTDOT","sha256":"0","filename":"dots.png","bytes":1,"mime":"image/png"}
+
+-- bare ..
+> curl --path-as-is -i -H 'Authorization: Bearer <redacted>' http://127.0.0.1:8391/v1/images/..
+HTTP/1.1 200 OK
+content-length: 88
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"image_id":"DOTDOTDOT","sha256":"0","filename":"dots.png","bytes":1,"mime":"image/png"}
+
+-- bare .
+> curl --path-as-is -i -H 'Authorization: Bearer <redacted>' http://127.0.0.1:8391/v1/images/.
+HTTP/1.1 404 Not Found
+content-length: 50
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"error":"image_not_found","message":"no image ."}
+
+-- id starting with .. and no slash (..x)
+> curl --path-as-is -i -H 'Authorization: Bearer <redacted>' http://127.0.0.1:8391/v1/images/..x
+HTTP/1.1 404 Not Found
+content-length: 52
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"error":"image_not_found","message":"no image ..x"}
+
+-- backslash ..\..\planted-image
+> curl --path-as-is -i -H 'Authorization: Bearer <redacted>' http://127.0.0.1:8391/v1/images/..%5c..%5cplanted-image
+HTTP/1.1 404 Not Found
+content-length: 70
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"error":"image_not_found","message":"no image ..\\..\\planted-image"}
+
+== other callers that reach get_image with a caller-chosen id
+-- attach route: PUT /v1/drafts/{id}/images/{image_id}, bare .. as the id
+draft e4eb23aaf7854181afb54839228edcb8
+> curl --path-as-is -i -X PUT -d '{"role":"inline"}' .../v1/drafts/$DRAFT/images/..
+HTTP/1.1 200 OK
+content-length: 384
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"id":"e4eb23aaf7854181afb54839228edcb8","created_at":"2026-09-19T23:31:13-05:00","updated_at":"2026-09-19T23:31:13-05:00","slug":null,"image_dir":null,"title":"","frontmatter":{},"body":"","status":"drafting","version_no":0,"source_submission":null,"source_post":null,"images":[{"image_id":"..","filename":"dots.png","role":"inline","source_ref":null}],"claim":null,"published":null}
+> curl --path-as-is -i -X PUT -d '{"role":"inline"}' .../v1/drafts/$DRAFT/images/%2e%2e
+HTTP/1.1 200 OK
+content-length: 384
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"id":"e4eb23aaf7854181afb54839228edcb8","created_at":"2026-09-19T23:31:13-05:00","updated_at":"2026-09-19T23:31:13-05:00","slug":null,"image_dir":null,"title":"","frontmatter":{},"body":"","status":"drafting","version_no":0,"source_submission":null,"source_post":null,"images":[{"image_id":"..","filename":"dots.png","role":"inline","source_ref":null}],"claim":null,"published":null}
+> curl --path-as-is -i -X PUT -d '{"role":"inline"}' .../v1/drafts/$DRAFT/images/..%2f..%2fplanted-image
+HTTP/1.1 404 Not Found
+content-length: 43
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"error":"not_found","message":"Not Found"}
+-- detach route: DELETE .../images/.. (never reaches get_image: membership check on the draft's own list)
+HTTP/1.1 200 OK
+content-length: 311
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"id":"e4eb23aaf7854181afb54839228edcb8","created_at":"2026-09-19T23:31:13-05:00","updated_at":"2026-09-19T23:31:13-05:00","slug":null,"image_dir":null,"title":"","frontmatter":{},"body":"","status":"drafting","version_no":0,"source_submission":null,"source_post":null,"images":[],"claim":null,"published":null}
+-- submission create with a crafted image id (already validated by _IMAGE_ID)
+HTTP/1.1 422 Unprocessable Content
+content-length: 141
+content-type: application/json
+content-security-policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+
+{"error":"image_not_found","message":"image ../../planted-image is not in the image store; upload it first","image_id":"../../planted-image"}
