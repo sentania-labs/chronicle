@@ -435,3 +435,49 @@ def test_publish_gate_reads_durable_files_when_the_index_lacks_the_run(store: St
         json.dumps({"run_id": run.id, "draft_id": draft.id, "kind": "publish"})
     )
     assert store.active_publish_run(draft.id) is None
+
+
+def _published_draft(store: Store, monkeypatch: pytest.MonkeyPatch) -> tuple:
+    """A draft that has been published and merged, so `unpublish` is offered."""
+    monkeypatch.setattr(watcher, "refresh_from_target", lambda *a, **k: None)
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    ops.merge(watch.pr_number)
+    watcher.check_one(store, target, watch)
+    assert store.get_draft(draft.id).status == "published"
+    return draft, target, ops
+
+
+def test_save_between_unpublish_and_its_run_is_refused(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue 43: `unpublish` queues a run from `published`. Before the fix a save
+    in that window was accepted, moved the draft to `drafting`, and the unpublish
+    run then found a draft that was no longer published."""
+    draft, target, ops = _published_draft(store, monkeypatch)
+    _, unpublish_run = store.act_on_draft(draft.id, "unpublish", "scott", True)
+    assert unpublish_run is not None and unpublish_run.kind == "unpublish"
+    version = store.get_draft(draft.id).version_no
+
+    with pytest.raises(ApiError) as excinfo:
+        store.save_draft(draft.id, "ghostwriter", version, {"title": "My First Post"}, "NEW\n")
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.code == "publish_run_in_progress"
+    assert excinfo.value.extra["run_id"] == unpublish_run.id
+    assert "unpublish" in str(excinfo.value)
+    assert "approved" not in str(excinfo.value)
+    after = store.get_draft(draft.id)
+    assert after.version_no == version
+    assert after.status == "published"
+
+    # Attach and detach are refused for the same reason.
+    image, _ = store.put_image(png_bytes(), "late.png")
+    with pytest.raises(ApiError) as attached:
+        store.attach_image(draft.id, image.image_id, "inline", "ghostwriter")
+    assert attached.value.code == "publish_run_in_progress"
+
+    publisher.run_one(store, target, unpublish_run)
+    assert store.get_run(unpublish_run.id).status == "succeeded"
