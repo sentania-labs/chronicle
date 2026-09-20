@@ -1,0 +1,119 @@
+Live check, issue 44 (a queued publish run must time out) and the issue 43 gate.
+Run 2026-09-19, about 23:13 America/Chicago, against a real uvicorn on 127.0.0.1:8391,
+fresh data directory, no GitHub App, no test token. Demonstration values only:
+CHRONICLE_PUBLISH_POLL_SECONDS=1, CHRONICLE_PUBLISH_QUEUE_TIMEOUT_SECONDS=15
+(the shipped default is 900). Consumer tokens are redacted; the requests are otherwise verbatim.
+The unpublish half is covered by tests/test_publisher.py: an unpublish needs a merged
+publish first, which needs a real GitHub target this environment does not have.
+Convention followed: docs/pr-bodies/c6-image-diff-evidence.txt (plain text evidence).
+
+== 1. fresh data directory, no GitHub App, no test token
+CHRONICLE_DATA_DIR=/tmp/laneg/data.QczLEt (empty)
+CHRONICLE_PUBLISH_POLL_SECONDS=1 CHRONICLE_PUBLISH_QUEUE_TIMEOUT_SECONDS=15 (demonstration values; default timeout is 900)
+
+== 2. issue a consumer token (printed once; redacted here)
+chronicle token issue laneg -> <redacted, 43 chars>
+
+== 3. start the api on 127.0.0.1:8391
+23:13:33 CDT GET /healthz -> {"service":"chronicle-api","status":"ok","version":"dev"}
+23:13:33 CDT GET /readyz  -> {"ready":true,"checks":[{"name":"data_dir","ok":true,"detail":"/tmp/laneg/data.QczLEt"},{"name":"git","ok":true,"detail":""},{"name":"index","ok":true,"detail":"schema version 2"},{"name":"github_app","ok":true,"detail":"not configured"}]}
+(approve is reserved for the ui consumer, so its token is read from state/ui_token.txt; redacted below)
+
+== 4. create a draft, save it, submit, approve: a publish run is queued
+
+-- 23:13:33 CDT  [create draft]
+> POST /v1/drafts
+> Authorization: Bearer <laneg token>
+> {}
+< HTTP 201
+< {"id":"d66b422ba1ff41cf82583bcd7178e1a3","created_at":"2026-09-19T23:13:33-05:00","updated_at":"2026-09-19T23:13:33-05:00","slug":null,"image_dir":null,"title":"","frontmatter":{},"body":"","status":"drafting","version_no":0,"source_submission":null,"source_post":null,"images":[],"claim":null,"published":null,"warnings":[]}
+
+-- 23:13:33 CDT  [save v1]
+> PUT /v1/drafts/d66b422ba1ff41cf82583bcd7178e1a3
+> Authorization: Bearer <laneg token>
+> {"base_version":0,"frontmatter":{"title":"Lane G timeout check"},"body":"Hello from the live check.\n"}
+< HTTP 200
+< {"id":"d66b422ba1ff41cf82583bcd7178e1a3","created_at":"2026-09-19T23:13:33-05:00","updated_at":"2026-09-19T23:13:33-05:00","slug":null,"image_dir":null,"title":"Lane G timeout check","frontmatter":{"title":"Lane G timeout check"},"body":"Hello from the live check.\n","status":"drafting","version_no":1,"source_submission":null,"source_post":null,"images":[],"claim":null,"published":null}
+
+-- 23:13:34 CDT  [submit]
+> POST /v1/drafts/d66b422ba1ff41cf82583bcd7178e1a3/actions/submit
+> Authorization: Bearer <laneg token>
+< HTTP 200
+< {"draft":{"id":"d66b422ba1ff41cf82583bcd7178e1a3","created_at":"2026-09-19T23:13:33-05:00","updated_at":"2026-09-19T23:13:34-05:00","slug":null,"image_dir":null,"title":"Lane G timeout check","frontmatter":{"title":"Lane G timeout check"},"body":"Hello from the live check.\n","status":"in_review","version_no":1,"source_submission":null,"source_post":null,"images":[],"claim":null,"published":null},"run_id":null}
+
+-- 23:13:34 CDT  [approve]
+> POST /v1/drafts/d66b422ba1ff41cf82583bcd7178e1a3/actions/approve
+> Authorization: Bearer <ui token>
+< HTTP 200
+< {"draft":{"id":"d66b422ba1ff41cf82583bcd7178e1a3","created_at":"2026-09-19T23:13:33-05:00","updated_at":"2026-09-19T23:13:34-05:00","slug":"lane-g-timeout-check","image_dir":"lane-g-timeout-check","title":"Lane G timeout check","frontmatter":{"title":"Lane G timeout check"},"body":"Hello from the live check.\n","status":"approved","version_no":1,"source_submission":null,"source_post":null,"images":[],"claim":null,"published":null},"run_id":"93cad0f1c3894382b757f685282e0dbe"}
+publish run id: 93cad0f1c3894382b757f685282e0dbe
+
+-- 23:13:34 CDT  [run record]
+> GET /v1/runs/93cad0f1c3894382b757f685282e0dbe
+> Authorization: Bearer <laneg token>
+< HTTP 200
+< {"id":"93cad0f1c3894382b757f685282e0dbe","draft_id":"d66b422ba1ff41cf82583bcd7178e1a3","kind":"publish","status":"queued","created_at":"2026-09-19T23:13:34-05:00","started_at":null,"finished_at":null,"log_path":null,"result":null,"builder_id":null,"hugo_version":null,"toolchain_drift":false,"built_version":null,"approved_version":1}
+
+== 5. the draft is frozen: a save and a re-approve are both refused
+
+-- 23:13:34 CDT  [save while the run is queued]
+> PUT /v1/drafts/d66b422ba1ff41cf82583bcd7178e1a3
+> Authorization: Bearer <laneg token>
+> {"base_version":1,"frontmatter":{"title":"Lane G timeout check"},"body":"An edit that must be refused.\n"}
+< HTTP 409
+< {"error":"publish_run_in_progress","message":"draft d66b422ba1ff41cf82583bcd7178e1a3 was approved at version 1 and its publish run is queued; it cannot be saved until the run has opened its pull request or failed","run_id":"93cad0f1c3894382b757f685282e0dbe","run_kind":"publish","approved_version":1}
+
+-- 23:13:34 CDT  [re-approve while the run is queued]
+> POST /v1/drafts/d66b422ba1ff41cf82583bcd7178e1a3/actions/approve
+> Authorization: Bearer <ui token>
+< HTTP 409
+< {"error":"publish_run_in_progress","message":"draft d66b422ba1ff41cf82583bcd7178e1a3 already has a publish run queued","run_id":"93cad0f1c3894382b757f685282e0dbe"}
+
+== 6. wait out the timeout (15 s here)
+23:13:34 CDT run 93cad0f1c3894382b757f685282e0dbe status=queued
+23:13:36 CDT run 93cad0f1c3894382b757f685282e0dbe status=queued
+23:13:38 CDT run 93cad0f1c3894382b757f685282e0dbe status=queued
+23:13:40 CDT run 93cad0f1c3894382b757f685282e0dbe status=queued
+23:13:42 CDT run 93cad0f1c3894382b757f685282e0dbe status=queued
+23:13:44 CDT run 93cad0f1c3894382b757f685282e0dbe status=queued
+23:13:46 CDT run 93cad0f1c3894382b757f685282e0dbe status=queued
+23:13:48 CDT run 93cad0f1c3894382b757f685282e0dbe status=queued
+23:13:50 CDT run 93cad0f1c3894382b757f685282e0dbe status=failed
+
+-- 23:13:50 CDT  [run record after the timeout]
+> GET /v1/runs/93cad0f1c3894382b757f685282e0dbe
+> Authorization: Bearer <laneg token>
+< HTTP 200
+< {"id":"93cad0f1c3894382b757f685282e0dbe","draft_id":"d66b422ba1ff41cf82583bcd7178e1a3","kind":"publish","status":"failed","created_at":"2026-09-19T23:13:34-05:00","started_at":null,"finished_at":"2026-09-19T23:13:49-05:00","log_path":null,"result":{"error_class":"publish_queue_timeout","message":"the publish run was not picked up within 15 seconds (no GitHub target is configured, or the publisher is not running)"},"builder_id":null,"hugo_version":null,"toolchain_drift":false,"built_version":null,"approved_version":1}
+
+-- 23:13:50 CDT  [draft status]
+> GET /v1/drafts/d66b422ba1ff41cf82583bcd7178e1a3/status
+> Authorization: Bearer <laneg token>
+< HTTP 200
+< {"status":"in_review","slug":"lane-g-timeout-check","last_run":{"id":"93cad0f1c3894382b757f685282e0dbe","draft_id":"d66b422ba1ff41cf82583bcd7178e1a3","kind":"publish","status":"failed","created_at":"2026-09-19T23:13:34-05:00","started_at":null,"finished_at":"2026-09-19T23:13:49-05:00","log_path":null,"result":{"error_class":"publish_queue_timeout","message":"the publish run was not picked up within 15 seconds (no GitHub target is configured, or the publisher is not running)"},"builder_id":null,"hugo_version":null,"toolchain_drift":false,"built_version":null,"approved_version":1},"preview_url":null,"branch":null,"pr_url":null}
+
+== 7. the author can read the reason, and act
+-- the editor page's feedback panel (GET /content/drafts/d66b422ba1ff41cf82583bcd7178e1a3), text lines mentioning the failure:
+< Publish failed (publish_queue_timeout): the publish run was not picked up within 15 seconds (no GitHub target is configured, or the publisher is not running); re-approve to retry.
+-- the run page (GET /runs/93cad0f1c3894382b757f685282e0dbe), lines mentioning the reason:
+< matches: 0
+   (0 means the run page does not render the run result; the feedback entry above is the author-visible reason)
+
+-- 23:13:50 CDT  [same save, now accepted]
+> PUT /v1/drafts/d66b422ba1ff41cf82583bcd7178e1a3
+> Authorization: Bearer <laneg token>
+> {"base_version":1,"frontmatter":{"title":"Lane G timeout check"},"body":"An edit that is now accepted.\n"}
+< HTTP 200
+< {"id":"d66b422ba1ff41cf82583bcd7178e1a3","created_at":"2026-09-19T23:13:33-05:00","updated_at":"2026-09-19T23:13:50-05:00","slug":"lane-g-timeout-check","image_dir":"lane-g-timeout-check","title":"Lane G timeout check","frontmatter":{"title":"Lane G timeout check"},"body":"An edit that is now accepted.\n","status":"in_review","version_no":2,"source_submission":null,"source_post":null,"images":[],"claim":null,"published":null}
+
+-- 23:13:50 CDT  [re-approve now accepted]
+> POST /v1/drafts/d66b422ba1ff41cf82583bcd7178e1a3/actions/approve
+> Authorization: Bearer <ui token>
+< HTTP 200
+< {"draft":{"id":"d66b422ba1ff41cf82583bcd7178e1a3","created_at":"2026-09-19T23:13:33-05:00","updated_at":"2026-09-19T23:13:50-05:00","slug":"lane-g-timeout-check","image_dir":"lane-g-timeout-check","title":"Lane G timeout check","frontmatter":{"title":"Lane G timeout check"},"body":"An edit that is now accepted.\n","status":"approved","version_no":2,"source_submission":null,"source_post":null,"images":[],"claim":null,"published":null},"run_id":"6e22766b324343a8a0a336f004aa447f"}
+
+-- api log (warnings and above):
+run 93cad0f1c3894382b757f685282e0dbe: still queued after 15 seconds, failing it
+run 93cad0f1c3894382b757f685282e0dbe: still queued after 15 seconds, failing it
+
+== 8. stop the api
