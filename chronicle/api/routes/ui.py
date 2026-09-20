@@ -497,7 +497,7 @@ def _build_frontmatter(
         # write `pinned_slug` into frontmatter here: a `github`-authored
         # save (`Store.record_github_version`) can legitimately carry a
         # different `slug` key than `draft.slug`, and overwriting it would
-        # silently revert content Scott wrote on GitHub, which is exactly
+        # silently revert content the editor wrote on GitHub, which is exactly
         # what reconciliation exists to flag, not correct automatically.
         if existing.get("url"):
             frontmatter["url"] = existing["url"]

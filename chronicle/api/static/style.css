@@ -159,6 +159,9 @@ details#published > summary { cursor: pointer; font-weight: 600; padding: var(--
   gap: var(--space-6); background: var(--bg); border-bottom: 1px solid var(--line);
   padding: var(--space-4) var(--space-9); margin: 0 calc(-1 * var(--space-9)) var(--space-6);
 }
+/* The detail badges sit beside the status badge as flex items of the bar, and an
+   empty region takes no gap. */
+#status-detail { display: contents; }
 .save-state, .upload-state { font-size: 12px; color: var(--ink-muted); }
 .save-state[data-state="dirty"],
 .save-state[data-state="saving"],

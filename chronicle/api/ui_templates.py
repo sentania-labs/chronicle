@@ -45,8 +45,8 @@ EDITOR_SCRIPTS = (
     '<script src="/static/editor.js"></script>'
 )
 
-# User-facing label only: "Drafts" reads "Posts" everywhere Scott sees it
-# (ADR 017), since he intends to hold other content types here too and most
+# User-facing label only: "Drafts" reads "Posts" everywhere the editor sees it
+# (ADR 017), since the editor intends to hold other content types here too and most
 # working records now start life already `published` by digest rather than
 # hand-drafted. The route path, `/content/drafts`, is unchanged this round;
 # see ADR 017 for why a storage/route rename is deferred.
@@ -254,7 +254,7 @@ def submission_detail_page(
         # A submission's material url is unvalidated input (chronicle.api.
         # models.Material.url is a bare str); escape() alone leaves the
         # scheme untouched, so a `javascript:` value would still render as
-        # a clickable link that runs on Scott's click (found in a round C5
+        # a clickable link that runs on the editor's click (found in a round C5
         # review). Only ever emit an anchor for a scheme a browser will
         # navigate to, not execute.
         if url.lower().startswith(("http://", "https://")):
