@@ -171,6 +171,55 @@ uses it:
   (`convert.post_filename`). Hugo does not govern content filenames at
   all; there is no config key that could replace this.
 
+### Amended 2026-09-19 (issue 21): a new post follows the site's own section directory
+
+`convert.post_path` used to build a brand-new draft's path from the
+hardcoded `content/posts`, even after `contentdir` was wired into the
+matching of an imported record's path (issue 18). On a site whose archive
+lives elsewhere a post authored in Chronicle landed outside the site's
+content tree: a silent orphan file, not a duplicate.
+
+Building that path from `contentdir` is not a substitution, because the two
+are different kinds of value. `hugo config` reports the content ROOT
+(`contentdir: "content"`); `digest.FALLBACK_CONTENT_DIR` is the whole
+pre-ADR-017 convention (`content/posts`). A root is a prefix to match; a
+new post needs a directory to create a file in, and the section under the
+root is not something Hugo's config states. `params.mainsections` is not it
+either: it names page *types* (Scott's site says `post` for posts that live
+in `content/posts`, and the test fixture keeps `mainsections = ["post"]`
+over `content2/blog/`), so `content/<mainsections[0]>` would move every new
+post on the real blog into a `content/post/` nobody has.
+
+So the section is observed, the same way the filename and `url` patterns
+are: after each walk, `digest.with_observed_post_dir` records the first-level
+directory under `contentdir` that holds the most posts (ties by name, posts
+at the content root count for the root itself) as `conventions.postdir` in
+the same toolchain state, and `digest.read_new_post_dir_from_state` is what
+publish, preview and the cli dry run read. In order:
+
+1. No state, unparseable state, a `fallback` read, or a `contentdir` that is
+   not a safe relative path: `content/posts`, exactly as before. A Chronicle
+   that has never read a site's conventions publishes where it always did.
+   (A fallback read is never annotated: its `contentdir` is already the
+   whole path, so a `posts` segment must not be appended to it.)
+2. A real read with an observed `postdir` inside `contentdir`: that section.
+   On Scott's site this is `content/posts`, so nothing observable changes
+   for him; on a site with `content2/blog` it is `content2/blog`.
+3. A real read with no observed post (an empty site, or state written before
+   `postdir` existed, until the next digest): `<contentdir>/posts`, or
+   `contentdir` itself when it already ends in `posts`.
+
+`convert.post_path` takes the result as `new_post_dir` and still refuses
+anything that is not a safe relative directory (the state file is data from
+a digest of main). An imported record keeps its own path as before. The
+admin status page shows the observed directory beside `contentdir`.
+
+Left as convention: the section name `posts` in case 3, and the
+`<YYYY-MM-DD>-<slug>.md` filename. Not addressed here: on a site where
+`mainsections` names types, a new post needs a matching frontmatter `type`
+to be counted as archive content by a later digest; Chronicle does not add
+one.
+
 ### Failure mode: fall back, never fail the digest, and say so where it's seen
 
 If the `hugo config` call fails (non-zero exit, timeout, missing binary),
