@@ -714,6 +714,34 @@ def _image_upload_form(draft_id: str, images: list[dict[str, Any]]) -> str:
 </form>"""
 
 
+def _save_control(publish_run_active: bool, publish_pr_open: bool) -> str:
+    """The Save button, or the reason it is not offered. `Store.save_draft`
+    refuses while a publish run is queued or building and while a publish PR is
+    open (both 409), so the button is disabled with the reason beside it rather
+    than rendered to fail on click. It is a `data-refresh` region so a swap after
+    an upload or a save keeps it true; `data-locked` carries the reason for
+    `editor.js`, which must refuse Ctrl+S the same way."""
+    reason = (
+        "A publish run is in progress, so saving is refused until it finishes."
+        if publish_run_active
+        else "A publish pull request is open, so saving is refused until it merges or closes."
+        if publish_pr_open
+        else ""
+    )
+    if not reason:
+        return (
+            '<span id="save-control" data-refresh>'
+            f'<button type="submit" id="save-btn" class="lat-btn" form="{EDIT_FORM_ID}">Save</button>'
+            "</span>"
+        )
+    return (
+        '<span id="save-control" data-refresh>'
+        f'<button type="submit" id="save-btn" class="lat-btn" form="{EDIT_FORM_ID}" '
+        f'disabled data-locked="{escape(reason)}" title="{escape(reason)}">Save</button> '
+        f'<small class="offer-reason">{escape(reason)}</small></span>'
+    )
+
+
 def editor_page(
     draft: dict[str, Any],
     versions: list[dict[str, Any]],
@@ -769,7 +797,7 @@ def editor_page(
 {pr_open_notice}
 <div class="editor-bar" id="editor-bar">
 {_status_pill(draft["status"], details)}
-<button type="submit" id="save-btn" class="lat-btn" form="{EDIT_FORM_ID}">Save</button>
+{_save_control(publish_run_active, publish_pr_open)}
 <span id="save-state" class="save-state" data-state="idle" role="status" aria-live="polite">No unsaved changes</span>
 <span id="upload-state" class="upload-state" role="status" aria-live="polite"></span>
 </div>

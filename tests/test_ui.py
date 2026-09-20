@@ -959,6 +959,73 @@ def test_approve_button_hidden_while_publish_run_is_queued_or_building(
     assert f"/content/drafts/{draft_id}/actions/approve" in response.text
 
 
+def _save_button(html: str) -> str:
+    match = re.search(r'<button[^>]*id="save-btn"[^>]*>', html)
+    assert match, "no Save button in the page"
+    return match.group(0)
+
+
+def test_save_is_not_offered_while_a_publish_run_is_active_and_says_why(
+    client: TestClient, services: Services
+) -> None:
+    """The store refuses a save with 409 while a publish run is queued or
+    building (#45), so the editor must not offer one to fail on click."""
+    draft_id = make_draft(services, "approved")
+    assert "disabled" not in _save_button(client.get(f"/content/drafts/{draft_id}").text)
+
+    run = services.store._queue_run(draft_id, "publish")
+    services.store.index.upsert_run(run)
+    page = client.get(f"/content/drafts/{draft_id}").text
+    button = _save_button(page)
+    assert " disabled" in button
+    assert "data-locked=" in button
+    assert "A publish run is in progress, so saving is refused until it finishes." in page
+
+    # The refusal is the store's, so a hand-built POST still gets the 409.
+    version = services.store.get_draft(draft_id).version_no
+    refused = client.post(
+        f"/content/drafts/{draft_id}/save",
+        data={"base_version": str(version), "title": "t", "body": "b"},
+    )
+    assert refused.status_code == 409
+
+    services.store.start_run(run.id, "publisher-1", "", False)
+    assert " disabled" in _save_button(client.get(f"/content/drafts/{draft_id}").text)
+
+    services.store.finish_run(run.id, "publisher-1", True, {})
+    assert "disabled" not in _save_button(client.get(f"/content/drafts/{draft_id}").text)
+
+
+def test_save_is_not_offered_while_a_publish_pr_is_open(
+    client: TestClient, services: Services
+) -> None:
+    from chronicle.api.models import WatchEntry
+
+    draft_id = make_draft(services, "approved", with_publish=True)
+    services.store.record_watch(
+        WatchEntry(
+            draft_id=draft_id,
+            kind="publish",
+            branch="post/a-draft",
+            pr_number=7,
+            pr_url="https://github.com/o/r/pull/7",
+            created_at="2026-09-17T00:00:00-05:00",
+        ),
+        "scott",
+    )
+    page = client.get(f"/content/drafts/{draft_id}").text
+    assert " disabled" in _save_button(page)
+    assert "A publish pull request is open, so saving is refused" in page
+
+
+def test_the_save_button_is_in_a_refreshed_region(client: TestClient, services: Services) -> None:
+    """A save or upload swaps `data-refresh` regions; the Save button has to be
+    one, or a lock that appears (or clears) mid-session would never show."""
+    draft_id = make_draft(services, "drafting")
+    page = client.get(f"/content/drafts/{draft_id}").text
+    assert re.search(r'<span id="save-control" data-refresh>\s*<button[^>]*id="save-btn"', page)
+
+
 def test_banner_shown_by_default(client: TestClient) -> None:
     response = client.get("/content/drafts")
     assert "internal-only and unauthenticated" in response.text

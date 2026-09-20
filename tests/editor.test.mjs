@@ -262,15 +262,16 @@ function stubElement(props = {}) {
   );
 }
 
-function loadEditorPage(savedPage) {
+function loadEditorPage(savedPage, { locked = null } = {}) {
   const ids = {
     "editor-app": stubElement({ attrs: { "data-draft-id": "d1" } }),
     "edit-form": stubElement({ action: "/content/drafts/d1" }),
     body: stubElement({ value: "text" }),
     base_version: stubElement({ value: "1" }),
-    "save-btn": stubElement(),
+    "save-btn": stubElement(locked === null ? {} : { disabled: true, attrs: { "data-locked": locked } }),
     "save-state": stubElement(),
   };
+  const fetches = [];
   const heading = stubElement({ textContent: "Old heading" });
   const document = {
     title: "Old heading | Chronicle",
@@ -294,7 +295,10 @@ function loadEditorPage(savedPage) {
       location: { pathname: "/content/drafts/d1" },
       confirm: () => true,
     },
-    fetch: () => Promise.resolve({ status: 200, text: () => Promise.resolve("<html>") }),
+    fetch: (url) => {
+      fetches.push(url);
+      return Promise.resolve({ status: 200, text: () => Promise.resolve("<html>") });
+    },
     FormData: class {
       *[Symbol.iterator]() {}
     },
@@ -308,7 +312,7 @@ function loadEditorPage(savedPage) {
     clearTimeout,
   };
   vm.runInNewContext(EDITOR_SOURCE, sandbox);
-  return { document, heading, form: ids["edit-form"], ids };
+  return { document, heading, form: ids["edit-form"], ids, fetches };
 }
 
 function serverPage({ title, heading }) {
@@ -339,4 +343,21 @@ test("a save whose page carries neither title nor heading leaves both as they we
   await submitSave(page);
   assert.equal(page.document.title, "Old heading | Chronicle");
   assert.equal(page.heading.textContent, "Old heading");
+});
+
+test("a save is refused, with the reason, while the server has locked the Save button (#45)", async () => {
+  const page = loadEditorPage(serverPage({ title: "x", heading: "x" }), {
+    locked: "A publish run is in progress.",
+  });
+  await submitSave(page);
+  assert.equal(page.fetches.length, 0);
+  assert.equal(page.ids["save-state"].attrs["data-state"], "error");
+  assert.match(page.ids["save-state"].textContent, /publish run is in progress/);
+});
+
+test("an unlocked Save button still saves and is left enabled afterwards", async () => {
+  const page = loadEditorPage(serverPage({ title: "x", heading: "x" }));
+  await submitSave(page);
+  assert.equal(page.fetches.length, 1);
+  assert.equal(page.ids["save-btn"].disabled, false);
 });
