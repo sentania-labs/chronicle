@@ -221,6 +221,17 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   runs with `autoDownloadFontAwesome` and `spellChecker` off (its bundle names
   CDN URLs, and CSP would block them); toolbar glyphs are text in
   `style.css`, so a new toolbar button needs a glyph rule there.
+- **A digested post's site-path image reference resolves only against the
+  draft's own `image_dir`, never by filename alone.** A real post's body
+  carries the published form `/images/<image_dir>/<filename>` (what
+  `convert.py` writes at publish time), which 404s inside Chronicle; `editor.js`'s
+  `lookupImageSrc` rewrites it to the attached image's serving URL for the
+  live render, but the directory segment must equal `draft["image_dir"]`
+  (exposed to the page as `data-image-dir` on `#editor-app`) before the
+  filename is even compared. Two posts can each attach a `featured.png`, so
+  matching by filename alone would let one draft's preview show another
+  post's image. This is a render-time substitution only: the stored body is
+  never rewritten, and publish's own output is unaffected.
 - **The editor's Preview and Publish offers are staged, and the table is
   still the only decider.** `ui_actions.offers_for` renders an offer available
   only if `transitions.plan_action` finds a path, and `Store.act_on_draft_staged`

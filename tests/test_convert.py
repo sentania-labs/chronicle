@@ -250,6 +250,33 @@ def test_image_dir_follows_url_not_dated_slug() -> None:
     )
 
 
+def test_digested_post_body_still_publishes_the_site_path_not_a_chronicle_url() -> None:
+    """The editor's live render resolves a site-path reference to Chronicle's
+    own serving URL client-side only (editor.js), never in the stored body.
+    Nothing here leaks that URL into what convert/publish actually writes for
+    the blog PR: a body already carrying the published site path keeps it."""
+    draft = _draft(
+        slug="2026-08-01-vcf-operations-can-now-see-my-unifi-network",
+        image_dir="vcf-operations-can-now-see-my-unifi-network",
+        body="![The relationships!](/images/vcf-operations-can-now-see-my-unifi-network/image.png)",
+        frontmatter={
+            "title": "VCF Operations Can Now See My UniFi Network",
+            "url": "/2026/08/vcf-operations-can-now-see-my-unifi-network/",
+        },
+        images=[
+            DraftImage(
+                image_id="img1",
+                filename="image.png",
+                role="inline",
+                source_ref="/images/vcf-operations-can-now-see-my-unifi-network/image.png",
+            )
+        ],
+    )
+    converted = convert.convert(draft)
+    assert "/images/vcf-operations-can-now-see-my-unifi-network/image.png" in converted.text
+    assert "/content/drafts/" not in converted.text
+
+
 def test_image_dir_name_helper() -> None:
     assert (
         convert.image_dir_name("/2026/08/vcf-operations-can-now-see-my-unifi-network/", "fallback")

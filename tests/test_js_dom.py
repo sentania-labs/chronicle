@@ -147,3 +147,71 @@ def test_an_attached_image_reference_resolves_and_an_unsafe_one_does_not(tmp_pat
     assert 'src="/content/drafts/d/images/i1/file"' in resolved
     assert 'src="https://example.com/x.png"' in remote
     assert "javascript" not in unsafe and "src=" not in unsafe
+
+
+DRAFT_PREVIEW_PAGE = """<!doctype html><meta charset="utf-8"><base href="http://localhost/">
+<script src="file://{marked_js}"></script>
+<script src="file://{ui_js}"></script>
+<script src="file://{editor_js}"></script>
+<pre id="results"></pre>
+<script>
+var body = {body};
+var images = [{{ filename: "image.png", src: "/content/drafts/d1/images/abc123/file" }}];
+var imageDir = {image_dir};
+var html = sanitize(marked.parse(body), function (src) {{
+  return lookupImageSrc(src, images, imageDir);
+}});
+document.getElementById("results").textContent = JSON.stringify({{ html: html, body: body }});
+</script>
+"""
+
+
+def render_draft_preview(tmp_path: Path, body: str, image_dir: str) -> dict:
+    page = tmp_path / "preview.html"
+    page.write_text(
+        DRAFT_PREVIEW_PAGE.format(
+            marked_js=(STATIC / "vendor" / "marked.min.js").as_posix(),
+            ui_js=(STATIC / "ui.js").as_posix(),
+            editor_js=(STATIC / "editor.js").as_posix(),
+            body=json.dumps(body).replace("</", "<\\/"),
+            image_dir=json.dumps(image_dir),
+        ),
+        encoding="utf-8",
+    )
+    assert CHROME is not None
+    result = subprocess.run(
+        [
+            CHROME,
+            "--headless=new",
+            "--no-sandbox",
+            "--disable-gpu",
+            f"--user-data-dir={tmp_path / 'profile'}",
+            "--dump-dom",
+            page.as_uri(),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    marker = '<pre id="results">'
+    start = result.stdout.index(marker) + len(marker)
+    text = result.stdout[start : result.stdout.index("</pre>", start)]
+    import html
+
+    return json.loads(html.unescape(text))
+
+
+def test_a_digested_posts_site_path_image_renders_in_the_editor_preview(tmp_path: Path) -> None:
+    body = "![The relationships!](/images/vcf-operations-can-now-see-my-unifi-network/image.png)"
+    result = render_draft_preview(tmp_path, body, "vcf-operations-can-now-see-my-unifi-network")
+    assert 'src="/content/drafts/d1/images/abc123/file"' in result["html"]
+    # The live render never rewrites the source markdown itself.
+    assert result["body"] == body
+
+
+def test_a_site_path_image_from_a_different_posts_directory_stays_broken(tmp_path: Path) -> None:
+    body = "![x](/images/some-other-post/image.png)"
+    result = render_draft_preview(tmp_path, body, "vcf-operations-can-now-see-my-unifi-network")
+    assert 'src="/images/some-other-post/image.png"' in result["html"]

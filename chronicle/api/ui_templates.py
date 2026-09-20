@@ -798,8 +798,10 @@ def editor_page(
     frontmatter = draft["frontmatter"]
     title_value = frontmatter.get("title", "")
     title_value = title_value if isinstance(title_value, str) else ""
+    image_dir_value = draft.get("image_dir")
+    image_dir_attr = f' data-image-dir="{escape(image_dir_value)}"' if image_dir_value else ""
     body = f"""
-<div id="editor-app" data-draft-id="{draft_id}" data-version="{draft["version_no"]}">
+<div id="editor-app" data-draft-id="{draft_id}" data-version="{draft["version_no"]}"{image_dir_attr}>
 <div id="backup-banner" class="backup-banner {ui_chrome.banner_class("warn")}" role="alert" hidden>
 <span id="backup-banner-text"></span>
 <button type="button" id="backup-restore" class="lat-btn">Restore</button>

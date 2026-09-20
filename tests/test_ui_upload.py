@@ -7,9 +7,11 @@ URL the live render loads the bytes from.
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from chronicle.api.deps import Services
+from chronicle.api.errors import ApiError
 from chronicle.api.images import alt_text_for, is_plain_filename, normalise, safe_upload_filename
 
 from .conftest import png_bytes
@@ -124,6 +126,50 @@ def test_attached_image_bytes_are_served_only_for_the_draft_that_attached_them(
 
     elsewhere = client.get(f"/content/drafts/{other_id}/images/{result['image_id']}/file")
     assert elsewhere.status_code == 404
+
+
+def test_attached_image_bytes_carry_a_long_lived_immutable_cache_header(
+    client: TestClient, services: Services
+) -> None:
+    # image_id is the content's own sha256, so the bytes behind a given URL
+    # never change: caching is safe without a revalidation round trip.
+    draft_id = make_draft(services, "drafting")
+    result = upload(client, draft_id, "a.png", png_bytes()).json()
+    served = client.get(result["url"])
+    assert served.status_code == 200
+    assert served.headers["cache-control"] == "private, max-age=31536000, immutable"
+
+
+def test_a_404_for_an_unattached_image_carries_no_cache_header(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "drafting")
+    other_id = make_draft(services, "drafting", title="Other")
+    result = upload(client, draft_id, "a.png", png_bytes()).json()
+    elsewhere = client.get(f"/content/drafts/{other_id}/images/{result['image_id']}/file")
+    assert elsewhere.status_code == 404
+    assert "cache-control" not in elsewhere.headers
+
+
+def test_a_traversal_shaped_image_id_is_refused_without_touching_the_filesystem(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "drafting")
+    for bad_id in ["../x", "..%2fx", "/etc/passwd", "..", "not-a-sha256"]:
+        response = client.get(f"/content/drafts/{draft_id}/images/{bad_id}/file")
+        assert response.status_code < 500, (bad_id, response.status_code)
+        assert response.status_code in (400, 404), (bad_id, response.status_code)
+
+
+def test_store_get_image_itself_refuses_a_traversal_shaped_id(services: Services) -> None:
+    # The route's own 404 above comes from the attached-images membership
+    # check running first; this pins the store's own guard (issue 47) so a
+    # future route that skips that check still cannot reach the filesystem
+    # with an id like "..".
+    for bad_id in ["../x", "..%2fx", "/etc/passwd", ".."]:
+        with pytest.raises(ApiError) as excinfo:
+            services.store.get_image(bad_id)
+        assert excinfo.value.status_code == 404
 
 
 def test_editor_page_exposes_attached_images_to_the_live_render(
