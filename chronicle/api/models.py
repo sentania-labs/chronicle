@@ -208,6 +208,13 @@ class Run(BaseModel):
     # Relative to the data directory, so the record survives the volume being
     # mounted somewhere else in another container.
     log_path: str | None = None
+    # Rendered on the run page (chronicle/api/ui_templates.py:run_log_page), so
+    # every value here is operator-facing, not developer-facing. `error_class`
+    # is a fixed string naming what failed (see `GitHubApiError`'s docstring);
+    # `message`, when present, is a fixed, non-leaking sentence written by the
+    # caller, never `str(exc)` or other exception text. A writer that wants to
+    # record exception detail puts it in the log and in `error_class`, never
+    # in `result`.
     result: dict[str, Any] | None = None
     # Set when a builder claims the run: which builder took it, the Hugo it
     # actually used, and whether that Hugo differs from the version the site's

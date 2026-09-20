@@ -814,6 +814,34 @@ def test_run_log_page_does_not_show_a_failure_for_a_successful_run() -> None:
     assert "notice error" not in html
 
 
+def test_run_log_page_shows_a_successful_preview_runs_result() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run(
+        status="succeeded",
+        result={
+            "preview_url": "/preview/a-slug/",
+            "slug": "a-slug",
+            "wall_time_seconds": 12.345,
+        },
+    )
+    html = tpl.run_log_page(run, "", banner=False)
+    assert 'href="/preview/a-slug/"' in html
+    assert "/preview/a-slug/" in html
+    assert "a-slug" in html
+    assert "12.3s" in html
+    assert "notice error" not in html
+
+
+def test_run_log_page_shows_a_successful_run_with_no_result_keys() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run(status="succeeded", result={})
+    html = tpl.run_log_page(run, "", banner=False)
+    assert "notice error" not in html
+    assert "<ul>" not in html
+
+
 def test_run_log_page_renders_a_queued_run_with_no_result() -> None:
     from chronicle.api import ui_templates as tpl
 

@@ -466,6 +466,11 @@ def expire_unclaimed_runs(
         if run.status != "queued" or datetime.fromisoformat(waiting_since) > cutoff:
             continue
         log.warning("run %s: still queued after %.0f seconds, failing it", run.id, timeout_seconds)
+        # `message` is rendered verbatim on the run page (see `Run.result`'s
+        # docstring in chronicle/api/models.py): it must stay this fixed,
+        # operator-facing sentence, never exception text. A future failure
+        # path that wants to explain itself puts the exception in the log and
+        # a name in `error_class`; it does not put `str(exc)` here.
         finished, _ = store.finish_run(
             run.id,
             PUBLISHER_ACTOR,

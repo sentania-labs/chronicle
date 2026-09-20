@@ -978,14 +978,51 @@ def preview_list_page(rows: list[dict[str, Any]], *, banner: bool) -> str:
     return page("Preview", body, banner=banner, active=PREVIEW_TAB)
 
 
+def _format_wall_time(seconds: Any) -> str | None:
+    """A duration for a reader, not a raw float. Not a timestamp, so the
+    local-time rule does not apply here."""
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return None
+    if value < 60:
+        return f"{value:.1f}s"
+    minutes, rest = divmod(value, 60)
+    return f"{int(minutes)}m {rest:.0f}s"
+
+
+def _success_result_html(result: dict[str, Any]) -> str:
+    """A successful run's result shape varies by kind (a publish run's keys
+    are not a preview run's), so this only ever renders the specific known
+    keys it recognizes, each escaped, and silently skips whatever is
+    missing. It never dumps the raw dict: an unrecognized key is exactly
+    the kind of unvetted content this page must not render."""
+    rows = []
+    preview_url = result.get("preview_url")
+    if isinstance(preview_url, str) and preview_url:
+        safe_url = escape(preview_url)
+        rows.append(f'<li>preview: <a href="{safe_url}">{safe_url}</a></li>')
+    slug = result.get("slug")
+    if isinstance(slug, str) and slug:
+        rows.append(f"<li>slug: {escape(slug)}</li>")
+    wall_time = _format_wall_time(result.get("wall_time_seconds"))
+    if wall_time is not None:
+        rows.append(f"<li>wall time: {escape(wall_time)}</li>")
+    if not rows:
+        return ""
+    return f"<ul>{''.join(rows)}</ul>"
+
+
 def run_log_page(run: dict[str, Any], log_text: str, *, banner: bool) -> str:
-    # A queued run has no result at all, and a successful one's result is
-    # whatever the build returned (shape varies by kind); neither is a
-    # failure, so only a result carrying `error_class` gets a notice here.
+    # A queued run has no result at all; a failed one's result carries
+    # `error_class` and gets a notice; a successful one's result is
+    # rendered by `_success_result_html`, which only knows specific keys.
     # `error_class` is the safe string this codebase surfaces in place of an
     # exception's text (see `GitHubApiError`); `message`, when present, is a
-    # fixed, non-leaking string written by the caller (e.g. the queue-timeout
-    # sweep), never raw exception detail, so both are safe to render escaped.
+    # fixed, operator-facing string written by the caller (e.g. the
+    # queue-timeout sweep), never raw exception detail (see `Run.result`'s
+    # docstring in chronicle/api/models.py), so both are safe to render
+    # escaped.
     result = run.get("result") or {}
     error_class = result.get("error_class")
     result_html = ""
@@ -995,6 +1032,8 @@ def run_log_page(run: dict[str, Any], log_text: str, *, banner: bool) -> str:
         if message:
             text = f"{text}: {message}"
         result_html = ui_chrome.notice(text, "error")
+    elif run.get("status") == "succeeded":
+        result_html = _success_result_html(result)
     body = f"""
 <p class="muted">kind: {escape(run["kind"])} | status: {escape(run["status"])} |
 started: {escape(local_time(run.get("started_at")))} | finished: {escape(local_time(run.get("finished_at")))} |
