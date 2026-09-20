@@ -326,3 +326,11 @@ def test_a_missing_image_id_is_escaped_where_it_is_shown(
     page = client.get(f"/content/submissions/{submission_id}").text
     assert "<script>alert(1)" not in page
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+
+
+def test_a_multi_line_material_keeps_its_line_breaks_on_the_detail_page(
+    client: TestClient, agent_token: str
+) -> None:
+    submission_id = make_submission(client, agent_token)
+    page = client.get(f"/content/submissions/{submission_id}").text
+    assert "<strong>notes</strong>: line one<br>line two" in page

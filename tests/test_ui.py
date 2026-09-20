@@ -1307,3 +1307,26 @@ def test_the_import_tab_and_its_routes_are_gone(client: TestClient) -> None:
     assert client.get("/content/import").status_code == 404
     assert client.post("/content/import", data={"slug": "x"}).status_code in (404, 405)
     assert "/content/import" not in client.get("/content/drafts").text
+
+
+# --- Feedback log line breaks (#26) -----------------------------------------
+
+
+NOTE = "first line\r\nsecond <b>line</b>\n\n<script>alert(1)</script> & done"
+
+
+def test_feedback_log_renders_line_breaks_without_opening_an_html_hole(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "in_review")
+    services.store.act_on_draft(draft_id, "request_revision", "editor", True, feedback=NOTE)
+
+    html = client.get(f"/content/drafts/{draft_id}").text
+    log = html[html.index('<ul class="chr-log">') :]
+    log = log[: log.index("</ul>")]
+    assert "first line<br>second &lt;b&gt;line&lt;/b&gt;<br><br>&lt;script&gt;" in log
+    assert "alert(1)&lt;/script&gt; &amp; done" in log
+    # Only the breaks the renderer added are real tags; nothing the note wrote is.
+    assert "<script>" not in log
+    assert "<b>" not in log
+    assert log.count("<br>") == 3

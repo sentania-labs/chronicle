@@ -262,7 +262,7 @@ def submission_detail_page(
 
     materials = "".join(
         f"<li><strong>{escape(m['name'])}</strong>"
-        + (f": {escape(m['text'])}" if m.get("text") else "")
+        + (f": {_multiline(m['text'])}" if m.get("text") else "")
         + (material_link(m["url"]) if m.get("url") else "")
         + "</li>"
         for m in submission["materials"]
@@ -610,12 +610,19 @@ def _action_buttons(draft_id: str, offers: list[Offer]) -> str:
     return "".join(_offer_button(draft_id, offer) for offer in offers)
 
 
+def _multiline(text: str) -> str:
+    """`text` as HTML with its line breaks kept. Escape first, then turn the
+    newlines into `<br>`: the other way round would escape the tags this adds.
+    CRLF and a lone CR each count as one line break."""
+    return escape(text.replace("\r\n", "\n").replace("\r", "\n")).replace("\n", "<br>")
+
+
 def _feedback_log(entries: list[dict[str, Any]]) -> str:
     if not entries:
         return '<p class="lat-banner">no feedback yet.</p>'
     rows = "".join(
         f"<li><strong>v{e['version_no']} {escape(e['action'])}</strong> by {escape(e['author'])} "
-        f"at {escape(local_time(e['created_at']))}: {escape(e['text'])}</li>"
+        f"at {escape(local_time(e['created_at']))}: {_multiline(e['text'])}</li>"
         for e in entries
     )
     return f'<ul class="chr-log">{rows}</ul>'
