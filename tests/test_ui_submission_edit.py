@@ -228,7 +228,7 @@ def test_a_leading_blank_line_in_a_textarea_survives_the_html_parser(
     page = client.get(f"/content/submissions/{submission_id}").text
     # A browser drops exactly one newline right after <textarea>, so the
     # template emits one extra: the stored text's own leading newline stays.
-    assert 'cols="80">\n\nstarts blank</textarea>' in page
+    assert 'rows="4">\n\nstarts blank</textarea>' in page
 
 
 def test_a_post_missing_material_fields_is_a_422_and_changes_nothing(

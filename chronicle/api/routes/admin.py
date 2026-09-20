@@ -208,7 +208,10 @@ def github_callback(
     cookie_state = request.cookies.get(GITHUB_STATE_COOKIE_NAME, "")
     if not cookie_state or not secrets.compare_digest(cookie_state, state):
         return HTMLResponse(
-            tpl.page("Connect GitHub", "<p>state did not match; start over.</p>"), status_code=400
+            tpl.page(
+                "Connect GitHub", "<p>state did not match; start over.</p>", active=tpl.GITHUB_TAB
+            ),
+            status_code=400,
         )
     try:
         conversion = admin.github_client.exchange_manifest_code(code)
@@ -219,7 +222,11 @@ def github_callback(
         if admin.github_store.load() is not None:
             admin.github_store.record_error(exc.error_class)
         return HTMLResponse(
-            tpl.page("Connect GitHub", f"<p>GitHub exchange failed: {exc.error_class}</p>"),
+            tpl.page(
+                "Connect GitHub",
+                f"<p>GitHub exchange failed: {exc.error_class}</p>",
+                active=tpl.GITHUB_TAB,
+            ),
             status_code=502,
         )
     admin.github_store.store_new_app(
@@ -236,7 +243,7 @@ def github_callback(
         f'<p><a href="{conversion.html_url}/installations/new">Install this App</a>, '
         f'then come back to <a href="/admin/github/install">choose the installation</a>.</p>'
     )
-    return HTMLResponse(tpl.page("GitHub App connected", body))
+    return HTMLResponse(tpl.page("GitHub App connected", body, active=tpl.GITHUB_TAB))
 
 
 @router.post("/github/connect/org", response_class=HTMLResponse)
@@ -248,7 +255,9 @@ async def github_connect_org(
     manifest_json = form.get("manifest", "")
     if not org:
         return HTMLResponse(
-            tpl.page("Connect GitHub", "<p>an organization login is required.</p>"),
+            tpl.page(
+                "Connect GitHub", "<p>an organization login is required.</p>", active=tpl.GITHUB_TAB
+            ),
             status_code=422,
         )
     state = secrets.token_urlsafe(24)
@@ -263,7 +272,10 @@ def github_install_form(admin: AdminServices = Depends(require_admin_session_htm
     record = admin.github_store.load()
     if record is None:
         return HTMLResponse(
-            tpl.page("Choose installation", "<p>connect a GitHub App first.</p>"), status_code=409
+            tpl.page(
+                "Choose installation", "<p>connect a GitHub App first.</p>", active=tpl.GITHUB_TAB
+            ),
+            status_code=409,
         )
     try:
         app_jwt = admin.github_client.mint_app_jwt(record.app_id, admin.github_store.pem(record))
@@ -272,7 +284,9 @@ def github_install_form(admin: AdminServices = Depends(require_admin_session_htm
         admin.github_store.record_error(exc.error_class)
         return HTMLResponse(
             tpl.page(
-                "Choose installation", f"<p>could not list installations: {exc.error_class}</p>"
+                "Choose installation",
+                f"<p>could not list installations: {exc.error_class}</p>",
+                active=tpl.GITHUB_TAB,
             ),
             status_code=502,
         )
@@ -287,7 +301,11 @@ async def github_install_submit(
     installation_id = form.get("pasted_id") or form.get("installation_id") or ""
     if not installation_id:
         return HTMLResponse(
-            tpl.page("Choose installation", "<p>an installation id is required.</p>"),
+            tpl.page(
+                "Choose installation",
+                "<p>an installation id is required.</p>",
+                active=tpl.GITHUB_TAB,
+            ),
             status_code=422,
         )
     admin.github_store.set_installation(installation_id)
@@ -299,7 +317,10 @@ def github_repo_form(admin: AdminServices = Depends(require_admin_session_html))
     record = admin.github_store.load()
     if record is None or not record.installation_id:
         return HTMLResponse(
-            tpl.page("Choose repository", "<p>choose an installation first.</p>"), status_code=409
+            tpl.page(
+                "Choose repository", "<p>choose an installation first.</p>", active=tpl.GITHUB_TAB
+            ),
+            status_code=409,
         )
     try:
         token = _installation_token(admin, record.installation_id)
@@ -307,7 +328,11 @@ def github_repo_form(admin: AdminServices = Depends(require_admin_session_html))
     except GitHubApiError as exc:
         admin.github_store.record_error(exc.error_class)
         return HTMLResponse(
-            tpl.page("Choose repository", f"<p>could not list repositories: {exc.error_class}</p>"),
+            tpl.page(
+                "Choose repository",
+                f"<p>could not list repositories: {exc.error_class}</p>",
+                active=tpl.GITHUB_TAB,
+            ),
             status_code=502,
         )
     return HTMLResponse(tpl.github_repo_page(repos))
@@ -321,13 +346,17 @@ async def github_repo_submit(
     full_name = form.get("repo", "")
     if "/" not in full_name:
         return HTMLResponse(
-            tpl.page("Choose repository", "<p>pick a repository.</p>"), status_code=422
+            tpl.page("Choose repository", "<p>pick a repository.</p>", active=tpl.GITHUB_TAB),
+            status_code=422,
         )
     owner, repo = full_name.split("/", 1)
     record = admin.github_store.load()
     if record is None or not record.installation_id:
         return HTMLResponse(
-            tpl.page("Choose repository", "<p>choose an installation first.</p>"), status_code=409
+            tpl.page(
+                "Choose repository", "<p>choose an installation first.</p>", active=tpl.GITHUB_TAB
+            ),
+            status_code=409,
         )
     try:
         token = _installation_token(admin, record.installation_id)
@@ -343,7 +372,11 @@ async def github_repo_submit(
     except GitHubApiError as exc:
         admin.github_store.record_error(exc.error_class)
         return HTMLResponse(
-            tpl.page("Choose repository", f"<p>verification failed: {exc.error_class}</p>"),
+            tpl.page(
+                "Choose repository",
+                f"<p>verification failed: {exc.error_class}</p>",
+                active=tpl.GITHUB_TAB,
+            ),
             status_code=502,
         )
     admin.github_store.set_repo(full_name, default_branch)
@@ -387,7 +420,10 @@ def trigger_digest(
     # sees the lock held instead of racing it (spec: one digest at a time).
     if not admin._digest_lock.acquire(blocking=False):
         return HTMLResponse(
-            tpl.page("Chronicle admin", "<p>a digest is already running.</p>"), status_code=409
+            tpl.page(
+                "Chronicle admin", "<p>a digest is already running.</p>", active=tpl.STATUS_TAB
+            ),
+            status_code=409,
         )
     admin.digest_running = True
 

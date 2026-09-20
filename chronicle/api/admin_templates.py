@@ -10,25 +10,30 @@ from __future__ import annotations
 from html import escape
 from typing import Any
 
+from . import ui_chrome
 from .tokens import UI_TOKEN_NAME
 from .ui_status import status_label
 from .ui_time import local_time
 
-STYLE = """
-body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; color: #1a1a1a; }
-h1 { font-size: 1.4rem; }
-table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
-td, th { border: 1px solid #ccc; padding: 0.4rem 0.6rem; text-align: left; font-size: 0.9rem; }
-.notice { padding: 0.6rem; border-radius: 4px; margin-bottom: 1rem; }
-.notice.error { background: #fde8e8; }
-.notice.ok { background: #e6f6e6; }
-code, pre { background: #f2f2f2; padding: 0.1rem 0.3rem; border-radius: 3px; }
-form { margin: 1rem 0; }
-label { display: block; margin: 0.5rem 0 0.2rem; }
-input[type=text], input[type=password] { width: 100%; padding: 0.4rem; box-sizing: border-box; }
-button { padding: 0.5rem 1rem; margin-top: 0.6rem; }
-nav a { margin-right: 1rem; }
-"""
+STATUS_TAB = "/admin"
+GITHUB_TAB = "/admin/github/connect"
+TOKENS_TAB = "/admin/tokens"
+BACKUP_TAB = "/admin/backup"
+PASSWORD_TAB = "/admin/password"
+NAV_LINKS = (
+    (STATUS_TAB, "Status"),
+    (GITHUB_TAB, "GitHub"),
+    (TOKENS_TAB, "Tokens"),
+    (BACKUP_TAB, "Backup"),
+    (PASSWORD_TAB, "Password"),
+)
+
+# Log out is a POST (it ends a session), so it is a real form and button, in the
+# header beside the theme control on every page that has a session.
+LOGOUT_FORM = (
+    '<form class="inline" method="post" action="/admin/logout">'
+    '<button type="submit" class="lat-btn lat-btn--ghost">Log out</button></form>'
+)
 
 
 def _stamp(value: object, fallback: str) -> str:
@@ -44,24 +49,49 @@ def _stamp(value: object, fallback: str) -> str:
     return local_time(value) if value else fallback
 
 
-def page(title: str, body: str, notice: str | None = None, notice_kind: str = "error") -> str:
-    notice_html = f'<p class="notice {notice_kind}">{escape(notice)}</p>' if notice else ""
+def page(
+    title: str,
+    body: str,
+    notice: str | None = None,
+    notice_kind: str = "error",
+    *,
+    active: str | None = None,
+) -> str:
+    """`active` is the href of the tab this page belongs to (one of the `*_TAB`
+    constants). Every page reached with an admin session passes one, error and
+    confirmation pages included, so the tabs and Log out are always there. Only
+    a page with no session behind it (login, claim) leaves it out, and gets the
+    header and theme control alone."""
+    notice_html = ui_chrome.notice(notice, notice_kind) if notice else ""
+    signed_in = active is not None
+    header = ui_chrome.header("Chronicle admin", trailing=LOGOUT_FORM if signed_in else "")
+    tabs = ui_chrome.tabs(NAV_LINKS, active, label="Admin sections") if signed_in else ""
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>{escape(title)}</title><style>{STYLE}</style></head>
+<html lang="en"><head><meta charset="utf-8"><title>{escape(title)}</title>{ui_chrome.head()}</head>
 <body>
-<h1>{escape(title)}</h1>
+{header}
+<div class="chr-page">
+{tabs}
+<h1 class="page-title">{escape(title)}</h1>
 {notice_html}
 {body}
+</div>
 </body></html>"""
 
 
-def nav() -> str:
+def _cell(cell: Any) -> str:
+    if isinstance(cell, int) and not isinstance(cell, bool):
+        return f'<td class="lat-num">{cell}</td>'
+    return f"<td>{escape(str(cell))}</td>"
+
+
+def _table(rows: str, head_cells: str = "") -> str:
+    """A Lattice table in its scroll wrapper; `head_cells` is the `<th>` cells,
+    or empty for a plain key and value table with no header row."""
+    thead = f"<thead><tr>{head_cells}</tr></thead>" if head_cells else ""
     return (
-        '<nav><a href="/admin">Status</a><a href="/admin/github/connect">GitHub</a>'
-        '<a href="/admin/tokens">Tokens</a><a href="/admin/backup">Backup</a>'
-        '<a href="/admin/password">Password</a>'
-        '<form style="display:inline" method="post" action="/admin/logout">'
-        '<button type="submit">Log out</button></form></nav>'
+        '<div class="lat-table-scroll">'
+        f'<table class="lat-table">{thead}<tbody>{rows}</tbody></table></div>'
     )
 
 
@@ -71,41 +101,44 @@ def backup_page(
     # A bare YYYY-MM-DD stays a date (no instant to shift); see `_stamp`.
     last_html = escape(_stamp(last_backup, "never"))
     body = f"""
-{nav()}
-<p>Last backup created: {last_html}</p>
+<p class="muted">Last backup created: {last_html}</p>
+<section class="lat-card">
 <h2>Create a backup</h2>
 <p>Downloads a gzip tarball: repo history, images, and the encrypted
 credential store. Never the instance key.</p>
 <form method="get" action="/admin/backup/create">
-<button type="submit">Create and download backup</button>
+<button type="submit" class="lat-btn lat-btn--primary">Create and download backup</button>
 </form>
+</section>
+<section class="lat-card">
 <h2>Restore from a backup</h2>
 <p>Upload a bundle to see its manifest counts before anything is touched.
 Restoring replaces this instance's repo, images, and credential store; the
 running instance's own instance key is kept.</p>
 <form method="post" action="/admin/backup/upload" enctype="multipart/form-data">
-<label for="file">Bundle (.tar.gz)</label>
-<input type="file" id="file" name="file" accept=".tar.gz,.tgz" required>
-<button type="submit">Upload and preview</button>
+<label class="lat-label" for="file">Bundle (.tar.gz)</label>
+<input type="file" class="lat-input" id="file" name="file" accept=".tar.gz,.tgz" required>
+<button type="submit" class="lat-btn">Upload and preview</button>
 </form>
+</section>
 """
-    return page("Backup", body, notice=notice, notice_kind=notice_kind)
+    return page("Backup", body, notice=notice, notice_kind=notice_kind, active=BACKUP_TAB)
 
 
 def backup_confirm_page(*, token: str, manifest: dict[str, Any]) -> str:
     counts = manifest.get("counts", {})
     rows = "".join(
-        f"<tr><td>{escape(str(key))}</td><td>{escape(str(value))}</td></tr>"
+        f'<tr><td>{escape(str(key))}</td><td class="lat-num">{escape(str(value))}</td></tr>'
         for key, value in sorted(counts.items())
     )
     # A bare YYYY-MM-DD stays a date (no instant to shift); see `_stamp`.
     created = escape(_stamp(manifest.get("created_at"), "?"))
     body = f"""
-{nav()}
-<p>Bundle created {created} by Chronicle
+<p class="muted">Bundle created {created} by Chronicle
 {escape(str(manifest.get("chronicle_version", "?")))}.</p>
-<table><tr><th>record</th><th>count</th></tr>{rows}</table>
-<p><strong>This replaces the current repo, images, and credential store.</strong>
+{_table(rows, '<th>record</th><th class="lat-num">count</th>')}
+<p class="lat-banner lat-banner--warn chr-flow">
+<strong>This replaces the current repo, images, and credential store.</strong>
 If a builder is running against this instance, restart it after the
 restore finishes: it holds its own connection to the index and will not
 notice the swap on its own. Run <code>chronicle digest</code> again after
@@ -113,13 +146,13 @@ restoring, since the site checkout is not part of the bundle.
 Type <code>restore</code> below to confirm.</p>
 <form method="post" action="/admin/backup/restore">
 <input type="hidden" name="token" value="{escape(token)}">
-<label for="confirm">Type "restore" to confirm</label>
-<input type="text" id="confirm" name="confirm" required autocomplete="off">
-<button type="submit">Restore now</button>
+<label class="lat-label" for="confirm">Type "restore" to confirm</label>
+<input type="text" class="lat-input" id="confirm" name="confirm" required autocomplete="off">
+<button type="submit" class="lat-btn lat-btn--danger">Restore now</button>
 </form>
 <p><a href="/admin/backup">Cancel</a></p>
 """
-    return page("Confirm restore", body)
+    return page("Confirm restore", body, active=BACKUP_TAB)
 
 
 def claim_page(notice: str | None = None) -> str:
@@ -127,12 +160,12 @@ def claim_page(notice: str | None = None) -> str:
 <p>This instance has not been claimed. Read the one-time claim code from the
 file logged at startup (<code>data/state/claim-code</code>) and set a
 password of at least 12 characters.</p>
-<form method="post" action="/admin/claim">
-<label for="code">Claim code</label>
-<input type="text" id="code" name="code" required autocomplete="off">
-<label for="password">New password (12+ characters)</label>
-<input type="password" id="password" name="password" required minlength="12">
-<button type="submit">Claim this instance</button>
+<form method="post" class="lat-card chr-narrow" action="/admin/claim">
+<label class="lat-label" for="code">Claim code</label>
+<input type="text" class="lat-input" id="code" name="code" required autocomplete="off">
+<label class="lat-label" for="password">New password (12+ characters)</label>
+<input type="password" class="lat-input" id="password" name="password" required minlength="12">
+<button type="submit" class="lat-btn lat-btn--primary">Claim this instance</button>
 </form>
 """
     return page("Claim Chronicle", body, notice)
@@ -140,28 +173,29 @@ password of at least 12 characters.</p>
 
 def login_page(notice: str | None = None) -> str:
     body = """
-<form method="post" action="/admin/login">
-<label for="password">Password</label>
-<input type="password" id="password" name="password" required autocomplete="current-password">
-<button type="submit">Log in</button>
+<form method="post" class="lat-card chr-narrow" action="/admin/login">
+<label class="lat-label" for="password">Password</label>
+<input type="password" class="lat-input" id="password" name="password" required
+ autocomplete="current-password">
+<button type="submit" class="lat-btn lat-btn--primary">Log in</button>
 </form>
 """
     return page("Admin login", body, notice)
 
 
 def change_password_page(notice: str | None = None, notice_kind: str = "error") -> str:
-    body = f"""
-{nav()}
+    body = """
 <p>Changing the password ends every other session immediately.</p>
-<form method="post" action="/admin/password">
-<label for="current_password">Current password</label>
-<input type="password" id="current_password" name="current_password" required>
-<label for="new_password">New password (12+ characters)</label>
-<input type="password" id="new_password" name="new_password" required minlength="12">
-<button type="submit">Change password</button>
+<form method="post" class="lat-card" action="/admin/password">
+<label class="lat-label" for="current_password">Current password</label>
+<input type="password" class="lat-input" id="current_password" name="current_password" required>
+<label class="lat-label" for="new_password">New password (12+ characters)</label>
+<input type="password" class="lat-input" id="new_password" name="new_password"
+ required minlength="12">
+<button type="submit" class="lat-btn lat-btn--primary">Change password</button>
 </form>
 """
-    return page("Change password", body, notice, notice_kind)
+    return page("Change password", body, notice, notice_kind, active=PASSWORD_TAB)
 
 
 def _heartbeat_rows(row: Any, heartbeat: dict[str, Any] | None, name: str) -> str:
@@ -181,10 +215,10 @@ def _flag_rows(row: Any, flags: list[dict[str, Any]]) -> str:
     rows = []
     for flag in flags:
         buttons = "".join(
-            f'<form style="display:inline" method="post" '
+            f'<form class="inline" method="post" '
             f'action="/admin/reconcile/{escape(flag["id"])}/resolve">'
             f'<input type="hidden" name="resolution" value="{escape(resolution)}">'
-            f'<button type="submit">{escape(resolution)}</button></form> '
+            f'<button type="submit" class="lat-btn">{escape(resolution)}</button></form> '
             for resolution in flag["applicable_resolutions"]
         )
         rows.append(
@@ -199,7 +233,8 @@ def _flag_rows(row: Any, flags: list[dict[str, Any]]) -> str:
 
 def status_page(status: dict[str, Any], notice: str | None = None) -> str:
     def row(*cells: Any) -> str:
-        return "<tr>" + "".join(f"<td>{escape(str(cell))}</td>" for cell in cells) + "</tr>"
+        # A whole number is a figure: Lattice sets those right-aligned in mono.
+        return "<tr>" + "".join(_cell(cell) for cell in cells) + "</tr>"
 
     disk_rows = "".join(row(name, size) for name, size in status["disk_use"].items())
     submission_rows = "".join(
@@ -245,100 +280,140 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
     )
     # last backup and last digest go through `_stamp`: the words "never" survive
     # and a bare YYYY-MM-DD stays a date (no instant to shift).
+    toolchain = status["toolchain"]
+    toolchain_row = (
+        "<tr><td>toolchain</td><td>"
+        + (
+            ui_chrome.badge("match", "ok")
+            if toolchain["match"]
+            else ui_chrome.badge("drift", "warn")
+        )
+        + "</td></tr>"
+    )
+    none_row = "<tr><td colspan=2>none</td></tr>"
     body = f"""
-{nav()}
+<div class="chr-grid">
+<section class="lat-card">
 <h2>GitHub App</h2>
-<table>
-{row("state", app_state)}
-{row("repo", status["github_repo"] or "none chosen")}
-{row("default branch", status["github_default_branch"] or "-")}
-</table>
+{
+        _table(
+            row("state", app_state)
+            + row("repo", status["github_repo"] or "none chosen")
+            + row("default branch", status["github_default_branch"] or "-")
+        )
+    }
 <form method="post" action="/admin/digest">
-<button type="submit">Run digest now</button>
+<button type="submit" class="lat-btn">Run digest now</button>
 </form>
+</section>
+<section class="lat-card">
 <h2>Backup</h2>
-<table>
-{row("last backup", _stamp(status["last_backup_at"], "never"))}
-</table>
+{_table(row("last backup", _stamp(status["last_backup_at"], "never")))}
 <p><a href="/admin/backup">Backup and restore</a></p>
+</section>
+<section class="lat-card">
 <h2>Digest</h2>
-<table>
-{row("last digest", _stamp(status["last_digest_at"], "never"))}
-{row("post count", status["post_count"])}
-{row("hugo version (site)", status["toolchain"]["hugo_version"])}
-{row("hugo version (builder)", status["toolchain"]["builder_hugo_version"])}
-{row("toolchain", "match" if status["toolchain"]["match"] else "drift")}
-</table>
+{
+        _table(
+            row("last digest", _stamp(status["last_digest_at"], "never"))
+            + row("post count", status["post_count"])
+            + row("hugo version (site)", toolchain["hugo_version"])
+            + row("hugo version (builder)", toolchain["builder_hugo_version"])
+            + toolchain_row
+        )
+    }
 <h3>Content conventions</h3>
-<table>{conventions_rows}</table>
+{_table(conventions_rows)}
 <h3>Theme submodules</h3>
-<table><tr><th>path</th><th>commit</th></tr>{theme_rows}</table>
+{_table(theme_rows, "<th>path</th><th>commit</th>")}
+</section>
+<section class="lat-card">
 <h2>Builder</h2>
-<table>{builder_rows}</table>
+{_table(builder_rows)}
 <h3>Preview runs by status</h3>
-<table>{preview_run_rows}</table>
+{_table(preview_run_rows or none_row)}
+</section>
+<section class="lat-card">
 <h2>Publisher</h2>
-<table>{publisher_rows}</table>
+{_table(publisher_rows)}
+</section>
+<section class="lat-card">
 <h2>Watcher</h2>
-<table>{watcher_rows}</table>
+{_table(watcher_rows)}
+</section>
+<section class="lat-card chr-span">
 <h2>Reconciliation</h2>
-<table>{reconcile_rows}</table>
+{_table(reconcile_rows)}
 <form method="post" action="/admin/reconcile">
-<button type="submit">Run reconciliation now</button>
+<button type="submit" class="lat-btn">Run reconciliation now</button>
 </form>
 <h3>Open flags</h3>
-<table><tr><th>type</th><th>detail</th><th>resolve</th></tr>{flag_rows}</table>
+{_table(flag_rows, "<th>type</th><th>detail</th><th>resolve</th>")}
+</section>
+<section class="lat-card">
 <h2>Submissions by status</h2>
-<table>{submission_rows or "<tr><td colspan=2>none</td></tr>"}</table>
+{_table(submission_rows or none_row)}
+</section>
+<section class="lat-card">
 <h2>Posts by status</h2>
-<table>{draft_rows or "<tr><td colspan=2>none</td></tr>"}</table>
+{_table(draft_rows or none_row)}
+</section>
+<section class="lat-card">
 <h2>Disk use</h2>
-<table>{disk_rows}</table>
+{_table(disk_rows)}
+</section>
+<section class="lat-card">
 <h2>Repository health</h2>
-<table>
-{row("git status", status["git_health"])}
-{row("index schema version", status["index_schema_version"])}
-</table>
+{
+        _table(
+            row("git status", status["git_health"])
+            + row("index schema version", status["index_schema_version"])
+        )
+    }
+</section>
+</div>
 """
-    return page("Chronicle admin", body, notice, "ok" if notice else "error")
+    return page("Chronicle admin", body, notice, "ok" if notice else "error", active=STATUS_TAB)
 
 
 def github_connect_page(manifest_json: str, state: str, external_url: str) -> str:
     body = f"""
-{nav()}
 <p>Submitting this form opens GitHub's own "create a GitHub App" page in your
 browser, pre-filled from the manifest below. GitHub creates the App and
 redirects your browser back to <code>{escape(external_url)}/admin/github/callback</code>
 with a one-time code; Chronicle never sees this step directly.</p>
 <form method="post" action="https://github.com/settings/apps/new?state={escape(state)}">
 <input type="hidden" name="manifest" value='{escape(manifest_json)}'>
-<button type="submit">Create App on your personal account</button>
+<button type="submit" class="lat-btn lat-btn--primary">Create App on your personal account</button>
 </form>
-<form method="post" action="/admin/github/connect/org">
-<label for="org">Organization login (optional target instead)</label>
-<input type="text" id="org" name="org">
+<form method="post" class="lat-card" action="/admin/github/connect/org">
+<label class="lat-label" for="org">Organization login (optional target instead)</label>
+<input type="text" class="lat-input" id="org" name="org">
 <input type="hidden" name="manifest" value='{escape(manifest_json)}'>
-<button type="submit">Continue to organization form</button>
+<button type="submit" class="lat-btn">Continue to organization form</button>
 </form>
+<section class="lat-card">
 <h2>Manifest</h2>
-<pre>{escape(manifest_json)}</pre>
+<pre class="lat-code">{escape(manifest_json)}</pre>
+</section>
 """
-    return page("Connect GitHub", body)
+    return page("Connect GitHub", body, active=GITHUB_TAB)
 
 
 def github_connect_org_page(manifest_json: str, state: str, target_url: str) -> str:
     body = f"""
-{nav()}
 <p>Submitting this form opens GitHub's own "create a GitHub App" page for
 this organization, pre-filled from the manifest below.</p>
 <form method="post" action="{escape(target_url)}">
 <input type="hidden" name="manifest" value='{escape(manifest_json)}'>
-<button type="submit">Create App for this organization</button>
+<button type="submit" class="lat-btn lat-btn--primary">Create App for this organization</button>
 </form>
+<section class="lat-card">
 <h2>Manifest</h2>
-<pre>{escape(manifest_json)}</pre>
+<pre class="lat-code">{escape(manifest_json)}</pre>
+</section>
 """
-    return page("Connect GitHub (organization)", body)
+    return page("Connect GitHub (organization)", body, active=GITHUB_TAB)
 
 
 def github_install_page(installations: list[dict[str, Any]]) -> str:
@@ -348,16 +423,15 @@ def github_install_page(installations: list[dict[str, Any]]) -> str:
 
     options = "".join(option(inst) for inst in installations)
     body = f"""
-{nav()}
-<form method="post" action="/admin/github/install">
-<label for="installation_id">Installation</label>
-<select id="installation_id" name="installation_id">{options}</select>
-<label for="pasted">...or paste an installation id</label>
-<input type="text" id="pasted" name="pasted_id">
-<button type="submit">Use this installation</button>
+<form method="post" class="lat-card chr-narrow" action="/admin/github/install">
+<label class="lat-label" for="installation_id">Installation</label>
+<select class="lat-select" id="installation_id" name="installation_id">{options}</select>
+<label class="lat-label" for="pasted">...or paste an installation id</label>
+<input type="text" class="lat-input" id="pasted" name="pasted_id">
+<button type="submit" class="lat-btn lat-btn--primary">Use this installation</button>
 </form>
 """
-    return page("Choose installation", body)
+    return page("Choose installation", body, active=GITHUB_TAB)
 
 
 def github_repo_page(repos: list[dict[str, Any]]) -> str:
@@ -368,14 +442,13 @@ def github_repo_page(repos: list[dict[str, Any]]) -> str:
 
     options = "".join(option(repo) for repo in repos)
     body = f"""
-{nav()}
-<form method="post" action="/admin/github/repo">
-<label for="repo">Repository</label>
-<select id="repo" name="repo">{options}</select>
-<button type="submit">Verify and choose this repository</button>
+<form method="post" class="lat-card chr-narrow" action="/admin/github/repo">
+<label class="lat-label" for="repo">Repository</label>
+<select class="lat-select" id="repo" name="repo">{options}</select>
+<button type="submit" class="lat-btn lat-btn--primary">Verify and choose this repository</button>
 </form>
 """
-    return page("Choose repository", body)
+    return page("Choose repository", body, active=GITHUB_TAB)
 
 
 def tokens_page(
@@ -386,7 +459,8 @@ def tokens_page(
     ui_disabled: bool = False,
 ) -> str:
     minted_html = (
-        f'<p class="notice ok">New token (shown once): <code>{escape(minted)}</code></p>'
+        '<p class="notice ok lat-banner lat-banner--ok">New token (shown once): '
+        f"<code>{escape(minted)}</code></p>"
         if minted
         else ""
     )
@@ -400,11 +474,11 @@ def tokens_page(
         if name == UI_TOKEN_NAME and ui_disabled:
             return (
                 '<form method="post" action="/admin/tokens/ui/reenable">'
-                '<button type="submit">Re-enable UI</button></form>'
+                '<button type="submit" class="lat-btn">Re-enable UI</button></form>'
             )
         return (
             f'<form method="post" action="/admin/tokens/{escape(name)}/revoke">'
-            '<button type="submit">Revoke</button></form>'
+            '<button type="submit" class="lat-btn">Revoke</button></form>'
         )
 
     # A bare YYYY-MM-DD stays a date (no instant to shift); see `_stamp`.
@@ -416,16 +490,12 @@ def tokens_page(
         for t in tokens
     )
     body = f"""
-{nav()}
 {minted_html}
-<form method="post" action="/admin/tokens">
-<label for="name">New token name</label>
-<input type="text" id="name" name="name" required>
-<button type="submit">Issue token</button>
+<form method="post" class="lat-card chr-narrow" action="/admin/tokens">
+<label class="lat-label" for="name">New token name</label>
+<input type="text" class="lat-input" id="name" name="name" required>
+<button type="submit" class="lat-btn lat-btn--primary">Issue token</button>
 </form>
-<table>
-<tr><th>name</th><th>created</th><th>last used</th><th>revoked</th><th></th></tr>
-{rows}
-</table>
+{_table(rows, "<th>name</th><th>created</th><th>last used</th><th>revoked</th><th></th>")}
 """
-    return page("Tokens", body, notice, "ok" if minted else "error")
+    return page("Tokens", body, notice, "ok" if minted else "error", active=TOKENS_TAB)

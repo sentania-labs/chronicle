@@ -168,7 +168,7 @@ def test_editor_renders_feedback_versions_run_and_claim_as_local_time(
     }
     html = tpl.editor_page(draft, versions, feedback, run, None, banner=False)
     _assert_local(html, CLAIM_STAMP, "since 2020-05-06 02:08 CDT")
-    _assert_local(html, VERSION_STAMP, "at 2020-03-03 23:06 CST")
+    _assert_local(html, VERSION_STAMP, "<td>2020-03-03 23:06 CST</td>")
     _assert_local(html, FEEDBACK_STAMP, "at 2020-02-02 22:05 CST")
     _assert_local(html, RUN_STAMP, "succeeded at 2020-04-05 01:07 CDT")
 

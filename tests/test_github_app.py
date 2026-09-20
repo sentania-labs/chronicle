@@ -152,6 +152,9 @@ def test_callback_exchanges_the_code_and_never_stores_the_pem_in_plaintext(
         "/admin/github/callback", params={"code": "good-code", "state": state}
     )
     assert response.status_code == 200
+    # The success page is reached with a session, so it keeps the tabs and Log out.
+    assert 'href="/admin/github/connect" aria-current="page"' in response.text
+    assert "Log out" in response.text
 
     record = admin_services.github_store.load()
     assert record is not None
@@ -344,7 +347,8 @@ def test_digest_html_endpoint_shows_an_already_running_notice(admin_client: Test
 def test_manifest_json_round_trips_through_the_connect_page(admin_client: TestClient) -> None:
     response = admin_client.get("/admin/github/connect")
     text = response.text
-    start = text.index("<pre>") + len("<pre>")
+    marker = '<pre class="lat-code">'
+    start = text.index(marker) + len(marker)
     end = text.index("</pre>")
     from html import unescape
 

@@ -10,6 +10,24 @@
 
 var BACKUP_PREFIX = "chronicle-backup:";
 
+// The tab title and heading the server rendered for a page, read from a parsed
+// copy of it. The heading and the tab title come from the draft title, which a
+// save can change, so they are refreshed with the `data-refresh` regions
+// rather than left reading the title the page loaded with (#36). Returns null
+// when the parsed page has neither, so a partial page never blanks them.
+function pageTitles(doc) {
+  if (!doc) {
+    return null;
+  }
+  var heading = doc.querySelector("h1");
+  var title = doc.title || "";
+  var text = heading ? heading.textContent : "";
+  if (!title && !text) {
+    return null;
+  }
+  return { title: title, heading: text };
+}
+
 // A field-by-field comparison of two editor states ({body, fields}), so "is
 // there anything unsaved" and "does the stored backup differ from the server's
 // copy" are the same question asked the same way.
@@ -513,6 +531,14 @@ function saveStateText(state, detail) {
         current.replaceWith(fresh);
       }
     });
+    var titles = pageTitles(doc);
+    var heading = document.querySelector("h1");
+    if (titles && titles.title) {
+      document.title = titles.title;
+    }
+    if (titles && titles.heading && heading) {
+      heading.textContent = titles.heading;
+    }
   }
 
   // --- Saving ------------------------------------------------------------
@@ -815,6 +841,7 @@ function saveStateText(state, detail) {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     sameState: sameState,
+    pageTitles: pageTitles,
     backupVerdict: backupVerdict,
     backupWriteAction: backupWriteAction,
     makeBackupStore: makeBackupStore,

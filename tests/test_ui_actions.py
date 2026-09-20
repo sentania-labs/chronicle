@@ -205,7 +205,7 @@ def test_editor_renders_preview_on_published_and_publish_disabled(
     html = client.get(f"/content/drafts/{draft_id}").text
     assert "preview" in _action_urls(html)
     assert "approve" not in _action_urls(html)
-    assert re.search(r'<button type="button" class="offer-approve" disabled', html)
+    assert re.search(r'<button type="button" class="lat-btn offer-approve" disabled', html)
     assert "Preview first" in html
 
 

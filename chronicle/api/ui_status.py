@@ -26,5 +26,27 @@ STATUS_LABELS: dict[str, str] = {
 }
 
 
+# Which Lattice state colour a status carries, or "" for the neutral badge.
+# A state colour carries state and nothing else, so only the statuses that mean
+# something get one: `published` is done (ok), `revision_requested` is waiting
+# on a person (warn), `rejected` is a refusal (bad). Every in-progress status
+# stays neutral on purpose: the label already says which, and colouring them
+# apart would be decoration.
+STATUS_TONES: dict[str, str] = {
+    "drafting": "",
+    "in_review": "",
+    "revision_requested": "warn",
+    "previewed": "",
+    "approved": "",
+    "published": "ok",
+    "unpublished": "",
+    "rejected": "bad",
+}
+
+
 def status_label(status: str) -> str:
     return STATUS_LABELS.get(status, status)
+
+
+def status_tone(status: str) -> str:
+    return STATUS_TONES.get(status, "")
