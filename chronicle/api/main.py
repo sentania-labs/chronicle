@@ -108,6 +108,44 @@ class ContentSecurityPolicyMiddleware:
         await self.app(scope, receive, send_with_csp)
 
 
+# Caching policy for `/static`: REVALIDATE ALWAYS, not immutable-with-fingerprint.
+# `no-cache` lets a browser keep a copy but forces it to ask this process on
+# every use; Starlette's `StaticFiles` answers with an ETag (file mtime and
+# size), so an unchanged asset costs a tiny 304 and a changed one is fetched.
+# That cannot serve a stale asset across a deploy, which matters because
+# `editor.js` carries data-safety behaviour (the local backup): a stale copy
+# ran after an image rebuild once and hid a fix. Fingerprinting the URLs
+# (`editor.abc123.js`, immutable) is faster on repeat views but needs every
+# template that names an asset to carry the hash and a hash step at build time,
+# and one missed reference is exactly the stale-copy failure. This is an
+# internal tool with a handful of small files and one editor, so the cost of
+# revalidating is nothing and the simpler policy wins. Residual risk: the ETag
+# is mtime-and-size, so a rebuild that changed a file's bytes but kept both its
+# size and its mtime would revalidate as unchanged; a fresh checkout does not.
+STATIC_CACHE_CONTROL = b"no-cache"
+
+
+class RevalidatingStaticFiles(StaticFiles):
+    """`StaticFiles` that puts `Cache-Control: no-cache` on the assets it
+    serves, a 304 included. A missing file's 404 is raised out to the app's
+    error handler instead and carries no validator, so a browser has nothing to
+    reuse it with."""
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        async def send_revalidating(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                headers = [
+                    (name, value)
+                    for name, value in message.get("headers", [])
+                    if name.lower() != b"cache-control"
+                ]
+                headers.append((b"cache-control", STATIC_CACHE_CONTROL))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await super().__call__(scope, receive, send_revalidating)
+
+
 class BodySizeLimitMiddleware:
     """Enforce the body ceiling on the stream itself, not only Content-Length.
 
@@ -385,7 +423,7 @@ def create_app() -> FastAPI:
     app.include_router(ui_router)
     # No CDN, no network fetch at page load (AGENTS.md): vendored JS/CSS is
     # served from this same process, never fetched from anywhere else.
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.mount("/static", RevalidatingStaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/healthz", response_model=Health, tags=["operations"])
     async def healthz() -> Health:
