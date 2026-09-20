@@ -39,7 +39,8 @@ import os
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -135,10 +136,16 @@ class HugoConventions:
     environment: str
     source: str
     fallback_reason: str | None = None
+    # The site-relative directory that holds most of this site's posts, as
+    # observed by `with_observed_post_dir` after a walk; where a brand-new
+    # post is written (`read_new_post_dir_from_state`). None until a digest
+    # has walked a site that has any post.
+    postdir: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "contentdir": self.contentdir,
+            "postdir": self.postdir,
             "staticdir": self.staticdir,
             "mainsections": list(self.mainsections),
             "taxonomies": self.taxonomies,
@@ -290,6 +297,85 @@ def read_content_dir_from_state(data_dir: Path) -> str:
     if isinstance(content_dir, str) and content_dir.strip():
         return content_dir
     return FALLBACK_CONTENT_DIR
+
+
+def dominant_post_dir(discovered: list[DiscoveredPost], content_dir: str) -> str | None:
+    """The section directory under `content_dir` that holds most of `discovered`.
+
+    A Hugo section is a first-level directory of the content root, so this
+    counts each post under the first segment of its path below `content_dir`
+    (a post at the root of `content_dir` counts for `content_dir` itself) and
+    returns the busiest, ties broken by name so the answer never flips
+    between two digests of the same site. None when there is no post to
+    count. It is observed rather than derived because Hugo has no key for
+    it: `params.mainsections` names page *types* (Scott's site says `post`
+    for posts that live in `content/posts`), not directories.
+    """
+    root = PurePosixPath(content_dir.rstrip("/"))
+    counts: Counter[str] = Counter()
+    for post in discovered:
+        try:
+            relative = PurePosixPath(post.path).relative_to(root)
+        except ValueError:
+            continue
+        counts[str(root / relative.parts[0]) if len(relative.parts) > 1 else str(root)] += 1
+    if not counts:
+        return None
+    return min(counts, key=lambda directory: (-counts[directory], directory))
+
+
+def with_observed_post_dir(
+    conventions: HugoConventions, discovered: list[DiscoveredPost]
+) -> HugoConventions:
+    """`conventions` with `postdir` filled in from the posts a walk found.
+
+    Only a real `hugo config` read is annotated: the fallback's `contentdir`
+    is the whole pre-ADR-017 path, not a root, so nothing observed under it
+    can be told apart from the constant.
+    """
+    if conventions.source != "hugo_config":
+        return conventions
+    return replace(conventions, postdir=dominant_post_dir(discovered, conventions.contentdir))
+
+
+def read_new_post_dir_from_state(data_dir: Path) -> str:
+    """Where a brand-new post file goes, site-relative, from the last digest's state.
+
+    `contentdir` is the content ROOT (`content`), while
+    `FALLBACK_CONTENT_DIR` is the whole pre-ADR-017 convention
+    (`content/posts`); they are not the same kind of value, so a new post's
+    directory is never built from `contentdir` alone. In order:
+
+    1. No digest state, an unparseable file, a fallback read, or a
+       `contentdir` outside the site: `FALLBACK_CONTENT_DIR`, exactly the
+       pre-ADR-017 behaviour, so a Chronicle that never read a site's
+       conventions publishes where it always did.
+    2. A real read with an observed `postdir` (`with_observed_post_dir`):
+       that section, so a new post lands beside its siblings.
+    3. A real read with no observed post (an empty site, or state written
+       before `postdir` existed): `<contentdir>/posts`, Chronicle's own
+       section name, or `contentdir` itself when it already ends in `posts`.
+    """
+    path = data_dir.joinpath(*TOOLCHAIN_STATE_PATH)
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return FALLBACK_CONTENT_DIR
+    conventions = loaded.get("conventions") if isinstance(loaded, dict) else None
+    if not isinstance(conventions, dict) or conventions.get("source") != "hugo_config":
+        return FALLBACK_CONTENT_DIR
+    content_dir = conventions.get("contentdir")
+    if not isinstance(content_dir, str) or not _is_safe_relative_dir(content_dir.rstrip("/")):
+        return FALLBACK_CONTENT_DIR
+    root = content_dir.rstrip("/")
+    observed = conventions.get("postdir")
+    if (
+        isinstance(observed, str)
+        and _is_safe_relative_dir(observed)
+        and (observed == root or observed.startswith(f"{root}/"))
+    ):
+        return observed
+    return root if PurePosixPath(root).name == "posts" else f"{root}/posts"
 
 
 def unconfigured_taxonomy_keys(conventions: HugoConventions) -> tuple[str, ...]:

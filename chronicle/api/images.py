@@ -75,6 +75,24 @@ def normalise(raw: bytes) -> NormalisedImage:
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 _UNSAFE_EXTENSION_CHARS = re.compile(r"[^A-Za-z0-9]+")
 _PLAIN_FILENAME = re.compile(r"[A-Za-z0-9._-]+")
+# A word as a person reads it: a run of letters and digits in any script.
+_STEM_WORD = re.compile(r"[^\W_]+")
+_CONTENT_HASH_LENGTH = 10
+
+
+def _has_fragment_word(stem: str) -> bool:
+    """True when cleaning cut a word of `stem` in half.
+
+    A word that mixes ASCII with characters cleaning drops (`写真2`) survives
+    only as a fragment (`2`) that says nothing about the file and is what two
+    different images named in the same script both reduce to. A word that was
+    wholly ASCII, or wholly dropped, is not a fragment: the first is what the
+    author typed and the second leaves nothing behind.
+    """
+    for word in _STEM_WORD.findall(stem):
+        if not word.isascii() and any(char.isascii() for char in word):
+            return True
+    return False
 
 
 def safe_upload_filename(name: str, content: bytes = b"") -> str:
@@ -88,16 +106,22 @@ def safe_upload_filename(name: str, content: bytes = b"") -> str:
 
     A stem with nothing left after cleaning (a name written entirely outside
     ASCII) keeps its extension and takes a short hash of `content` as the stem,
-    so two such images on one post stay two different files.
+    so two such images on one post stay two different files. A stem that keeps
+    only a fragment of a word (`写真2` cleans to `2`, and `猫2` to the same)
+    keeps that fragment and gets the same hash after it (`2-3f9a1c0b7d`), so
+    it is still recognisable and never collides with another image's.
     """
     base = basename(name.replace("\\", "/"))
     stem, _, extension = base.rpartition(".") if "." in base else (base, "", "")
+    fragment = _has_fragment_word(stem)
     stem = _UNSAFE_FILENAME_CHARS.sub("-", stem).strip(".-")
     extension = _UNSAFE_EXTENSION_CHARS.sub("", extension)
     if not stem:
         if not content:
             return "upload"
-        stem = hashlib.sha256(content).hexdigest()[:10]
+        stem = hashlib.sha256(content).hexdigest()[:_CONTENT_HASH_LENGTH]
+    elif fragment and content:
+        stem = f"{stem}-{hashlib.sha256(content).hexdigest()[:_CONTENT_HASH_LENGTH]}"
     return f"{stem}.{extension}" if extension else stem
 
 

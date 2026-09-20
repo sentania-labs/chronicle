@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import unquote
+
 import pytest
 
 from chronicle.api import convert
@@ -273,6 +275,14 @@ UNUSABLE_URLS = [
     "/a/.git",
     "/a/.GIT",
     "/a/b /",
+    # Issue 46: an encoded name is not the string the URL resolves to.
+    "/a/my%20post/",
+    "/a/100%/",
+    "/a/%41",
+    "/a/my post/",
+    "/a/a?b=1",
+    "/a/a#top",
+    "/a/a\tb",
 ]
 
 
@@ -333,3 +343,100 @@ def test_two_attached_images_with_the_same_filename_get_distinct_output_paths() 
     assert second.site_path == "static/images/my-post/pic-bbbbbbbb.png"
     assert first.site_path != second.site_path
     assert len({placement.site_path for placement in converted.images}) == 2
+
+
+# Issue #21: a brand-new post is written into the site's own section
+# directory, not the hardcoded `content/posts`. `new_post_dir` is where a file
+# is created; `content_dir` stays the content root a source path is matched
+# against, and the two are different kinds of value.
+
+
+def test_new_post_lands_in_the_sites_section_directory() -> None:
+    draft = _draft(frontmatter={"title": "My Post", "date": "2024-03-03"})
+    converted = convert.convert(draft, None, "content2", "content2/blog")
+    assert converted.post_path == "content2/blog/2024-03-03-my-post.md"
+
+
+def test_new_post_with_no_site_directory_still_lands_in_content_posts() -> None:
+    """A Chronicle that never read a site's conventions publishes where it always did."""
+    draft = _draft(frontmatter={"title": "My Post", "date": "2024-03-03"})
+    assert convert.convert(draft).post_path == "content/posts/2024-03-03-my-post.md"
+    assert (
+        convert.convert(draft, None, None, None).post_path == "content/posts/2024-03-03-my-post.md"
+    )
+
+
+@pytest.mark.parametrize("unsafe", ["../outside", "/etc", "a/../../b", ""])
+def test_an_unsafe_new_post_dir_is_never_a_path(unsafe: str) -> None:
+    draft = _draft(frontmatter={"title": "My Post", "date": "2024-03-03"})
+    converted = convert.convert(draft, None, "content", unsafe)
+    assert converted.post_path == "content/posts/2024-03-03-my-post.md"
+
+
+def test_new_post_dir_trailing_slash_is_stripped() -> None:
+    draft = _draft(frontmatter={"title": "My Post", "date": "2024-03-03"})
+    assert (
+        convert.convert(draft, None, "content", "content/posts/").post_path
+        == "content/posts/2024-03-03-my-post.md"
+    )
+
+
+def test_an_imported_post_still_keeps_its_own_path_over_new_post_dir() -> None:
+    draft = _draft(
+        frontmatter={"title": "My Post", "date": "2024-03-03", "url": "/2024/03/03/my-post/"},
+        source_post={"slug": "my-post", "path": "archive/my-post.md", "sha": "abc"},
+    )
+    converted = convert.convert(draft, None, "archive", "archive/blog")
+    assert converted.post_path == "archive/my-post.md"
+
+
+# Issue 46: the directory on disk and the image URL written into the body must
+# resolve to the same place on the real site. A host decodes a URL before it
+# looks the file up, so `static/images/my%20post/` is never reached by
+# `/images/my%20post/x.png` (that decodes to `my post`).
+
+
+def _decoded_url_path(url: str) -> str:
+    return unquote(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["/2026/08/my-post/", "my-post", "/a/v1.2", "/a/h\u00e9llo/", "/a/.x", "/a/a~b_c-d/", None],
+)
+def test_the_url_of_an_image_decodes_to_the_path_it_is_written_at(url: str | None) -> None:
+    draft = _draft(
+        frontmatter={"title": "My Post", "url": url} if url else {"title": "My Post"},
+        images=[DraftImage(image_id="img1", filename="shot.png", role="inline")],
+    )
+    placed = convert.convert(draft).images[0]
+    assert _decoded_url_path(placed.url) == "/" + placed.site_path.removeprefix("static/")
+
+
+@pytest.mark.parametrize("segment", ["my%20post", "100%", "%41bc", "a?b", "a#b", "my post"])
+def test_an_unresolvable_segment_never_names_the_image_directory(segment: str) -> None:
+    draft = _draft(
+        frontmatter={"title": "My Post", "url": f"/2026/09/{segment}/"},
+        images=[DraftImage(image_id="img1", filename="shot.png", role="inline")],
+        body="![x](shot.png)",
+    )
+    converted = convert.convert(draft)
+    placed = converted.images[0]
+    assert placed.site_path == "static/images/my-post/shot.png"
+    assert placed.url == "/images/my-post/shot.png"
+    assert "(/images/my-post/shot.png)" in converted.text
+    assert segment not in placed.site_path and segment not in placed.url
+
+
+def test_convert_does_not_trust_a_pinned_percent_encoded_image_dir() -> None:
+    """A draft that pinned `my%20post` before the refusal: the images were
+    written to a directory the URL never reached, so the derived name stands in
+    and the body's references land where they resolve."""
+    draft = _draft(
+        image_dir="my%20post",
+        frontmatter={"title": "My Post", "url": "/2026/09/my%20post/"},
+        images=[DraftImage(image_id="img1", filename="shot.png", role="inline")],
+    )
+    placed = convert.convert(draft).images[0]
+    assert placed.site_path == "static/images/my-post/shot.png"
+    assert placed.url == "/images/my-post/shot.png"

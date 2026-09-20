@@ -385,6 +385,24 @@ def test_put_with_a_traversal_url_is_422_frontmatter_url_invalid(
     assert response.json()["error"] == "frontmatter_url_invalid"
 
 
+def test_put_with_a_percent_encoded_url_segment_is_422_frontmatter_url_invalid(
+    client: TestClient, agent_token: str
+) -> None:
+    """Issue 46: `my%20post` would name a directory the image URL never reaches
+    (the URL decodes to `my post`), so it is refused at the save that sets it."""
+    draft_id = new_draft(client, agent_token)
+    response = save(
+        client,
+        agent_token,
+        draft_id,
+        0,
+        frontmatter={"title": "Probe", "url": "/2026/09/my%20post/"},
+    )
+    assert response.status_code == 422
+    assert response.json()["error"] == "frontmatter_url_invalid"
+    assert "percent" in response.json()["message"]
+
+
 def test_reject_then_restore(client: TestClient, agent_token: str, ui_token: str) -> None:
     draft_id = new_draft(client, agent_token)
     save(client, agent_token, draft_id, 0)

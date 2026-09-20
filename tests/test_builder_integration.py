@@ -9,18 +9,15 @@ the actual toolchain.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
-
-import pytest
 
 from chronicle.api.store import Store
 from chronicle.builder import runner
 from chronicle.builder.leases import LeaseDirectory
 from chronicle.builder.settings import BuilderSettings
-from tests.conftest import png_bytes
+from tests.conftest import png_bytes, requires_hugo
 
-pytestmark = pytest.mark.skipif(shutil.which("hugo") is None, reason="hugo is not on PATH")
+pytestmark = requires_hugo
 
 
 def _fixture_settings(data_dir: Path, work_dir: Path) -> BuilderSettings:

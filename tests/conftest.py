@@ -8,8 +8,9 @@ test.
 from __future__ import annotations
 
 import io
+import os
 import shutil
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -21,13 +22,52 @@ from chronicle.api.main import DATA_DIR_ENV, create_app
 from chronicle.api.store import Store
 from chronicle.api.tokens import UI_TOKEN_FILE_NAME
 
-# ADR 017's real-hugo-config tests need the actual binary (the api and
-# builder images both install it; CI's `test` job now does too). A
-# contributor without Hugo on PATH gets a clear skip here rather than a
-# confusing assertion failure against the fallback path.
-requires_hugo = pytest.mark.skipif(
-    shutil.which("hugo") is None, reason="requires a real hugo binary on PATH"
-)
+# Tests that need a tool the Python environment does not install: node for
+# `tests/*.test.mjs`, a headless Chrome for `test_js_dom.py`, and Hugo for
+# ADR 017's real `hugo config` derivation and the builder's integration test.
+# On a developer machine a missing tool is a skip with the reason stated.
+# CI sets CHRONICLE_REQUIRE_TEST_TOOLS=1, which turns the same absence into a
+# failure, so a runner image that loses one cannot turn its tests into skips
+# behind a green pipeline (issue 38). Mark a test with
+# `pytest.mark.requires_tool("hugo")` (or use `requires_hugo`); `_required_tools`
+# below does the rest.
+REQUIRE_TOOLS_ENV = "CHRONICLE_REQUIRE_TEST_TOOLS"
+CHROME_ENV = "CHRONICLE_TEST_CHROME"
+
+
+def find_chrome() -> str | None:
+    """A Chrome or Chromium binary: `CHRONICLE_TEST_CHROME`, else the first on PATH."""
+    return os.environ.get(CHROME_ENV) or next(
+        (
+            found
+            for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
+            if (found := shutil.which(name))
+        ),
+        None,
+    )
+
+
+TOOL_FINDERS: dict[str, Callable[[], str | None]] = {
+    "node": lambda: shutil.which("node"),
+    "hugo": lambda: shutil.which("hugo"),
+    "chrome": find_chrome,
+}
+
+requires_hugo = pytest.mark.requires_tool("hugo")
+
+
+@pytest.fixture(autouse=True)
+def _required_tools(request: pytest.FixtureRequest) -> None:
+    for marker in request.node.iter_markers("requires_tool"):
+        for tool in marker.args:
+            if TOOL_FINDERS[tool]() is not None:
+                continue
+            reason = f"{tool} is not available (and this test needs it)"
+            if os.environ.get(REQUIRE_TOOLS_ENV):
+                pytest.fail(
+                    f"{reason}; {REQUIRE_TOOLS_ENV} is set, so this is a failure", pytrace=False
+                )
+            pytest.skip(reason)
 
 
 @pytest.fixture

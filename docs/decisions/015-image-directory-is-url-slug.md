@@ -53,6 +53,32 @@ existed (`_pin_slug` falls back), and a draft that already pinned a bad
 `image_dir` (`convert.convert` ignores it and derives the name again).
 `convert.usable_image_dir` and `convert.url_problem` are the one definition.
 
+Amended 2026-09-19 (issue 46): a percent-encoded segment is refused, not
+decoded. The directory on disk and the image URL rewritten into the body are
+built from the same string, but a browser or static host decodes a URL before
+it looks the file up, so a segment like `my%20post` produced a directory
+literally named `my%20post` that `/images/my%20post/shot.png` never reaches
+(it decodes to `my post`): every image on such a post 404ed. The requirement
+is that the directory and the URL resolve to the same place, so a name is
+usable only when decoding it, and reading it as a URL, are both no-ops.
+`_segment_problem` now refuses any `%` (which also covers `%2e%2e` and `%5c`,
+so it no longer decodes to judge them), any whitespace (a reference in a body
+stops at it, so `my post` cannot be written into a body either), and `?` and
+`#` (they end a URL path, so `a?b` names the directory `a`). The refusal is
+the same mechanism as issue 28: 422 `frontmatter_url_invalid` at the save that
+sets `url`, the pinned slug wherever a refusal is impossible or too late, and
+a `url` the draft already carries is never refused again. A draft that pinned
+such a directory earlier is treated like one that pinned `..`: `convert`
+ignores the pin and derives the name again, so its references now point at a
+directory that resolves; files already written under the old name are left
+where they are. Percent-decoding instead (`my%20post` to `my post` on disk)
+was rejected: it would put a space in a filesystem path, need every place
+that writes the URL (body, frontmatter image keys, the recorded image list,
+unpublish's delete set, reconciliation) to encode it again, and turn `%2f`
+and `%00` into decoded characters that then need judging. Non-ASCII letters
+are still accepted as they are: a literal `é` in the URL and on disk
+decode to the same name.
+
 This is pinned once, at the same moment a slug is pinned (`_fill_from_post`
 for an import, `_pin_slug` for a new draft's first preview or approve), and
 stored on `Draft.image_dir` rather than recomputed from `url` on every
