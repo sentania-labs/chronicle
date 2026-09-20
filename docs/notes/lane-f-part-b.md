@@ -105,3 +105,112 @@ decision text is unchanged.
 ## Broken in the other lane's files
 
 Nothing found. Nothing was fixed there.
+
+## Fix round (2026-09-19/20)
+
+An independent reviewer went over this branch at `62d3a02` and filed seven
+findings, lettered A through G. Commits `ca4fbce` through `2596ea9`, plus the
+formatting-only `7fcc248`, are the response. `store.py`, `convert.py`,
+`publisher.py`, `images.py` and `ci.yml` were still not touched.
+
+- **A: "Came back from review" reappeared after a resubmit.** The reviewer's
+  scenario: `revision_requested`, a preview (to `drafting`), a resubmit (to
+  `in_review`), then a further preview success lands on `previewed`. Nothing
+  in the feedback log orders that resubmit against the old request (`submit`
+  and `approve` write no feedback entry), so the badge was reading a stale
+  verdict. Fixed in `ca4fbce`: `came_back_from_review`
+  (`chronicle/api/ui_status.py`) now checks the log only while the status is
+  `drafting`, never `previewed`. What the badge catches now: a draft sitting
+  in `revision_requested`, or sitting in `drafting` with `request_revision`
+  as the newest feedback verdict, in both cases unless it has a `published`
+  record (still read as answered, per the existing published-record
+  exception). What it no longer catches: a draft that reached `previewed`
+  straight out of `revision_requested` on its first preview, with no
+  resubmit in between. That draft's badge now disappears one step earlier
+  than "resubmitted", the moment the preview succeeds, because `previewed`
+  cannot be told apart from the already-answered case with the log alone.
+  This is a known, accepted gap, not a new bug: closing it needs the store to
+  record something the log can order a resubmit against, which is out of
+  this lane's files. `chronicle/api/ui_status.py`'s docstring now states
+  this directly (it no longer claims `previewed` coverage anywhere), and
+  `tests/test_ui_status.py` covers both the still-caught case and the
+  no-longer-caught one.
+- **B: the UI author is `editor`, docs still said `scott`.** `tokens.py`
+  already had `UI_COMMIT_AUTHOR = "editor"`; the prose describing the wire
+  contract had not caught up. Fixed in `c08d2ce`: `AGENTS.md`,
+  `docs/spec/00-spec.md`, `docs/decisions/014-ui-backend.md`,
+  `docs/decisions/001-filesystem-first-internal-git.md`, and
+  `chronicle/api/routes/ui.py`'s module docstring now all say `editor`, each
+  noting that records written before the rename still say `scott` and are
+  not rewritten. The two ADRs got a dated amendment rather than a rewrite of
+  the original decision text, matching how ADR 019 was already handled in
+  part A.
+  Not fixed, reporting instead: the reviewer's related nit that token names
+  are not validated or reserved (`chronicle/api/tokens.py`), so a consumer
+  token literally named `editor` would author indistinguishably from the UI.
+  The old value `scott` was a name nobody would pick for a token by
+  accident; `editor` is a word an operator naming a new agent token could
+  plausibly choose. Fixing it means deciding a reserved-name policy for
+  token creation, which is a `tokens.py` concern outside this lane's file
+  list. Reported here, not fixed, and not filed as an issue by this round.
+- **C: the CRLF test proved the wrong thing; a CRLF-stored post is
+  rewritten wholesale on first UI save.** The existing test seeded an LF
+  base and posted CRLF over it, which only proves browser CRLF gets
+  normalised; it never tested a base that was itself stored with CRLF. Fixed
+  in `4d5d083`: the test was renamed to say what it actually covers
+  (`test_editor_save_stores_lf_when_posting_over_an_lf_base`), and a new
+  test, `test_editor_save_over_a_crlf_stored_base_rewrites_every_line`, adds
+  coverage for the CRLF-stored-base case the note already disclosed but no
+  test proved.
+  Not fixed, reporting instead: a post imported from main with real CRLF
+  line endings, or written by any caller other than this UI route, still
+  has every line rewritten on its first save through this editor, because
+  only `draft_save`'s `_crlf_to_lf` normalises, on the way in, and nothing
+  normalises what is already on disk. The resulting version diff shows every
+  line removed and re-added instead of the one line that actually changed,
+  and (unverified here) the publish PR built from that version would carry
+  the same full-file diff on the blog side. The real fix is normalising on
+  read or on import, both of which live in `store.py`, outside this lane's
+  file list. This is the first of the two items this fix round is reporting
+  rather than fixing because the file that would need to change belongs to
+  another lane.
+- **D: `?status=drafting,drafting` rendered every card twice.**
+  `parse_status_filter` concatenated per-status lists with no
+  de-duplication; a hand-typed URL with a repeated status doubled its cards.
+  Fixed in `dc31908`: it now builds the list through a dict to de-duplicate
+  while preserving order. `tests/test_ui_status.py` covers a repeated value
+  and a repeated value mixed with a distinct one.
+- **E: locked Save stays locked until a reload; no live browser check.**
+  Deliberately not fixed. If a publish PR merges or closes in another tab,
+  or a publish run finishes, the editor has no polling and no push channel,
+  so `#save-control` only refreshes on the next save, upload, or staged
+  action in that same tab; until then the button can show a stale
+  "in progress" lock a few seconds after the run has actually finished. The
+  reviewer flagged this as a nit, not a should-fix, and closing it for real
+  means adding a polling loop or a push mechanism to `editor.js`, which is a
+  design decision (poll interval, what triggers a re-render, added load on
+  every open editor tab) beyond what a fix round should decide on its own.
+  Left as-is; a candidate for its own pass if Scott wants it.
+- **F: `setSaveBusy`'s lock-check guard had no test.** Reverting
+  `if (button && saveLockReason() === null)` to `if (button)` in
+  `chronicle/api/static/editor.js`'s `setSaveBusy` left `tests/test_js.py`
+  green: the guard existed in code (a locked Save button already stays
+  disabled after a save response) but nothing proved it. `editor.js` itself
+  was not touched, because the behaviour was already correct. Fixed in
+  `62f9f50`: a new test in `tests/editor.test.mjs`
+  ("a save response that swaps in a locked Save button is not re-enabled
+  afterwards (#45)") drives a save whose response swaps in an already-locked
+  `#save-control` and asserts the resulting Save button stays disabled; it
+  goes red against the reviewer's mutation and green against the real code.
+- **G: dead `chr-missing-image` CSS hook.** `ui_templates.py` emitted
+  `class="chr-missing-image"` on a submission's missing-image row with no
+  matching CSS rule and no JS reading it. Fixed in `8c44c50` (class dropped)
+  and reflowed in `7fcc248` (the row's line wrapping, which the class
+  removal left ragged, put back to one line). `tests/test_ui_submission_edit.py`
+  updated to match the row's new markup.
+
+Both items reported above, not fixed, need a file this lane does not own:
+the CRLF-stored-base rewrite needs normalisation in `store.py` (finding C),
+and the token-name collision needs a reserved-name policy in
+`chronicle/api/tokens.py` (finding B's nit). Neither is in this lane's file
+list; both are left for whichever lane owns those files next.
