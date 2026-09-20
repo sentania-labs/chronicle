@@ -130,21 +130,37 @@ def came_back_from_review(
 ) -> bool:
     """True while a reviewer's request for changes is still unanswered.
 
-    `revision_requested` is that fact directly. Once a preview or a save moves
-    the draft on to `drafting` or `previewed`, the status forgets it, so it is
-    read from the feedback log instead: the newest review verdict is a request
-    for changes. Resubmitting is what answers it, and the draft is then In
-    review, where this is not asked. A rejection recorded after the request
-    settles it too (`reject` is the newest verdict, so this is false).
+    `revision_requested` is that fact directly. A save moves the draft on to
+    `drafting`, where the status forgets it, so it is read from the feedback
+    log instead: the newest review verdict is a request for changes. A
+    rejection recorded after the request settles it too (`reject` is the
+    newest verdict, so this is false).
 
-    A draft that has a published record is the one case the log cannot settle:
-    the request may predate a publish, and nothing in the log orders the two.
-    It is read as answered rather than showing a stale warning on a post that
-    was revised long after; `revision_requested` itself is still shown.
+    This deliberately stops at `drafting` and never claims the fact for
+    `previewed`. `drafting` is only ever reached from `revision_requested`,
+    `published` or a restore, so while the status is `drafting` the request
+    genuinely has not been resubmitted. `previewed` is not that clean: a
+    preview taken straight from a fresh `revise` reaches it (still
+    unanswered), but so does a full resubmit round trip (`revise`, `preview`,
+    `submit` back to `in_review`, then a further preview success lands on
+    `previewed` again) once the author has answered the request. `submit`
+    and `approve` write no feedback entry, so nothing in the log orders a
+    resubmit against an earlier request, and `store.py`, which owns that
+    log, is out of reach here. Rather than show a stale badge on an answered
+    draft, the badge no longer fires for `previewed` at all, which means a
+    draft that was previewed once, straight out of `revision_requested`, and
+    never resubmitted, stops showing "Came back from review" as soon as that
+    first preview succeeds, before the author submits it again.
+
+    A draft that has a published record is the one case the log cannot settle
+    either: the request may predate a publish, and nothing in the log orders
+    the two. It is read as answered rather than showing a stale warning on a
+    post that was revised long after; `revision_requested` itself is still
+    shown.
     """
     if status == "revision_requested":
         return True
-    if status not in ("drafting", "previewed") or published:
+    if status != "drafting" or published:
         return False
     verdicts = [action for action in feedback_actions if action in _VERDICTS]
     return bool(verdicts) and verdicts[-1] == "request_revision"

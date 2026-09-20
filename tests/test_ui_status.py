@@ -92,9 +92,8 @@ def test_the_facts_the_finer_statuses_carried_are_detail() -> None:
 
 def test_came_back_is_read_from_the_log_once_the_status_has_moved_on() -> None:
     assert came_back_from_review("revision_requested", [])
-    # A preview or a save moved it to drafting/previewed: the request stands.
-    for status in ("drafting", "previewed"):
-        assert came_back_from_review(status, ["submit", "request_revision"])
+    # A save moved it to drafting: the request stands.
+    assert came_back_from_review("drafting", ["request_revision"])
     assert not came_back_from_review("drafting", [])
     assert not came_back_from_review("drafting", ["material", "publish_failed"])
     # A later rejection is the newest verdict, so the request is settled.
@@ -103,9 +102,20 @@ def test_came_back_is_read_from_the_log_once_the_status_has_moved_on() -> None:
     # In review is a status that already says so, and published/rejected are done.
     for status in ("in_review", "approved", "published", "rejected", "unpublished"):
         assert not came_back_from_review(status, ["request_revision"])
+    # previewed never claims the fact: it cannot be told apart from a resubmit
+    # that has already answered the request (see the docstring).
+    assert not came_back_from_review("previewed", ["request_revision"])
     # A draft with a published record cannot be ordered against its request.
     assert not came_back_from_review("drafting", ["request_revision"], published=True)
     assert came_back_from_review("revision_requested", [], published=True)
+
+
+def test_came_back_does_not_reappear_after_a_resubmit_and_preview() -> None:
+    # The reviewer's scenario: request_revision, then a preview (drafting),
+    # then a resubmit (in_review), then a further preview success lands back
+    # on previewed. submit and approve write no feedback entry, so the log
+    # still ends on request_revision even though the request was answered.
+    assert not came_back_from_review("previewed", ["request_revision"])
 
 
 def test_board_shows_the_four_word_status_with_the_detail_beside_it(
