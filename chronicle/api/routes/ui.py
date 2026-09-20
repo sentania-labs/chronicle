@@ -758,7 +758,10 @@ def draft_image_file(
     """The bytes of an image attached to this draft, for the editor's live
     render (the body refers to it by bare filename, which no page can load).
     Only an image the draft has attached, and only the four decoded types the
-    store ever keeps (no SVG), served inline with no sniffing."""
+    store ever keeps (no SVG), served inline with no sniffing. `image_id` is
+    the content's own sha256, so the bytes behind a given URL never change:
+    the response is cacheable for the life of the browser session without a
+    revalidation round trip."""
     draft = services.store.get_draft(draft_id)
     if not any(item.image_id == image_id for item in draft.images):
         raise ApiError(404, "image_not_attached", f"draft {draft_id} has no image {image_id}")
@@ -766,7 +769,11 @@ def draft_image_file(
     return FileResponse(
         services.store.image_blob(image_id),
         media_type=record.mime,
-        headers={"X-Content-Type-Options": "nosniff", "Content-Disposition": "inline"},
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": "inline",
+            "Cache-Control": "private, max-age=31536000, immutable",
+        },
     )
 
 

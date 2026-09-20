@@ -195,9 +195,54 @@ function uploadOutcome(result) {
   };
 }
 
+function decodeSegment(segment) {
+  try {
+    return decodeURIComponent(segment);
+  } catch (e) {
+    // an undecodable segment simply matches only literally
+    return segment;
+  }
+}
+
+// A digested post's body carries the site path convert.py wrote at publish
+// ("/images/<image_dir>/<filename>", ADR 015), which 404s on Chronicle: only
+// the bytes route below serves the file. This resolves that form (with or
+// without the leading slash, with or without a literal "images" segment, each
+// segment raw or percent-encoded) to the attached image's serving URL, but
+// only when the directory segment matches this draft's own pinned image_dir.
+// Two drafts can share a filename (both "featured.png"), so a directory match
+// is required, not just a filename match: `imageDir` is empty for a draft
+// with none pinned, and then only the bare form below applies.
+function dirFilenameSrc(src, images, imageDir) {
+  if (!imageDir) {
+    return null;
+  }
+  var path = src.charAt(0) === "/" ? src.slice(1) : src;
+  var parts = path.split("/");
+  if (parts.length === 3 && parts[0] === "images") {
+    parts = parts.slice(1);
+  }
+  if (parts.length !== 2) {
+    return null;
+  }
+  if (decodeSegment(parts[0]) !== imageDir) {
+    return null;
+  }
+  var filename = decodeSegment(parts[1]);
+  for (var i = 0; i < images.length; i++) {
+    if (images[i].filename === filename) {
+      return images[i].src;
+    }
+  }
+  return null;
+}
+
 // Bare-filename references in the body point at attached images; the live
-// render swaps them for the URL the server serves that image from.
-function lookupImageSrc(src, images) {
+// render swaps them for the URL the server serves that image from. A
+// site-path reference ("/images/<image_dir>/<filename>" or
+// "<image_dir>/<filename>") resolves the same way, but only against this
+// draft's own image_dir (see dirFilenameSrc).
+function lookupImageSrc(src, images, imageDir) {
   var candidates = [src];
   try {
     candidates.push(decodeURIComponent(src));
@@ -209,7 +254,8 @@ function lookupImageSrc(src, images) {
       return images[i].src;
     }
   }
-  return src;
+  var dirMatch = dirFilenameSrc(src, images, imageDir);
+  return dirMatch !== null ? dirMatch : src;
 }
 
 function saveStateText(state, detail) {
@@ -285,6 +331,7 @@ function saveStateText(state, detail) {
   document.body.classList.add("js");
 
   var draftId = app.getAttribute("data-draft-id");
+  var imageDir = app.getAttribute("data-image-dir") || "";
   var baseInput = document.getElementById("base_version");
   var stateEl = document.getElementById("save-state");
   var uploadEl = document.getElementById("upload-state");
@@ -315,7 +362,7 @@ function saveStateText(state, detail) {
     // references for the URL the server serves them from.
     var images = attachedImages();
     return sanitize(marked.parse(text || ""), function (src) {
-      return lookupImageSrc(src, images);
+      return lookupImageSrc(src, images, imageDir);
     });
   }
 
@@ -883,6 +930,7 @@ if (typeof module !== "undefined" && module.exports) {
     backupMessage: backupMessage,
     uploadOutcome: uploadOutcome,
     lookupImageSrc: lookupImageSrc,
+    dirFilenameSrc: dirFilenameSrc,
     saveStateText: saveStateText,
   };
 }

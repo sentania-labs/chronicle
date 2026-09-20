@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 const require = createRequire(import.meta.url);
-const { pageTitles, sameState, backupVerdict, backupWriteAction, makeBackupStore, conflictBackupAction, backupMessage, uploadOutcome, lookupImageSrc, saveStateText } =
+const { pageTitles, sameState, backupVerdict, backupWriteAction, makeBackupStore, conflictBackupAction, backupMessage, uploadOutcome, lookupImageSrc, dirFilenameSrc, saveStateText } =
   require("../chronicle/api/static/editor.js");
 
 test("sameState compares the body and every field, missing and empty alike", () => {
@@ -91,6 +91,45 @@ test("image references resolve to the attached image's URL, encoded or not", () 
   assert.equal(lookupImageSrc("rack%20photo.png", images), "/content/drafts/d/images/i1/file");
   assert.equal(lookupImageSrc("https://example.com/x.png", images), "https://example.com/x.png");
   assert.equal(lookupImageSrc("%E0%A4%A", images), "%E0%A4%A");
+});
+
+test("a digested post's site-path image reference resolves against the draft's own image_dir", () => {
+  const images = [
+    { filename: "image.png", src: "/content/drafts/d/images/i1/file" },
+    { filename: "featured.png", src: "/content/drafts/d/images/i2/file" },
+  ];
+  const dir = "vcf-operations-can-now-see-my-unifi-network";
+  assert.equal(lookupImageSrc(`/images/${dir}/image.png`, images, dir), "/content/drafts/d/images/i1/file");
+  assert.equal(lookupImageSrc(`${dir}/image.png`, images, dir), "/content/drafts/d/images/i1/file");
+  assert.equal(
+    lookupImageSrc(`/images/${encodeURIComponent(dir)}/${encodeURIComponent("featured.png")}`, images, dir),
+    "/content/drafts/d/images/i2/file"
+  );
+  assert.equal(lookupImageSrc(`images/${dir}/featured.png`, images, dir), "/content/drafts/d/images/i2/file");
+  // Bare filename references still work when an image_dir is present.
+  assert.equal(lookupImageSrc("featured.png", images, dir), "/content/drafts/d/images/i2/file");
+});
+
+test("a site-path reference naming another post's directory is not rewritten, even with a matching filename", () => {
+  const images = [{ filename: "featured.png", src: "/content/drafts/d/images/i2/file" }];
+  const dir = "this-post";
+  assert.equal(lookupImageSrc("/images/some-other-post/featured.png", images, dir), "/images/some-other-post/featured.png");
+});
+
+test("with no image_dir pinned, only the bare filename form matches", () => {
+  const images = [{ filename: "featured.png", src: "/content/drafts/d/images/i2/file" }];
+  assert.equal(lookupImageSrc("/images/anything/featured.png", images, ""), "/images/anything/featured.png");
+  assert.equal(lookupImageSrc("featured.png", images, ""), "/content/drafts/d/images/i2/file");
+  assert.equal(dirFilenameSrc("/images/anything/featured.png", images, ""), null);
+});
+
+test("an absolute http(s) URL passes through the site-path resolution untouched", () => {
+  const images = [{ filename: "featured.png", src: "/content/drafts/d/images/i2/file" }];
+  const dir = "this-post";
+  assert.equal(
+    lookupImageSrc("https://example.com/images/this-post/featured.png", images, dir),
+    "https://example.com/images/this-post/featured.png"
+  );
 });
 
 test("every save state has its own text, and unknown states read as idle", () => {
