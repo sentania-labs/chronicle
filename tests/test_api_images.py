@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import io
+from pathlib import Path
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image as PillowImage
 
 from chronicle.api import gitrepo
+from chronicle.api.errors import ApiError
 from chronicle.api.images import MAX_IMAGE_BYTES
+from chronicle.api.store import Store
 
 from .conftest import auth, png_bytes
 
@@ -155,3 +159,58 @@ def test_images_are_not_tracked_by_git(client: TestClient, agent_token: str) -> 
     upload(client, agent_token, png_bytes())
     store = client.app.state.services.store  # type: ignore[attr-defined]
     assert not any(path.startswith("images/") for path in gitrepo.tracked_files(store.repo_dir))
+
+
+# Issue 47: `get_image` builds `images/<id[:2]>/<id>.json` from the id it is
+# handed. The router already refuses an id carrying a slash, but a bare `..`
+# (or `%2e%2e`) is one segment and used to read `data/...json`, outside the
+# images directory, and to be stored on a draft as an image id. The store
+# checks the shape itself so that never depends on URL handling.
+BAD_IMAGE_IDS = ["..", "...", ".", "..x", "deadbeef", "A" * 64, "g" * 64, ("a" * 63) + "\\"]
+
+
+@pytest.mark.parametrize("image_id", BAD_IMAGE_IDS)
+def test_get_image_refuses_an_id_that_is_not_a_sha256(store: Store, image_id: str) -> None:
+    with pytest.raises(ApiError) as caught:
+        store.get_image(image_id)
+    assert caught.value.status_code == 404
+    assert caught.value.code == "image_not_found"
+
+
+def test_get_image_does_not_read_a_file_outside_the_images_directory(
+    store: Store, data_dir: Path
+) -> None:
+    (data_dir / "...json").write_text(
+        '{"image_id":"x","sha256":"0","filename":"dots.png","bytes":1,"mime":"image/png"}',
+        encoding="utf-8",
+    )
+    with pytest.raises(ApiError) as caught:
+        store.get_image("..")
+    assert caught.value.code == "image_not_found"
+
+
+def test_image_routes_refuse_an_encoded_dotdot_id(
+    client: TestClient, agent_token: str, data_dir: Path
+) -> None:
+    # `%2e%2e` because the test client normalises a literal `..` away before
+    # it is sent; the literal form is the store-level test above and the live
+    # probe in docs/pr-bodies/lane-g-image-id-evidence.txt (`curl --path-as-is`).
+    image_id = "%2e%2e"
+    (data_dir / "...json").write_text(
+        '{"image_id":"x","sha256":"0","filename":"dots.png","bytes":1,"mime":"image/png"}',
+        encoding="utf-8",
+    )
+    got = client.get(f"/v1/images/{image_id}", headers=auth(agent_token))
+    assert got.status_code == 404
+    assert got.json()["error"] == "image_not_found"
+
+    draft = client.post("/v1/drafts", json={}, headers=auth(agent_token)).json()
+    attached = client.put(
+        f"/v1/drafts/{draft['id']}/images/{image_id}",
+        json={"role": "inline"},
+        headers=auth(agent_token),
+    )
+    assert attached.status_code == 404
+    assert attached.json()["error"] == "image_not_found"
+    fresh = client.get(f"/v1/drafts/{draft['id']}", headers=auth(agent_token)).json()
+    assert fresh["images"] == []

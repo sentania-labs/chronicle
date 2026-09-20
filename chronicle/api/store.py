@@ -1385,10 +1385,14 @@ class Store:
         raise ApiError(404, "image_blob_missing", f"image {image_id} has a record but no bytes")
 
     def get_image(self, image_id: str) -> Image:
-        sidecar = self._image_sidecar_path(image_id)
-        if not sidecar.exists():
+        # An id becomes part of a path (`images/<id[:2]>/<id>.json`), and callers
+        # hand this a URL segment. A malformed id is "no such image", the same
+        # answer as an unknown one, so nothing here depends on the web
+        # framework's own path handling (a bare `..` is one segment and got
+        # through it, issue 47).
+        if not self._image_exists(image_id):
             raise ApiError(404, "image_not_found", f"no image {image_id}")
-        return Image.model_validate(self._read_json(sidecar))
+        return Image.model_validate(self._read_json(self._image_sidecar_path(image_id)))
 
     @locked
     def put_and_attach_image(
