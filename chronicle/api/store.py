@@ -1705,6 +1705,7 @@ class Store:
         run.started_at = None
         run.finished_at = None
         run.builder_id = None
+        run.requeued_at = now_stamp()
         self._write_json(self._run_path(run_id), run.model_dump(mode="json"))
         self._write_json(
             self._queue_entry_path(run_id),

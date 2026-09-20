@@ -570,6 +570,38 @@ def test_queue_timeout_leaves_building_and_preview_runs_alone(store: Store) -> N
     assert store.get_run(preview.id).status == "queued"
 
 
+def test_requeued_run_gets_a_fresh_timeout_window(store: Store) -> None:
+    """A run a crashed publisher left `building` is requeued by
+    `recover_stuck_runs`. If its `created_at` was already older than the
+    timeout when the crash happened, the sweep must measure the waiting
+    window from the requeue moment, not from `created_at`, or a run that
+    was never actually stuck in the queue fails on the very first sweep
+    after the restart (ADR 020 amendment)."""
+    draft, run = _approved_draft(store)
+    store.start_run(run.id, publisher.PUBLISHER_ACTOR, hugo_version="", toolchain_drift=False)
+
+    old_created_at = (datetime.now().astimezone() - timedelta(seconds=1000)).isoformat(
+        timespec="seconds"
+    )
+    backdated = store.get_run(run.id).model_dump(mode="json")
+    backdated["created_at"] = old_created_at
+    store._write_json(store._run_path(run.id), backdated)
+
+    assert publisher.recover_stuck_runs(store) == 1
+    record = store.get_run(run.id)
+    assert record.status == "queued"
+    assert record.created_at == old_created_at
+    assert record.requeued_at is not None
+
+    # A fresh 900s window measured from the requeue moment, not from the
+    # already-stale `created_at`.
+    assert publisher.expire_unclaimed_runs(store, 900, now=_later(60)) == []
+    assert store.get_run(run.id).status == "queued"
+
+    expired = publisher.expire_unclaimed_runs(store, 900, now=_later(901))
+    assert [item.id for item in expired] == [run.id]
+
+
 def test_publisher_loop_expires_a_run_when_no_target_is_configured(
     data_dir: Path, store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -606,4 +638,24 @@ def test_queue_timeout_setting_follows_the_env_pattern(monkeypatch: pytest.Monke
     monkeypatch.setenv("CHRONICLE_PUBLISH_QUEUE_TIMEOUT_SECONDS", "42")
     assert Settings.from_env().publish_queue_timeout_seconds == 42.0
     monkeypatch.setenv("CHRONICLE_PUBLISH_QUEUE_TIMEOUT_SECONDS", "nonsense")
+    assert Settings.from_env().publish_queue_timeout_seconds == 900.0
+
+
+def test_queue_timeout_is_floored_to_the_poll_interval(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A timeout shorter than a healthy publisher can respond in is raised to
+    a floor, not left to fail every run before the publisher ever reaches
+    it (round C6 adversarial review)."""
+    monkeypatch.setenv("CHRONICLE_PUBLISH_POLL_SECONDS", "10")
+    monkeypatch.setenv("CHRONICLE_PUBLISH_QUEUE_TIMEOUT_SECONDS", "5")
+    with caplog.at_level("WARNING", logger="chronicle.api.settings"):
+        settings = Settings.from_env()
+    assert settings.publish_poll_seconds == 10.0
+    assert settings.publish_queue_timeout_seconds == 30.0
+    assert any(
+        "CHRONICLE_PUBLISH_QUEUE_TIMEOUT_SECONDS=5" in record.message for record in caplog.records
+    )
+
+    monkeypatch.setenv("CHRONICLE_PUBLISH_QUEUE_TIMEOUT_SECONDS", "900")
     assert Settings.from_env().publish_queue_timeout_seconds == 900.0

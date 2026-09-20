@@ -447,6 +447,13 @@ def expire_unclaimed_runs(
     leaves the draft `published`, each with a feedback entry carrying the
     reason. Only `queued` runs are touched: a `building` one belongs to
     `recover_stuck_runs`.
+
+    The waiting window is measured from `run.requeued_at` when a crashed
+    builder or publisher put the run back on the queue, and from
+    `run.created_at` otherwise (ADR 020 amendment): `created_at` stays a
+    record of when the run was first created, but a run whose window would
+    otherwise already be spent the moment it is requeued must get a fresh
+    one to be claimed in, not fail on the very next sweep.
     """
     current = now or datetime.now().astimezone()
     cutoff = current - timedelta(seconds=timeout_seconds)
@@ -455,7 +462,8 @@ def expire_unclaimed_runs(
         if entry.get("kind") not in ("publish", "unpublish"):
             continue
         run = store.get_run(str(entry["run_id"]))
-        if run.status != "queued" or datetime.fromisoformat(run.created_at) > cutoff:
+        waiting_since = run.requeued_at or run.created_at
+        if run.status != "queued" or datetime.fromisoformat(waiting_since) > cutoff:
             continue
         log.warning("run %s: still queued after %.0f seconds, failing it", run.id, timeout_seconds)
         finished, _ = store.finish_run(

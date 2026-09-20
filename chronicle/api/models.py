@@ -224,6 +224,13 @@ class Run(BaseModel):
     # convert a draft that has moved past it (issue 41). None on a run queued
     # before this field existed, and on every other run kind.
     approved_version: int | None = None
+    # Set by `Store.requeue_run` when a crashed builder or publisher put this
+    # run back on the queue. `created_at` stays the record of when the run
+    # was first created; the queue-timeout sweep measures its waiting window
+    # from this instead so a run requeued after already sitting past the
+    # timeout gets a fresh window rather than failing on the next sweep
+    # (ADR 020 amendment). None on a run that has never been requeued.
+    requeued_at: str | None = None
 
 
 class WatchEntry(BaseModel):
