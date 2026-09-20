@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
 from chronicle.api import publisher, watcher
+from chronicle.api.admin_deps import AdminServices
 from chronicle.api.errors import ApiError
+from chronicle.api.settings import Settings
 from chronicle.api.store import Store
 from tests.conftest import png_bytes
 from tests.fakes import FakeRepoOps
@@ -481,3 +487,123 @@ def test_save_between_unpublish_and_its_run_is_refused(
 
     publisher.run_one(store, target, unpublish_run)
     assert store.get_run(unpublish_run.id).status == "succeeded"
+
+
+def _later(seconds: float) -> datetime:
+    return datetime.now().astimezone() + timedelta(seconds=seconds)
+
+
+def test_unclaimed_publish_run_times_out_and_the_draft_is_usable_again(store: Store) -> None:
+    """Issue 44: nothing is configured to publish against, so the run stays
+    queued and the draft is frozen. The sweep fails the run, returns the draft
+    to `in_review`, and tells the author why."""
+    draft, run = _approved_draft(store)
+    version = store.get_draft(draft.id).version_no
+
+    assert publisher.expire_unclaimed_runs(store, 900, now=_later(60)) == []
+    assert store.get_run(run.id).status == "queued"
+    with pytest.raises(ApiError) as frozen:
+        store.save_draft(draft.id, "scott", version, {"title": "My First Post"}, "edit\n")
+    assert frozen.value.code == "publish_run_in_progress"
+
+    expired = publisher.expire_unclaimed_runs(store, 900, now=_later(901))
+    assert [item.id for item in expired] == [run.id]
+
+    record = store.get_run(run.id)
+    assert record.status == "failed"
+    assert record.result is not None
+    assert record.result["error_class"] == "publish_queue_timeout"
+    assert "900 seconds" in record.result["message"]
+    assert store.active_publish_run(draft.id) is None
+    assert store.queue_depth("publish") == 0
+
+    assert store.get_draft(draft.id).status == "in_review"
+    feedback = [e for e in store.list_feedback(draft.id) if e.action == "publish_failed"]
+    assert len(feedback) == 1
+    assert feedback[0].author == "chronicle"
+    assert "publish_queue_timeout" in feedback[0].text
+    assert "not picked up within 900 seconds" in feedback[0].text
+    assert "re-approve to retry" in feedback[0].text
+
+    saved = store.save_draft(draft.id, "scott", version, {"title": "My First Post"}, "edit\n")
+    assert saved.version_no == version + 1
+    _, again = store.act_on_draft(draft.id, "approve", "scott", True)
+    assert again is not None and again.id != run.id
+
+
+def test_unclaimed_unpublish_run_times_out_and_the_post_stays_published(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    draft, _, _ = _published_draft(store, monkeypatch)
+    _, run = store.act_on_draft(draft.id, "unpublish", "scott", True)
+    assert run is not None
+    version = store.get_draft(draft.id).version_no
+
+    expired = publisher.expire_unclaimed_runs(store, 900, now=_later(901))
+    assert [item.id for item in expired] == [run.id]
+    record = store.get_run(run.id)
+    assert record.status == "failed"
+    assert record.result is not None
+    assert record.result["error_class"] == "publish_queue_timeout"
+    assert "unpublish run was not picked up" in record.result["message"]
+
+    assert store.get_draft(draft.id).status == "published"
+    feedback = [e for e in store.list_feedback(draft.id) if e.action == "unpublish_failed"]
+    assert len(feedback) == 1
+    assert "unpublish again to retry" in feedback[0].text
+    saved = store.save_draft(draft.id, "scott", version, {"title": "My First Post"}, "edit\n")
+    assert saved.version_no == version + 1
+    # An unpublish can be asked for again once the draft is `published` again.
+    assert store.active_publish_run(draft.id) is None
+
+
+def test_queue_timeout_leaves_building_and_preview_runs_alone(store: Store) -> None:
+    draft, run = _approved_draft(store)
+    store.start_run(run.id, publisher.PUBLISHER_ACTOR, hugo_version="", toolchain_drift=False)
+    other, _ = store.create_draft("scott")
+    store.save_draft(other.id, "scott", 0, {"title": "Other"}, "x\n")
+    _, preview = store.act_on_draft(other.id, "preview", "scott", True)
+    assert preview is not None and preview.kind == "preview"
+
+    assert publisher.expire_unclaimed_runs(store, 1, now=_later(10_000)) == []
+    assert store.get_run(run.id).status == "building"
+    assert store.get_run(preview.id).status == "queued"
+
+
+def test_publisher_loop_expires_a_run_when_no_target_is_configured(
+    data_dir: Path, store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure mode itself: `tick` returns before it looks at anything when
+    no GitHub App or test-token repo exists, and the loop must still sweep."""
+    for name in (
+        "CHRONICLE_GITHUB_TEST_TOKEN",
+        "CHRONICLE_ALLOW_TEST_TOKEN",
+        "CHRONICLE_GITHUB_TEST_REPO",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    admin = AdminServices.build(data_dir)
+    assert publisher.build_repo_target(admin) is None
+    draft, run = _approved_draft(store)
+
+    stop = threading.Event()
+    loop = threading.Thread(target=publisher.run_loop, args=(store, admin, 0.02, stop, 0.2))
+    loop.start()
+    try:
+        deadline = time.monotonic() + 10
+        while store.get_run(run.id).status == "queued" and time.monotonic() < deadline:
+            time.sleep(0.05)
+    finally:
+        stop.set()
+        loop.join(timeout=5)
+
+    assert store.get_run(run.id).status == "failed"
+    assert store.get_draft(draft.id).status == "in_review"
+
+
+def test_queue_timeout_setting_follows_the_env_pattern(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CHRONICLE_PUBLISH_QUEUE_TIMEOUT_SECONDS", raising=False)
+    assert Settings.from_env().publish_queue_timeout_seconds == 900.0
+    monkeypatch.setenv("CHRONICLE_PUBLISH_QUEUE_TIMEOUT_SECONDS", "42")
+    assert Settings.from_env().publish_queue_timeout_seconds == 42.0
+    monkeypatch.setenv("CHRONICLE_PUBLISH_QUEUE_TIMEOUT_SECONDS", "nonsense")
+    assert Settings.from_env().publish_queue_timeout_seconds == 900.0

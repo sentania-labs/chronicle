@@ -15,7 +15,7 @@ import json
 import logging
 import threading
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -30,6 +30,7 @@ from .github_client import (
     parse_owner_repo,
 )
 from .models import Draft, Run, WatchEntry, now_stamp
+from .settings import DEFAULT_PUBLISH_QUEUE_TIMEOUT_SECONDS
 from .store import Store
 
 log = logging.getLogger("chronicle.api.publisher")
@@ -433,6 +434,45 @@ def tick(store: Store, admin: AdminServices) -> bool:
     return True
 
 
+def expire_unclaimed_runs(
+    store: Store, timeout_seconds: float, now: datetime | None = None
+) -> list[Run]:
+    """Fail every publish or unpublish run that has sat `queued` past the timeout.
+
+    A run nobody claims (no GitHub App or test-token repo configured, or a
+    publisher that is not draining) would otherwise hold `Store.active_publish_run`
+    open forever and freeze its draft (issue 44). It fails through the ordinary
+    `finish_run` path, so a publish returns to `in_review` and an unpublish
+    leaves the draft `published`, each with a feedback entry carrying the
+    reason. Only `queued` runs are touched: a `building` one belongs to
+    `recover_stuck_runs`.
+    """
+    current = now or datetime.now().astimezone()
+    cutoff = current - timedelta(seconds=timeout_seconds)
+    expired: list[Run] = []
+    for entry in store.queued_entries():
+        if entry.get("kind") not in ("publish", "unpublish"):
+            continue
+        run = store.get_run(str(entry["run_id"]))
+        if run.status != "queued" or datetime.fromisoformat(run.created_at) > cutoff:
+            continue
+        log.warning("run %s: still queued after %.0f seconds, failing it", run.id, timeout_seconds)
+        finished, _ = store.finish_run(
+            run.id,
+            PUBLISHER_ACTOR,
+            succeeded=False,
+            result={
+                "error_class": "publish_queue_timeout",
+                "message": (
+                    f"the {run.kind} run was not picked up within {timeout_seconds:.0f} seconds"
+                    " (no GitHub target is configured, or the publisher is not running)"
+                ),
+            },
+        )
+        expired.append(finished)
+    return expired
+
+
 def write_heartbeat(store: Store) -> None:
     path = store.data_dir.joinpath(*HEARTBEAT_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -448,7 +488,11 @@ def write_heartbeat(store: Store) -> None:
 
 
 def run_loop(
-    store: Store, admin: AdminServices, poll_seconds: float, stop_event: threading.Event
+    store: Store,
+    admin: AdminServices,
+    poll_seconds: float,
+    stop_event: threading.Event,
+    queue_timeout_seconds: float = DEFAULT_PUBLISH_QUEUE_TIMEOUT_SECONDS,
 ) -> None:
     while not stop_event.is_set():
         try:
@@ -457,5 +501,12 @@ def run_loop(
         except Exception:  # noqa: BLE001 - a bad tick must not kill the publisher thread
             log.exception("publisher tick failed")
             claimed = False
+        # After the tick, and outside it: `tick` returns early when nothing is
+        # configured to publish against, which is exactly when a run goes
+        # unclaimed. A run the tick just took is no longer `queued`.
+        try:
+            expire_unclaimed_runs(store, queue_timeout_seconds)
+        except Exception:  # noqa: BLE001 - a bad sweep must not kill the publisher thread
+            log.exception("publisher queue-timeout sweep failed")
         if not claimed:
             stop_event.wait(poll_seconds)

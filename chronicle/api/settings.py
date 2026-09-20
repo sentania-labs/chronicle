@@ -28,6 +28,7 @@ ALLOW_TEST_TOKEN_ENV = "CHRONICLE_ALLOW_TEST_TOKEN"
 GITHUB_TEST_REPO_ENV = "CHRONICLE_GITHUB_TEST_REPO"
 # ADR 013.
 PUBLISH_POLL_SECONDS_ENV = "CHRONICLE_PUBLISH_POLL_SECONDS"
+PUBLISH_QUEUE_TIMEOUT_SECONDS_ENV = "CHRONICLE_PUBLISH_QUEUE_TIMEOUT_SECONDS"
 WATCH_POLL_SECONDS_ENV = "CHRONICLE_WATCH_POLL_SECONDS"
 WATCH_POLL_MAX_SECONDS_ENV = "CHRONICLE_WATCH_POLL_MAX_SECONDS"
 RECONCILE_INTERVAL_SECONDS_ENV = "CHRONICLE_RECONCILE_INTERVAL_SECONDS"
@@ -44,6 +45,7 @@ DEFAULT_GITHUB_WEB_BASE = "https://github.com"
 DEFAULT_APP_NAME_PREFIX = "chronicle"
 UNKNOWN_HUGO_VERSION = "unknown"
 DEFAULT_PUBLISH_POLL_SECONDS = 5.0
+DEFAULT_PUBLISH_QUEUE_TIMEOUT_SECONDS = 900.0
 DEFAULT_WATCH_POLL_SECONDS = 60.0
 DEFAULT_WATCH_POLL_MAX_SECONDS = 900.0
 DEFAULT_RECONCILE_INTERVAL_SECONDS = 3600.0
@@ -87,6 +89,7 @@ class Settings:
     github_test_token: str | None
     github_test_repo: str | None
     publish_poll_seconds: float
+    publish_queue_timeout_seconds: float
     watch_poll_seconds: float
     watch_poll_max_seconds: float
     reconcile_interval_seconds: float
@@ -121,6 +124,9 @@ class Settings:
             github_test_token=test_token,
             github_test_repo=os.environ.get(GITHUB_TEST_REPO_ENV, "").strip() or None,
             publish_poll_seconds=_float_env(PUBLISH_POLL_SECONDS_ENV, DEFAULT_PUBLISH_POLL_SECONDS),
+            publish_queue_timeout_seconds=_float_env(
+                PUBLISH_QUEUE_TIMEOUT_SECONDS_ENV, DEFAULT_PUBLISH_QUEUE_TIMEOUT_SECONDS
+            ),
             watch_poll_seconds=_float_env(WATCH_POLL_SECONDS_ENV, DEFAULT_WATCH_POLL_SECONDS),
             watch_poll_max_seconds=_float_env(
                 WATCH_POLL_MAX_SECONDS_ENV, DEFAULT_WATCH_POLL_MAX_SECONDS
