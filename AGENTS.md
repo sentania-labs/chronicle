@@ -304,7 +304,11 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   data_dir)` right before converting, which reads `data/state/toolchain.
   json`'s `conventions.staticdir` (falling back the same way digest itself
   does if no digest has run yet or the file does not parse) rather than
-  invoking Hugo again for a value the last digest already derived.
+  invoking Hugo again for a value the last digest already derived. A brand
+  new post's directory is read the same way (`digest.read_new_post_dir_from_state`,
+  `new_post_dir`): the section the last digest saw most posts in, never built
+  from `contentdir` (a root) or `mainsections` (page types), and exactly
+  `content/posts` when nothing was read (ADR 017, issue 21 amendment).
 
 ## Round C4 status
 
