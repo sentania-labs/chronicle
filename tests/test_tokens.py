@@ -185,6 +185,46 @@ def test_admin_tokens_api_rejects_the_name_ui(admin_client: TestClient) -> None:
     assert response.json()["error"] == "token_name_reserved"
 
 
+def test_cli_token_issue_editor_is_rejected(data_dir: Path, capsys) -> None:
+    """`editor` is the identity `commit_author` maps the `ui` token to; an
+    ordinary token issued under that name would write attributed exactly
+    like the UI, defeating the point of the mapping."""
+    (data_dir / "state").mkdir(parents=True, exist_ok=True)
+    assert cli_main(["--data-dir", str(data_dir), "token", "issue", "editor"]) == 1
+    err = capsys.readouterr().err
+    assert "reserved" in err
+    assert TokenStore(data_dir / "state").load() == []
+
+
+def test_admin_tokens_page_rejects_the_name_editor(admin_client: TestClient) -> None:
+    response = admin_client.post("/admin/tokens", data={"name": "editor"})
+    assert response.status_code == 422
+    assert "reserved" in response.text
+
+
+def test_admin_tokens_api_rejects_the_name_editor(admin_client: TestClient) -> None:
+    response = admin_client.post("/admin/api/tokens", json={"name": "editor"})
+    assert response.status_code == 422
+    assert response.json()["error"] == "token_name_reserved"
+
+
+def test_startup_tolerates_a_token_already_named_editor(data_dir: Path) -> None:
+    """The reservation only guards the issue routes going forward. A token
+    named `editor` minted before this reservation existed (or by any path
+    that bypasses the routes) must not stop `ensure_ui_token` from running
+    on the next process start, and must keep authenticating as itself."""
+    (data_dir / "state").mkdir(parents=True, exist_ok=True)
+    store = TokenStore(data_dir / "state")
+    preexisting = store.issue("editor")
+
+    store.ensure_ui_token()
+
+    record = store.authenticate(preexisting)
+    assert record is not None
+    assert record.name == "editor"
+    assert commit_author("editor") == "editor"
+
+
 def test_revoked_ui_token_stays_disabled_across_a_restart(
     data_dir: Path, client: TestClient
 ) -> None:

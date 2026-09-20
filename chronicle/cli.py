@@ -24,7 +24,7 @@ from .api.digest_runner import DigestNotConfigured
 from .api.digest_runner import run as run_digest
 from .api.main import DATA_DIR_ENV
 from .api.store import Store
-from .api.tokens import UI_TOKEN_NAME, TokenStore
+from .api.tokens import RESERVED_TOKEN_NAMES, TokenStore
 
 
 def _data_dir(args: argparse.Namespace) -> Path:
@@ -66,8 +66,8 @@ def _digest(args: argparse.Namespace) -> int:
 def _token(args: argparse.Namespace) -> int:
     tokens = TokenStore(_data_dir(args) / "state")
     if args.token_command == "issue":
-        if args.name == UI_TOKEN_NAME:
-            print(f"{UI_TOKEN_NAME!r} is reserved for the UI backend", file=sys.stderr)
+        if args.name in RESERVED_TOKEN_NAMES:
+            print(f"{args.name!r} is reserved for the UI backend", file=sys.stderr)
             return 1
         print(tokens.issue(args.name))
         return 0

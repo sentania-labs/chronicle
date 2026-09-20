@@ -157,7 +157,8 @@ The click-by-click order, once for a fresh instance:
 
 Only steps 3 and 4 happen on GitHub's own pages in your browser; every other
 step is a Chronicle admin page. `/admin/tokens` issues and revokes named
-consumer tokens at any point after claiming; `ui` is reserved. `/admin`
+consumer tokens at any point after claiming; `ui` and `editor` are reserved,
+since `editor` is the identity the `ui` token's writes carry. `/admin`
 itself is the status page: last digest, post count, toolchain drift, App and
 repo connection state, submissions and drafts by status, disk use, and git
 health.
