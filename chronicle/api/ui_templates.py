@@ -992,11 +992,13 @@ def _format_wall_time(seconds: Any) -> str | None:
 
 
 def _success_result_html(result: dict[str, Any]) -> str:
-    """A successful run's result shape varies by kind (a publish run's keys
-    are not a preview run's), so this only ever renders the specific known
-    keys it recognizes, each escaped, and silently skips whatever is
-    missing. It never dumps the raw dict: an unrecognized key is exactly
-    the kind of unvetted content this page must not render."""
+    """A successful run's result shape varies by kind: preview runs carry
+    `preview_url`, `slug` and `wall_time_seconds`; publish and unpublish runs
+    carry `branch`, `pr_number`, `pr_url` and `commit_sha` (see publisher.py).
+    This only ever renders the specific known keys it recognizes, each
+    escaped, and silently skips whatever is missing. It never dumps the raw
+    dict: an unrecognized key is exactly the kind of unvetted content this
+    page must not render."""
     rows = []
     preview_url = result.get("preview_url")
     if isinstance(preview_url, str) and preview_url:
@@ -1008,6 +1010,23 @@ def _success_result_html(result: dict[str, Any]) -> str:
     wall_time = _format_wall_time(result.get("wall_time_seconds"))
     if wall_time is not None:
         rows.append(f"<li>wall time: {escape(wall_time)}</li>")
+    branch = result.get("branch")
+    if isinstance(branch, str) and branch:
+        rows.append(f"<li>branch: {escape(branch)}</li>")
+    pr_url = result.get("pr_url")
+    pr_number = result.get("pr_number")
+    if isinstance(pr_url, str) and pr_url:
+        safe_pr_url = escape(pr_url)
+        label = f"PR #{pr_number}" if isinstance(pr_number, int) else "PR"
+        rows.append(f'<li>pull request: <a href="{safe_pr_url}">{escape(label)}</a></li>')
+    elif isinstance(pr_number, int):
+        rows.append(f"<li>pull request: #{pr_number}</li>")
+    commit_sha = result.get("commit_sha")
+    if isinstance(commit_sha, str) and commit_sha:
+        # Short form, same 7-char abbreviation git itself defaults to: a
+        # reader wants a recognizable, copyable label here, not the full 40
+        # characters.
+        rows.append(f"<li>commit: {escape(commit_sha[:7])}</li>")
     if not rows:
         return ""
     return f"<ul>{''.join(rows)}</ul>"

@@ -833,6 +833,48 @@ def test_run_log_page_shows_a_successful_preview_runs_result() -> None:
     assert "notice error" not in html
 
 
+def test_run_log_page_shows_a_successful_publish_runs_result() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run(
+        status="succeeded",
+        result={
+            "branch": "post/a-slug",
+            "pr_number": 7,
+            "pr_url": "https://github.com/sentania-labs/blog/pull/7",
+            "commit_sha": "abcdef1234567890abcdef1234567890abcdef12",
+        },
+    )
+    html = tpl.run_log_page(run, "", banner=False)
+    assert "post/a-slug" in html
+    assert 'href="https://github.com/sentania-labs/blog/pull/7"' in html
+    assert "PR #7" in html
+    assert "abcdef1" in html
+    assert "abcdef1234567890abcdef1234567890abcdef12" not in html
+    assert "notice error" not in html
+
+
+def test_run_log_page_shows_a_successful_unpublish_runs_result() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run(
+        kind="unpublish",
+        status="succeeded",
+        result={
+            "branch": "post/other-slug",
+            "pr_number": 9,
+            "pr_url": "https://github.com/sentania-labs/blog/pull/9",
+            "commit_sha": "0123456789abcdef0123456789abcdef01234567",
+        },
+    )
+    html = tpl.run_log_page(run, "", banner=False)
+    assert "post/other-slug" in html
+    assert 'href="https://github.com/sentania-labs/blog/pull/9"' in html
+    assert "PR #9" in html
+    assert "0123456" in html
+    assert "notice error" not in html
+
+
 def test_run_log_page_shows_a_successful_run_with_no_result_keys() -> None:
     from chronicle.api import ui_templates as tpl
 
