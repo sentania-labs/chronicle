@@ -1155,30 +1155,40 @@ class Store:
         return run
 
     def _refuse_while_publishing(self, draft: Draft, verb: str) -> None:
-        """409 `publish_run_in_progress` while a publish run is queued or
-        building for `draft`. Everything the run converts (the text, and the
-        attached image set) must stay what was approved until it has opened
-        its PR or failed, so `save_draft`, `attach_image` and `detach_image`
-        all ask this first."""
+        """409 `publish_run_in_progress` while a publish or unpublish run is
+        queued or building for `draft`. Everything the run converts or removes
+        (the text, and the attached image set) must stay what it was queued
+        against until it has opened its PR or failed, so `save_draft`,
+        `attach_image` and `detach_image` all ask this first."""
         running = self.active_publish_run(draft.id)
         if running is not None:
+            if running.kind == "unpublish":
+                reason = f"draft {draft.id} has an unpublish run {running.status}"
+            else:
+                reason = (
+                    f"draft {draft.id} was approved at version"
+                    f" {running.approved_version or draft.version_no} and its"
+                    f" publish run is {running.status}"
+                )
             raise ApiError(
                 409,
                 "publish_run_in_progress",
-                f"draft {draft.id} was approved at version"
-                f" {running.approved_version or draft.version_no} and its"
-                f" publish run is {running.status}; it cannot be {verb} until the run has opened"
-                " its pull request or failed",
+                f"{reason}; it cannot be {verb} until the run has opened its pull request or"
+                " failed",
                 run_id=running.id,
+                run_kind=running.kind,
                 approved_version=running.approved_version,
             )
 
     def active_publish_run(self, draft_id: str) -> Run | None:
-        """The draft's publish run while it is queued or building, else None.
+        """The draft's publish or unpublish run while it is queued or building,
+        else None.
 
-        This is the window between `approve` and the run's PR existing, where
-        `get_watch` is still None: neither an open PR nor a finished run says
-        the draft is being published, but it is.
+        This is the window between `approve` (or `unpublish`) and the run's PR
+        existing, where `get_watch` is still None: neither an open PR nor a
+        finished run says the draft is being published, but it is. An
+        unpublish run counts for the same reason: it removes the post as the
+        draft stands when it is claimed (issue 43).
 
         Answered from the durable files, never the index (ADR 006): a run whose
         approval wrote its files but died before the index update is still in
@@ -1187,7 +1197,9 @@ class Store:
         the cheap way to find candidates; the run record then decides, since a
         crash between `finish_run`'s record write and its unlink leaves a
         finished run with an entry."""
-        for entry in self.queued_entries("publish"):
+        for entry in self.queued_entries():
+            if entry.get("kind") not in ("publish", "unpublish"):
+                continue
             if entry.get("draft_id") != draft_id:
                 continue
             try:
@@ -1277,7 +1289,7 @@ class Store:
                 raise ApiError(
                     409,
                     "publish_run_in_progress",
-                    f"draft {draft_id} already has a publish run {running.status}",
+                    f"draft {draft_id} already has a {running.kind} run {running.status}",
                     run_id=running.id,
                 )
         # A whitespace-only string is truthy, so the required check tests the
@@ -1619,7 +1631,6 @@ class Store:
                 )
                 self.index.upsert_draft(current)
                 draft = current
-                error_class = str(result.get("error_class", "unknown"))
                 self._append_feedback(
                     FeedbackEntry(
                         draft_id=current.id,
@@ -1627,9 +1638,23 @@ class Store:
                         created_at=run.finished_at,
                         action="publish_failed",
                         version_no=current.version_no,
-                        text=f"Publish failed ({error_class}); re-approve to retry.",
+                        text=_run_failure_text("Publish", "re-approve to retry", result),
                     )
                 )
+        if not succeeded and run.kind == "unpublish":
+            # No status change: the draft is still `published`. This entry is
+            # how its author learns the unpublish never happened.
+            current = self.get_draft(run.draft_id)
+            self._append_feedback(
+                FeedbackEntry(
+                    draft_id=current.id,
+                    author="chronicle",
+                    created_at=run.finished_at,
+                    action="unpublish_failed",
+                    version_no=current.version_no,
+                    text=_run_failure_text("Unpublish", "unpublish again to retry", result),
+                )
+            )
         if succeeded and run.kind == "preview":
             current = self.get_draft(run.draft_id)
             if run.built_version is not None and current.version_no != run.built_version:
@@ -2307,6 +2332,15 @@ class Store:
                     counts["events"] += 1
 
         return counts
+
+
+def _run_failure_text(what: str, retry: str, result: dict[str, Any]) -> str:
+    """The feedback line for a failed publish or unpublish run: the machine
+    class, then the run's own plain-language `message` when it gave one."""
+    error_class = str(result.get("error_class", "unknown"))
+    message = str(result.get("message") or "").strip()
+    detail = f": {message}" if message else ""
+    return f"{what} failed ({error_class}){detail}; {retry}."
 
 
 def _clean_material_text(text: str) -> str:
