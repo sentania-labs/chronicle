@@ -112,6 +112,7 @@ def refresh_from_target(
     digest_mod.clone_or_update(store.site_dir, target.repo_url, target.default_branch, token=token)
     conventions = digest_mod.read_hugo_conventions(store.site_dir)
     discovered = digest_mod.discover_posts(store.site_dir, conventions)
+    conventions = digest_mod.with_observed_post_dir(conventions, discovered)
     posts = [
         Post(slug=item.slug, path=item.path, title=item.title, date=item.date, sha=item.sha)
         for item in discovered
@@ -134,6 +135,7 @@ def run(store: Store, actor: str, admin: AdminServices | None = None) -> DigestS
     digest_mod.clone_or_update(store.site_dir, repo_url, branch, token=token)
     conventions = digest_mod.read_hugo_conventions(store.site_dir)
     discovered = digest_mod.discover_posts(store.site_dir, conventions)
+    conventions = digest_mod.with_observed_post_dir(conventions, discovered)
     posts = [
         Post(slug=item.slug, path=item.path, title=item.title, date=item.date, sha=item.sha)
         for item in discovered

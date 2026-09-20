@@ -333,3 +333,48 @@ def test_two_attached_images_with_the_same_filename_get_distinct_output_paths() 
     assert second.site_path == "static/images/my-post/pic-bbbbbbbb.png"
     assert first.site_path != second.site_path
     assert len({placement.site_path for placement in converted.images}) == 2
+
+
+# Issue #21: a brand-new post is written into the site's own section
+# directory, not the hardcoded `content/posts`. `new_post_dir` is where a file
+# is created; `content_dir` stays the content root a source path is matched
+# against, and the two are different kinds of value.
+
+
+def test_new_post_lands_in_the_sites_section_directory() -> None:
+    draft = _draft(frontmatter={"title": "My Post", "date": "2024-03-03"})
+    converted = convert.convert(draft, None, "content2", "content2/blog")
+    assert converted.post_path == "content2/blog/2024-03-03-my-post.md"
+
+
+def test_new_post_with_no_site_directory_still_lands_in_content_posts() -> None:
+    """A Chronicle that never read a site's conventions publishes where it always did."""
+    draft = _draft(frontmatter={"title": "My Post", "date": "2024-03-03"})
+    assert convert.convert(draft).post_path == "content/posts/2024-03-03-my-post.md"
+    assert (
+        convert.convert(draft, None, None, None).post_path == "content/posts/2024-03-03-my-post.md"
+    )
+
+
+@pytest.mark.parametrize("unsafe", ["../outside", "/etc", "a/../../b", ""])
+def test_an_unsafe_new_post_dir_is_never_a_path(unsafe: str) -> None:
+    draft = _draft(frontmatter={"title": "My Post", "date": "2024-03-03"})
+    converted = convert.convert(draft, None, "content", unsafe)
+    assert converted.post_path == "content/posts/2024-03-03-my-post.md"
+
+
+def test_new_post_dir_trailing_slash_is_stripped() -> None:
+    draft = _draft(frontmatter={"title": "My Post", "date": "2024-03-03"})
+    assert (
+        convert.convert(draft, None, "content", "content/posts/").post_path
+        == "content/posts/2024-03-03-my-post.md"
+    )
+
+
+def test_an_imported_post_still_keeps_its_own_path_over_new_post_dir() -> None:
+    draft = _draft(
+        frontmatter={"title": "My Post", "date": "2024-03-03", "url": "/2024/03/03/my-post/"},
+        source_post={"slug": "my-post", "path": "archive/my-post.md", "sha": "abc"},
+    )
+    converted = convert.convert(draft, None, "archive", "archive/blog")
+    assert converted.post_path == "archive/my-post.md"

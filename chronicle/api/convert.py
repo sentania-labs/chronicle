@@ -128,7 +128,12 @@ def post_filename(draft: Draft, slug: str) -> str:
     return f"{post_date(draft.frontmatter).isoformat()}-{slug}.md"
 
 
-def post_path(draft: Draft, slug: str, content_dir: str | None = None) -> str:
+def post_path(
+    draft: Draft,
+    slug: str,
+    content_dir: str | None = None,
+    new_post_dir: str | None = None,
+) -> str:
     """Where the post file goes, site-relative.
 
     An import keeps the path it came from, but only when that path is inside
@@ -148,12 +153,27 @@ def post_path(draft: Draft, slug: str, content_dir: str | None = None) -> str:
     slash would make every digest-created record on that site fail to
     match its own directory and duplicate on every republish, exactly
     what this parameter exists to stop.
+
+    A brand-new draft (no `source_post`) is written into `new_post_dir`
+    (issue #21): the section directory the site's own posts live in, which
+    the caller reads from the last digest (`digest.read_new_post_dir_from_state`).
+    It is a different kind of value from `content_dir`: that one is the
+    content ROOT (`content`) and is only ever a prefix to match, while this
+    is where a file is created, so it names the section (`content/posts`)
+    and is never derived from `content_dir` here. `None` (a caller that has
+    no digest state, and every call site before this parameter existed) keeps
+    `POSTS_DIR`, and so does a value that is not a safe relative directory:
+    the state file is data from a digest of main, not something a path may
+    be built from unchecked.
     """
     base = (content_dir or POSTS_DIR).rstrip("/")
     source = (draft.source_post or {}).get("path")
     if source and _is_safe_relative(source) and source.startswith(f"{base}/"):
         return source
-    return f"{POSTS_DIR}/{post_filename(draft, slug)}"
+    target = new_post_dir.rstrip("/") if new_post_dir else ""
+    if not target or not _is_safe_relative(target):
+        target = POSTS_DIR
+    return f"{target}/{post_filename(draft, slug)}"
 
 
 def post_url(draft: Draft, slug: str) -> str:
@@ -367,7 +387,10 @@ def render_frontmatter(frontmatter: dict[str, Any]) -> str:
 
 
 def convert(
-    draft: Draft, static_dir: str | None = None, content_dir: str | None = None
+    draft: Draft,
+    static_dir: str | None = None,
+    content_dir: str | None = None,
+    new_post_dir: str | None = None,
 ) -> ConvertedPost:
     """The draft as a Hugo post file, plus where its images have to land.
 
@@ -381,7 +404,9 @@ def convert(
     through to `post_path` so a digest-created record's source path is
     matched against the site's real content directory rather than a
     hardcoded `content/posts` (issue #18); `None` keeps the same
-    pre-ADR-017 fallback.
+    pre-ADR-017 fallback. `new_post_dir` is where a brand-new post is
+    written (`digest.read_new_post_dir_from_state`, issue #21); `None` keeps
+    `content/posts`.
     """
     slug = draft.slug
     if not slug:
@@ -421,7 +446,7 @@ def convert(
 
     return ConvertedPost(
         slug=slug,
-        post_path=post_path(draft, slug, content_dir),
+        post_path=post_path(draft, slug, content_dir, new_post_dir),
         text=text,
         url=frontmatter["url"],
         images=placed,
