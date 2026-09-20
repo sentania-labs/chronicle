@@ -282,3 +282,51 @@ against a request exactly where the feedback log could not.
   parts about `previewed` never claiming the fact, and a published record
   being unsettleable, are deleted rather than layered under new text, since
   neither is true of the code anymore.
+
+## Live check (2026-09-20)
+
+Ran the branch (`cb3c2ca`) in a real browser against a fresh-volume compose
+stack (`chronicle-lane-f`, api on 8180, preview on 8190), digested against
+the real blog clone (346 posts) and seeded with seven records through `/v1`
+to hit every state this branch touches. Screenshots and the full method are
+in `docs/screenshots/four-words/README.md`; this section is what that
+session found, not a repeat of it.
+
+- **All eight items were seen working, exactly as documented.** The board
+  shows only the four words at real scale (346 published archive plus six
+  in-flight records covering Draft, In review, Published, Rejected); the
+  came-back badge survives a preview taken straight out of
+  `revision_requested` and disappears only after a real resubmit round
+  trip, matching the second fix round's fix exactly; the Import tab is
+  gone from the nav and both its routes 404; the editor's Save is disabled
+  with "A publish run is in progress, so saving is refused until it
+  finishes." while an `approved` draft's publish run sits queued; a
+  three-line CRLF feedback entry renders as three breaks with no raw `\r`;
+  the filter dropdown lists exactly five options and actually narrows the
+  board (6 in flight down to 3, URL carrying the de-duplicated status
+  list).
+- **The publish-run-active state was produced without touching GitHub.**
+  This stack has no GitHub App installed and no `CHRONICLE_GITHUB_TEST_TOKEN`
+  set, so `publisher.build_repo_target` returns `None` and `tick` leaves a
+  claimed run queued forever (logged, not an error). That gave a stable,
+  reproducible "publish run active" state for the editor screenshot with
+  no risk to the real blog or the standing `chronicle-target` throwaway
+  repo.
+- **A genuine browser textarea cannot carry a literal CRLF to the server.**
+  Both the DOM `textarea.value` getter and `new FormData(form)` normalise
+  `\r\n` to `\n` before any JavaScript in this editor ever sees it
+  (confirmed live in the open tab). The CRLF save proof in the screenshots
+  README therefore posts to the editor's own save URL with a hand-built
+  body carrying real `\r\n` bytes via the browser's `fetch`, in the same
+  tab, with the same session cookies, rather than through a simulated
+  keystroke. This is not a gap in the fix: it demonstrates the server
+  normalises regardless of what put the CRLF on the wire, which is the
+  actual threat model (a non-browser client, or a different browser
+  engine, could still send one).
+- **Nothing broken found.** Every behaviour matched what parts A and B
+  documented, including the second fix round's event-ordering change. No
+  code changes were made in this session.
+- **Not exercised.** A publish run that actually completes (would need a
+  GitHub App or the standing `sentania-labs/chronicle-target` test-token
+  target; out of scope for a UI-only live check) and the unpublish/merge
+  watch path (same reason, and not part of this branch's changes).
