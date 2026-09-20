@@ -71,7 +71,13 @@ jobs:
         with:
           python-version: "3.12"
       - run: make setup
+      # ubuntu-latest (24.04) ships node and Google Chrome/Chromium; hugo is
+      # installed above. This turns any of the three going missing (a runner
+      # image change) into a failure instead of a silent skip of the JS,
+      # browser and hugo tests. See tests/conftest.py.
       - run: make test
+        env:
+          CHRONICLE_REQUIRE_TEST_TOOLS: "1"
 
   # Tags are releases. Refuse malformed, lightweight, or off-main tags
   # before the publish job (which needs this tag to be trustworthy) runs.

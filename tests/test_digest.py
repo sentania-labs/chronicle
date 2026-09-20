@@ -228,6 +228,10 @@ def test_digest_run_creates_posts_and_a_second_run_is_a_no_op(
     assert conventions["source"] == "hugo_config"
     assert conventions["contentdir"] == "content"
     assert conventions["fallback_reason"] is None
+    # Issue #21: the section the two posts were walked in is recorded, and it
+    # is what a brand-new post's directory is read from afterwards.
+    assert conventions["postdir"] == "content/posts"
+    assert digest.read_new_post_dir_from_state(store.data_dir) == "content/posts"
 
     store.close()
 

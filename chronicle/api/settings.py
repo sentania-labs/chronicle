@@ -12,8 +12,11 @@ instance key.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
+
+log = logging.getLogger("chronicle.api.settings")
 
 EXTERNAL_URL_ENV = "CHRONICLE_EXTERNAL_URL"
 COOKIE_SECURE_ENV = "CHRONICLE_COOKIE_SECURE"
@@ -28,6 +31,7 @@ ALLOW_TEST_TOKEN_ENV = "CHRONICLE_ALLOW_TEST_TOKEN"
 GITHUB_TEST_REPO_ENV = "CHRONICLE_GITHUB_TEST_REPO"
 # ADR 013.
 PUBLISH_POLL_SECONDS_ENV = "CHRONICLE_PUBLISH_POLL_SECONDS"
+PUBLISH_QUEUE_TIMEOUT_SECONDS_ENV = "CHRONICLE_PUBLISH_QUEUE_TIMEOUT_SECONDS"
 WATCH_POLL_SECONDS_ENV = "CHRONICLE_WATCH_POLL_SECONDS"
 WATCH_POLL_MAX_SECONDS_ENV = "CHRONICLE_WATCH_POLL_MAX_SECONDS"
 RECONCILE_INTERVAL_SECONDS_ENV = "CHRONICLE_RECONCILE_INTERVAL_SECONDS"
@@ -44,9 +48,15 @@ DEFAULT_GITHUB_WEB_BASE = "https://github.com"
 DEFAULT_APP_NAME_PREFIX = "chronicle"
 UNKNOWN_HUGO_VERSION = "unknown"
 DEFAULT_PUBLISH_POLL_SECONDS = 5.0
+DEFAULT_PUBLISH_QUEUE_TIMEOUT_SECONDS = 900.0
 DEFAULT_WATCH_POLL_SECONDS = 60.0
 DEFAULT_WATCH_POLL_MAX_SECONDS = 900.0
 DEFAULT_RECONCILE_INTERVAL_SECONDS = 3600.0
+# A timeout shorter than this multiple of the poll interval cannot be
+# claimed by a healthy publisher even in the best case, so it is
+# indistinguishable from the failure it exists to report (finding, round C6
+# adversarial review). The floor is enforced, not just documented.
+PUBLISH_QUEUE_TIMEOUT_FLOOR_MULTIPLE = 3.0
 
 
 def _truthy(value: str | None) -> bool:
@@ -62,6 +72,29 @@ def _float_env(name: str, default: float) -> float:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def _effective_publish_queue_timeout_seconds(poll_seconds: float, configured: float) -> float:
+    """Never let the timeout be shorter than a healthy publisher can respond in.
+
+    A run cannot be claimed faster than one poll, so a timeout below
+    `PUBLISH_QUEUE_TIMEOUT_FLOOR_MULTIPLE` polls fails a run before the
+    publisher could ever reach it, which looks exactly like the "nothing is
+    configured" case the timeout exists to report and is not one.
+    """
+    floor = poll_seconds * PUBLISH_QUEUE_TIMEOUT_FLOOR_MULTIPLE
+    if configured >= floor:
+        return configured
+    log.warning(
+        "%s=%.0f is shorter than %.0fx the publish poll interval (%s=%.0f); using %.0f instead",
+        PUBLISH_QUEUE_TIMEOUT_SECONDS_ENV,
+        configured,
+        PUBLISH_QUEUE_TIMEOUT_FLOOR_MULTIPLE,
+        PUBLISH_POLL_SECONDS_ENV,
+        poll_seconds,
+        floor,
+    )
+    return floor
 
 
 class TestTokenNotAllowed(Exception):
@@ -87,6 +120,7 @@ class Settings:
     github_test_token: str | None
     github_test_repo: str | None
     publish_poll_seconds: float
+    publish_queue_timeout_seconds: float
     watch_poll_seconds: float
     watch_poll_max_seconds: float
     reconcile_interval_seconds: float
@@ -102,6 +136,7 @@ class Settings:
                 " refusing to start rather than silently run in test-token mode"
                 " (see docs/decisions/012-test-token-github-mode.md)"
             )
+        publish_poll_seconds = _float_env(PUBLISH_POLL_SECONDS_ENV, DEFAULT_PUBLISH_POLL_SECONDS)
         return cls(
             external_url=os.environ.get(EXTERNAL_URL_ENV, DEFAULT_EXTERNAL_URL).rstrip("/"),
             cookie_secure=_truthy(os.environ.get(COOKIE_SECURE_ENV)),
@@ -120,7 +155,13 @@ class Settings:
             or DEFAULT_APP_NAME_PREFIX,
             github_test_token=test_token,
             github_test_repo=os.environ.get(GITHUB_TEST_REPO_ENV, "").strip() or None,
-            publish_poll_seconds=_float_env(PUBLISH_POLL_SECONDS_ENV, DEFAULT_PUBLISH_POLL_SECONDS),
+            publish_poll_seconds=publish_poll_seconds,
+            publish_queue_timeout_seconds=_effective_publish_queue_timeout_seconds(
+                publish_poll_seconds,
+                _float_env(
+                    PUBLISH_QUEUE_TIMEOUT_SECONDS_ENV, DEFAULT_PUBLISH_QUEUE_TIMEOUT_SECONDS
+                ),
+            ),
             watch_poll_seconds=_float_env(WATCH_POLL_SECONDS_ENV, DEFAULT_WATCH_POLL_SECONDS),
             watch_poll_max_seconds=_float_env(
                 WATCH_POLL_MAX_SECONDS_ENV, DEFAULT_WATCH_POLL_MAX_SECONDS

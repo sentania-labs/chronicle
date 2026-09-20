@@ -261,6 +261,7 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
             row("source", conventions["source"])
             + row("environment", conventions["environment"])
             + row("contentdir", conventions["contentdir"])
+            + row("post directory (observed)", conventions.get("postdir") or "none observed")
             + row("staticdir", conventions["staticdir"])
             + row("mainsections", ", ".join(conventions["mainsections"]) or "none")
             + row(

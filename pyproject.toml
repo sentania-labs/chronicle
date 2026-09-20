@@ -87,4 +87,7 @@ explicit_package_bases = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--import-mode=importlib"
+addopts = "--import-mode=importlib --strict-markers"
+markers = [
+    "requires_tool(name): needs node, hugo or chrome; skipped when absent, a failure under CHRONICLE_REQUIRE_TEST_TOOLS=1",
+]

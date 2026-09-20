@@ -114,6 +114,14 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   `httpx.MockTransport` can stand in; every test of the GitHub path (spec's
   requirement) sets it, and production code never does. `AdminServices` also
   accepts a `github_client` override at `.build()` for the same reason.
+- **A run nobody claims fails itself, and the gate covers both run kinds.**
+  `Store.active_publish_run` counts `publish` and `unpublish` runs, so a save,
+  attach or detach is refused while either is queued or building.
+  `publisher.expire_unclaimed_runs` (called by `run_loop` after `tick`, never
+  from inside it, because `tick` returns early when no target is configured)
+  fails a run still `queued` past `CHRONICLE_PUBLISH_QUEUE_TIMEOUT_SECONDS`
+  through `finish_run`, which is what unfreezes the draft. See
+  [docs/decisions/020-queued-publish-runs-time-out.md](docs/decisions/020-queued-publish-runs-time-out.md).
 - **Digest never deletes a post record.** A post on main that a later digest
   no longer finds is left alone; deciding it was actually removed is
   reconciliation's job (ADR 005, arriving C4), not digest's. Digest only
@@ -296,7 +304,11 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   data_dir)` right before converting, which reads `data/state/toolchain.
   json`'s `conventions.staticdir` (falling back the same way digest itself
   does if no digest has run yet or the file does not parse) rather than
-  invoking Hugo again for a value the last digest already derived.
+  invoking Hugo again for a value the last digest already derived. A brand
+  new post's directory is read the same way (`digest.read_new_post_dir_from_state`,
+  `new_post_dir`): the section the last digest saw most posts in, never built
+  from `contentdir` (a root) or `mainsections` (page types), and exactly
+  `content/posts` when nothing was read (ADR 017, issue 21 amendment).
 
 ## Round C4 status
 

@@ -99,6 +99,23 @@ def test_an_imported_draft_with_an_unusable_url_can_still_be_saved_unchanged(
     assert excinfo.value.code == "frontmatter_url_invalid"
 
 
+def test_an_imported_post_with_a_percent_encoded_url_keeps_it_and_pins_the_slug(
+    store: Store,
+) -> None:
+    """Issue 46: main's own `url` is kept as found (and stays saveable), but its
+    encoded last segment never names the image directory: the slug does, so the
+    directory and the image URL written for it are the same string."""
+    _seed_post_on_site(store, "encoded-url-post", extra_frontmatter="url: /2026/08/my%20post/\n")
+    created, _ = store.create_draft("ghostwriter", from_post="encoded-url-post")
+    draft = store.get_draft(created.id)
+    assert draft.frontmatter["url"] == "/2026/08/my%20post/"
+    assert draft.image_dir == "encoded-url-post"
+    saved = store.save_draft(
+        draft.id, "ghostwriter", 0, {**draft.frontmatter, "summary": "edited"}, "new body\n"
+    )
+    assert saved.frontmatter["url"] == "/2026/08/my%20post/"
+
+
 def test_from_post_drops_unknown_frontmatter_keys_with_a_warning(store: Store) -> None:
     _seed_post_on_site(store, "legacy-post", extra_frontmatter="oldFieldFromTheDashboard: yes\n")
     draft, warnings = store.create_draft("ghostwriter", from_post="legacy-post")

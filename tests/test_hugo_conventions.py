@@ -8,6 +8,7 @@ against real git plumbing rather than a mock.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -347,3 +348,143 @@ def test_read_content_dir_from_state_falls_back_on_unparseable_state(tmp_path: P
     state_dir.mkdir()
     (state_dir / "toolchain.json").write_text("not json", encoding="utf-8")
     assert digest.read_content_dir_from_state(tmp_path) == digest.FALLBACK_CONTENT_DIR
+
+
+# Issue #21: where a brand-new post is written. `contentdir` is the content
+# ROOT and `FALLBACK_CONTENT_DIR` is the whole pre-ADR-017 path, so the reader
+# never builds a new post's directory from `contentdir` alone.
+
+
+def _post(path: str) -> digest.DiscoveredPost:
+    return digest.DiscoveredPost(slug=Path(path).stem, path=path, title="t", date="", sha="")
+
+
+def _write_state(data_dir: Path, conventions: dict[str, object]) -> None:
+    state_dir = data_dir / "state"
+    state_dir.mkdir(exist_ok=True)
+    (state_dir / "toolchain.json").write_text(
+        json.dumps({"conventions": conventions}), encoding="utf-8"
+    )
+
+
+def test_dominant_post_dir_is_the_busiest_section_under_the_content_root() -> None:
+    posts = [_post("content/posts/a.md"), _post("content/posts/b.md"), _post("content/misc/c.md")]
+    assert digest.dominant_post_dir(posts, "content") == "content/posts"
+
+
+def test_dominant_post_dir_counts_nested_and_bundle_posts_by_section() -> None:
+    posts = [
+        _post("content/blog/2024/a.md"),
+        _post("content/blog/2025/b.md"),
+        _post("content/blog/c/index.md"),
+        _post("content/posts/d.md"),
+    ]
+    assert digest.dominant_post_dir(posts, "content") == "content/blog"
+
+
+def test_dominant_post_dir_for_posts_at_the_content_root_is_the_root() -> None:
+    assert digest.dominant_post_dir([_post("content/a.md")], "content") == "content"
+
+
+def test_dominant_post_dir_tie_is_broken_by_name_and_no_posts_is_none() -> None:
+    tied = [_post("content/b/x.md"), _post("content/a/y.md")]
+    assert digest.dominant_post_dir(tied, "content") == "content/a"
+    assert digest.dominant_post_dir([], "content") is None
+
+
+def _conventions(**overrides: object) -> digest.HugoConventions:
+    fields: dict[str, object] = {
+        "contentdir": "content",
+        "staticdir": "static",
+        "mainsections": ("post",),
+        "taxonomies": {},
+        "environment": "production",
+        "source": "hugo_config",
+    }
+    fields.update(overrides)
+    return digest.HugoConventions(**fields)  # type: ignore[arg-type]
+
+
+def test_a_fallback_read_is_never_annotated_with_an_observed_directory() -> None:
+    fallback = _conventions(contentdir=digest.FALLBACK_CONTENT_DIR, source="fallback")
+    annotated = digest.with_observed_post_dir(fallback, [_post("content/posts/a.md")])
+    assert annotated.postdir is None
+    real = digest.with_observed_post_dir(_conventions(), [_post("content/posts/a.md")])
+    assert real.postdir == "content/posts"
+    assert real.as_dict()["postdir"] == "content/posts"
+
+
+def test_new_post_dir_with_no_state_is_the_pre_adr_017_directory(tmp_path: Path) -> None:
+    assert digest.read_new_post_dir_from_state(tmp_path) == "content/posts"
+
+
+def test_new_post_dir_with_unparseable_state_is_the_pre_adr_017_directory(tmp_path: Path) -> None:
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "toolchain.json").write_text("not json", encoding="utf-8")
+    assert digest.read_new_post_dir_from_state(tmp_path) == "content/posts"
+
+
+def test_new_post_dir_after_a_fallback_read_is_the_pre_adr_017_directory(tmp_path: Path) -> None:
+    """The fallback's contentdir is the whole path; it must not become a root
+    that a `posts` segment is appended to."""
+    _write_state(tmp_path, _conventions(contentdir="content/posts", source="fallback").as_dict())
+    assert digest.read_new_post_dir_from_state(tmp_path) == "content/posts"
+
+
+def test_new_post_dir_is_the_observed_section(tmp_path: Path) -> None:
+    _write_state(tmp_path, _conventions(contentdir="content2", postdir="content2/blog").as_dict())
+    assert digest.read_new_post_dir_from_state(tmp_path) == "content2/blog"
+
+
+def test_new_post_dir_without_an_observed_section_is_posts_under_the_content_root(
+    tmp_path: Path,
+) -> None:
+    """The real `hugo config` answer for this project's own site is
+    `contentdir: content`, and `mainsections` is `post`, a type and not a
+    directory: neither is a section name, so the section is Chronicle's own."""
+    _write_state(tmp_path, _conventions().as_dict())
+    assert digest.read_new_post_dir_from_state(tmp_path) == "content/posts"
+    _write_state(tmp_path, _conventions(contentdir="archive").as_dict())
+    assert digest.read_new_post_dir_from_state(tmp_path) == "archive/posts"
+
+
+def test_new_post_dir_when_the_content_root_is_already_a_posts_directory(tmp_path: Path) -> None:
+    _write_state(tmp_path, _conventions(contentdir="content/posts").as_dict())
+    assert digest.read_new_post_dir_from_state(tmp_path) == "content/posts"
+
+
+@pytest.mark.parametrize(
+    "conventions",
+    [
+        {"source": "hugo_config", "contentdir": "../outside"},
+        {"source": "hugo_config", "contentdir": "/etc"},
+        {"source": "hugo_config", "contentdir": ""},
+        {"source": "hugo_config"},
+    ],
+)
+def test_new_post_dir_never_trusts_an_unsafe_contentdir(
+    tmp_path: Path, conventions: dict[str, object]
+) -> None:
+    _write_state(tmp_path, conventions)
+    assert digest.read_new_post_dir_from_state(tmp_path) == "content/posts"
+
+
+def test_new_post_dir_ignores_an_observed_section_outside_the_content_root(
+    tmp_path: Path,
+) -> None:
+    _write_state(tmp_path, _conventions(postdir="../elsewhere").as_dict())
+    assert digest.read_new_post_dir_from_state(tmp_path) == "content/posts"
+    _write_state(tmp_path, _conventions(postdir="other/blog").as_dict())
+    assert digest.read_new_post_dir_from_state(tmp_path) == "content/posts"
+
+
+@requires_hugo
+def test_a_digest_of_a_real_site_records_where_its_posts_live(
+    custom_layout_site: Path,
+) -> None:
+    """The custom layout keeps its posts in `content2/blog` while `mainsections`
+    says `post`: the directory is observed, never read off `mainsections`."""
+    conventions = digest.read_hugo_conventions(custom_layout_site)
+    discovered = digest.discover_posts(custom_layout_site, conventions)
+    annotated = digest.with_observed_post_dir(conventions, discovered)
+    assert annotated.postdir == "content2/blog"

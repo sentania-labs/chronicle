@@ -16,8 +16,11 @@ The three rules, checked against the real blog's 347 posts:
 - **Filename.** An imported draft keeps the file it came from
   (`source_post.path`), because its `url` is already public and the file
   name is part of the archive's shape. A new draft gets
-  `content/posts/<YYYY-MM-DD>-<slug>.md`, the pattern every post on main
-  uses.
+  `<section>/<YYYY-MM-DD>-<slug>.md`, the dated pattern every post on main
+  uses, where `<section>` is the directory the site's own posts live in
+  (`digest.read_new_post_dir_from_state`, ADR 017's issue 21 amendment: the
+  last digest's observed section, `content/posts` on the real blog). With no
+  digest state, or a fallback read, it is `content/posts`.
 - **`url`.** An imported draft keeps the `url` in its own frontmatter. A new
   draft gets `/<YYYY>/<MM>/<slug>/`, the dominant pattern on main (a
   handful of older posts carry `/<YYYY>/<MM>/<DD>/<slug>/`; Chronicle does
@@ -51,7 +54,6 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import unquote
 
 import yaml
 
@@ -128,7 +130,12 @@ def post_filename(draft: Draft, slug: str) -> str:
     return f"{post_date(draft.frontmatter).isoformat()}-{slug}.md"
 
 
-def post_path(draft: Draft, slug: str, content_dir: str | None = None) -> str:
+def post_path(
+    draft: Draft,
+    slug: str,
+    content_dir: str | None = None,
+    new_post_dir: str | None = None,
+) -> str:
     """Where the post file goes, site-relative.
 
     An import keeps the path it came from, but only when that path is inside
@@ -148,12 +155,27 @@ def post_path(draft: Draft, slug: str, content_dir: str | None = None) -> str:
     slash would make every digest-created record on that site fail to
     match its own directory and duplicate on every republish, exactly
     what this parameter exists to stop.
+
+    A brand-new draft (no `source_post`) is written into `new_post_dir`
+    (issue #21): the section directory the site's own posts live in, which
+    the caller reads from the last digest (`digest.read_new_post_dir_from_state`).
+    It is a different kind of value from `content_dir`: that one is the
+    content ROOT (`content`) and is only ever a prefix to match, while this
+    is where a file is created, so it names the section (`content/posts`)
+    and is never derived from `content_dir` here. `None` (a caller that has
+    no digest state, and every call site before this parameter existed) keeps
+    `POSTS_DIR`, and so does a value that is not a safe relative directory:
+    the state file is data from a digest of main, not something a path may
+    be built from unchecked.
     """
     base = (content_dir or POSTS_DIR).rstrip("/")
     source = (draft.source_post or {}).get("path")
     if source and _is_safe_relative(source) and source.startswith(f"{base}/"):
         return source
-    return f"{POSTS_DIR}/{post_filename(draft, slug)}"
+    target = new_post_dir.rstrip("/") if new_post_dir else ""
+    if not target or not _is_safe_relative(target):
+        target = POSTS_DIR
+    return f"{target}/{post_filename(draft, slug)}"
 
 
 def post_url(draft: Draft, slug: str) -> str:
@@ -177,22 +199,37 @@ def _last_segment(url: str) -> str | None:
 def _segment_problem(segment: str) -> str | None:
     """Why `segment` cannot be one directory name under static/images/, or None.
 
-    Judged on the percent-decoded form as well, because a browser resolves
-    `/images/%2e%2e/shot.png` to `/shot.png`, so an encoded traversal is as
-    much a traversal as a literal one. A backslash is a separator on some
-    platforms and in browsers' URL parsing, so it is never part of a name.
+    The directory on disk and the image URL written into the body are the
+    same string (`image_site_path` and `image_url` both take the name as it
+    is), and a browser or static host decodes a URL before it looks the file
+    up. So a name is usable only if decoding it, and reading it as a URL, are
+    both no-ops: a percent sign is refused outright (`my%20post` would be a
+    directory literally named `my%20post` that the URL `/images/my%20post/`
+    never reaches, since that decodes to `my post`; `%2e%2e` is `..` by the
+    same decoding), and so are the characters that end or split a URL path
+    (`?`, `#`) and whitespace (a reference in a body stops at it). A
+    backslash is a separator on some platforms and in browsers' URL parsing,
+    so it is never part of a name either. ADR 015, amended 2026-09-19 (issue 46).
     """
     if segment != segment.strip():
         return f"{segment!r} has leading or trailing whitespace"
-    for candidate in (segment, unquote(segment)):
-        if candidate in (".", ".."):
-            return f"{segment!r} is a relative path segment, not a directory name"
-        if candidate.lower() == ".git":
-            return f"{segment!r} is a git metadata name that a tree cannot contain"
-        if "/" in candidate or "\\" in candidate:
-            return f"{segment!r} contains a path separator"
-        if any(ord(char) < 32 or ord(char) == 127 for char in candidate):
-            return f"{segment!r} contains a control character"
+    if segment in (".", ".."):
+        return f"{segment!r} is a relative path segment, not a directory name"
+    if segment.lower() == ".git":
+        return f"{segment!r} is a git metadata name that a tree cannot contain"
+    if "/" in segment or "\\" in segment:
+        return f"{segment!r} contains a path separator"
+    if any(ord(char) < 32 or ord(char) == 127 for char in segment):
+        return f"{segment!r} contains a control character"
+    if "%" in segment:
+        return (
+            f"{segment!r} contains a percent sign; the directory on disk and the image"
+            " URL written for it must be the same string, so an encoded name is not accepted"
+        )
+    if any(char.isspace() for char in segment):
+        return f"{segment!r} contains whitespace, which an image reference in a body cannot carry"
+    if "?" in segment or "#" in segment:
+        return f"{segment!r} contains a character that ends a URL path"
     return None
 
 
@@ -222,7 +259,8 @@ def image_dir_name(url: str | None, fallback_slug: str) -> str:
     the one place both `_fill_from_post` and `_pin_slug` in `store.py` call
     to agree on the same directory name a draft is going to keep for life.
     A last segment that is not a plain directory name (`..`, `.`, a
-    backslash, an encoded form of either) yields the fallback slug instead;
+    backslash, a percent sign, whitespace, `?` or `#`: see `_segment_problem`)
+    yields the fallback slug instead;
     a save refuses such a url up front (`url_problem`), so this only fires
     for a draft saved before that, or an import from main.
     """
@@ -367,7 +405,10 @@ def render_frontmatter(frontmatter: dict[str, Any]) -> str:
 
 
 def convert(
-    draft: Draft, static_dir: str | None = None, content_dir: str | None = None
+    draft: Draft,
+    static_dir: str | None = None,
+    content_dir: str | None = None,
+    new_post_dir: str | None = None,
 ) -> ConvertedPost:
     """The draft as a Hugo post file, plus where its images have to land.
 
@@ -381,7 +422,9 @@ def convert(
     through to `post_path` so a digest-created record's source path is
     matched against the site's real content directory rather than a
     hardcoded `content/posts` (issue #18); `None` keeps the same
-    pre-ADR-017 fallback.
+    pre-ADR-017 fallback. `new_post_dir` is where a brand-new post is
+    written (`digest.read_new_post_dir_from_state`, issue #21); `None` keeps
+    `content/posts`.
     """
     slug = draft.slug
     if not slug:
@@ -421,7 +464,7 @@ def convert(
 
     return ConvertedPost(
         slug=slug,
-        post_path=post_path(draft, slug, content_dir),
+        post_path=post_path(draft, slug, content_dir, new_post_dir),
         text=text,
         url=frontmatter["url"],
         images=placed,

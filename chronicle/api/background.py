@@ -48,7 +48,13 @@ def start(services: Services, admin: AdminServices) -> Background:
 
     publisher_thread = threading.Thread(
         target=publisher.run_loop,
-        args=(store, admin, settings.publish_poll_seconds, background.stop_event),
+        args=(
+            store,
+            admin,
+            settings.publish_poll_seconds,
+            background.stop_event,
+            settings.publish_queue_timeout_seconds,
+        ),
         name="chronicle-publisher",
         daemon=True,
     )
