@@ -7,7 +7,7 @@ other consumer would, except the bearer value is read fresh from
 header, so a rotation (or a revoke on `/admin/tokens`) takes effect on the
 next click, not on next restart. `Consumer(token_name=UI_TOKEN_NAME)` is the
 same type `require_consumer` returns for a real bearer call, so
-`consumer.name` resolves to `scott` and `consumer.is_ui` is `True` exactly as
+`consumer.name` resolves to `editor` and `consumer.is_ui` is `True` exactly as
 spec section 11 requires.
 """
 

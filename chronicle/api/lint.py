@@ -9,10 +9,10 @@ tiers returning their findings as plain strings instead of logging directly
 so the caller (the publisher) decides where a warning goes (the run's log
 and its result, not a bare log line the way the original vault script used).
 
-Ported from `/home/scott/agents/vault/scripts/blog/_lint.py` with two
-changes to fit Chronicle's shape: `log()` calls become returned warning
-strings, and `lint_and_normalize_body` takes only `slug` (Chronicle has one
-slug per post throughout, not a separate dashboard slug and blog slug).
+Ported from the vault's blog lint script with two changes to fit
+Chronicle's shape: `log()` calls become returned warning strings, and
+`lint_and_normalize_body` takes only `slug` (Chronicle has one slug per post
+throughout, not a separate dashboard slug and blog slug).
 """
 
 from __future__ import annotations

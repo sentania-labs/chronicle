@@ -353,9 +353,7 @@ def drafts_board(
     # board's filter offers four words, and a word covers several statuses.
     wanted = parse_status_filter(status)
     drafts = (
-        [d for one in wanted for d in store.list_drafts(one)]
-        if wanted
-        else store.list_drafts(None)
+        [d for one in wanted for d in store.list_drafts(one)] if wanted else store.list_drafts(None)
     )
     needle = q.strip().lower()
     if needle:

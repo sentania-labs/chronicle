@@ -156,8 +156,7 @@ def _status_options(current: str | None) -> str:
         options.append(f'<option value="{escape(value)}"{selected}>{escape(text)}</option>')
     if selected_value and selected_value not in {value for value, _ in known}:
         options.append(
-            f'<option value="{escape(selected_value)}" selected>'
-            f"{escape(selected_value)}</option>"
+            f'<option value="{escape(selected_value)}" selected>{escape(selected_value)}</option>'
         )
     return "".join(options)
 
