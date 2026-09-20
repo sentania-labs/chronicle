@@ -54,7 +54,6 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import unquote
 
 import yaml
 
@@ -200,22 +199,37 @@ def _last_segment(url: str) -> str | None:
 def _segment_problem(segment: str) -> str | None:
     """Why `segment` cannot be one directory name under static/images/, or None.
 
-    Judged on the percent-decoded form as well, because a browser resolves
-    `/images/%2e%2e/shot.png` to `/shot.png`, so an encoded traversal is as
-    much a traversal as a literal one. A backslash is a separator on some
-    platforms and in browsers' URL parsing, so it is never part of a name.
+    The directory on disk and the image URL written into the body are the
+    same string (`image_site_path` and `image_url` both take the name as it
+    is), and a browser or static host decodes a URL before it looks the file
+    up. So a name is usable only if decoding it, and reading it as a URL, are
+    both no-ops: a percent sign is refused outright (`my%20post` would be a
+    directory literally named `my%20post` that the URL `/images/my%20post/`
+    never reaches, since that decodes to `my post`; `%2e%2e` is `..` by the
+    same decoding), and so are the characters that end or split a URL path
+    (`?`, `#`) and whitespace (a reference in a body stops at it). A
+    backslash is a separator on some platforms and in browsers' URL parsing,
+    so it is never part of a name either. ADR 015, amended 2026-09-19 (issue 46).
     """
     if segment != segment.strip():
         return f"{segment!r} has leading or trailing whitespace"
-    for candidate in (segment, unquote(segment)):
-        if candidate in (".", ".."):
-            return f"{segment!r} is a relative path segment, not a directory name"
-        if candidate.lower() == ".git":
-            return f"{segment!r} is a git metadata name that a tree cannot contain"
-        if "/" in candidate or "\\" in candidate:
-            return f"{segment!r} contains a path separator"
-        if any(ord(char) < 32 or ord(char) == 127 for char in candidate):
-            return f"{segment!r} contains a control character"
+    if segment in (".", ".."):
+        return f"{segment!r} is a relative path segment, not a directory name"
+    if segment.lower() == ".git":
+        return f"{segment!r} is a git metadata name that a tree cannot contain"
+    if "/" in segment or "\\" in segment:
+        return f"{segment!r} contains a path separator"
+    if any(ord(char) < 32 or ord(char) == 127 for char in segment):
+        return f"{segment!r} contains a control character"
+    if "%" in segment:
+        return (
+            f"{segment!r} contains a percent sign; the directory on disk and the image"
+            " URL written for it must be the same string, so an encoded name is not accepted"
+        )
+    if any(char.isspace() for char in segment):
+        return f"{segment!r} contains whitespace, which an image reference in a body cannot carry"
+    if "?" in segment or "#" in segment:
+        return f"{segment!r} contains a character that ends a URL path"
     return None
 
 
@@ -245,7 +259,8 @@ def image_dir_name(url: str | None, fallback_slug: str) -> str:
     the one place both `_fill_from_post` and `_pin_slug` in `store.py` call
     to agree on the same directory name a draft is going to keep for life.
     A last segment that is not a plain directory name (`..`, `.`, a
-    backslash, an encoded form of either) yields the fallback slug instead;
+    backslash, a percent sign, whitespace, `?` or `#`: see `_segment_problem`)
+    yields the fallback slug instead;
     a save refuses such a url up front (`url_problem`), so this only fires
     for a draft saved before that, or an import from main.
     """
