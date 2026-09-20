@@ -136,7 +136,13 @@ def test_board_card_renders_updated_as_local_time(services: Services) -> None:
 
     draft = _draft_dict(services)
     draft["updated_at"] = BOARD_STAMP
-    row: dict[str, Any] = {"draft": draft, "last_author": "scott", "run_info": None, "flags": []}
+    row: dict[str, Any] = {
+        "draft": draft,
+        "last_author": "scott",
+        "run_info": None,
+        "flags": [],
+        "came_back": False,
+    }
     html = tpl.drafts_board_page([row], paginate([], 1), status_filter=None, q="", banner=False)
     _assert_local(html, BOARD_STAMP, "updated: 2020-01-01 21:04 CST")
 

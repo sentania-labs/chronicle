@@ -166,10 +166,11 @@ def test_editor_renders_for_every_draft_status(
     assert_no_token_leak(board, agent_token)
 
 
-def test_reserved_actions_are_labelled_scott_only(client: TestClient, services: Services) -> None:
+def test_reserved_actions_are_labelled_editor_only(client: TestClient, services: Services) -> None:
     draft_id = make_draft(services, "in_review", title="Needs review")
     response = client.get(f"/content/drafts/{draft_id}")
-    assert "Scott only" in response.text
+    assert "(editor only)" in response.text
+    assert "Scott" not in response.text
     assert "request revision" in response.text.lower()
     assert "reject" in response.text.lower()
 
@@ -410,7 +411,7 @@ def test_editor_save_forwards_base_version_and_bumps_version(
     assert updated.body == "updated body"
 
     versions = services.store.list_versions(draft_id)
-    assert versions[-1].author == "scott"
+    assert versions[-1].author == "editor"
 
 
 def _save_form(draft: Any, **overrides: str) -> dict[str, str]:
@@ -555,7 +556,9 @@ def test_version_diff_view(client: TestClient, services: Services) -> None:
 # --- Reserved actions produce scott-authored records -----------------------
 
 
-def test_reserved_action_via_ui_is_authored_scott(client: TestClient, services: Services) -> None:
+def test_reserved_action_via_ui_is_authored_by_the_editor(
+    client: TestClient, services: Services
+) -> None:
     draft_id = make_draft(services, "drafting", title="Reviewable")
     submitted = client.post(f"/content/drafts/{draft_id}/actions/submit")
     assert submitted.status_code == 200
@@ -570,12 +573,12 @@ def test_reserved_action_via_ui_is_authored_scott(client: TestClient, services: 
     assert draft.status == "revision_requested"
 
     feedback = services.store.list_feedback(draft_id)
-    assert feedback[-1].author == "scott"
+    assert feedback[-1].author == "editor"
     assert feedback[-1].text == "please add more detail"
 
     events, _cursor = services.store.events_since(0)
     reserved_events = [e for e in events if e.type == "draft.request_revision"]
-    assert reserved_events and reserved_events[-1].actor == "scott"
+    assert reserved_events and reserved_events[-1].actor == "editor"
 
 
 def test_reserved_action_without_feedback_is_rejected_and_editor_re_rendered(
@@ -1210,7 +1213,7 @@ def test_new_post_creates_a_blank_draft_and_redirects_into_the_editor(
     # Acts as the ui consumer's mapped identity, like every other UI write.
     events, _cursor = services.store.events_since(0)
     assert [(e.type, e.actor, e.draft_id) for e in events if e.draft_id == drafts[0].id] == [
-        ("draft.created", "scott", drafts[0].id)
+        ("draft.created", "editor", drafts[0].id)
     ]
 
     editor = client.get(response.headers["location"])

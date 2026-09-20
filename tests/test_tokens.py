@@ -67,8 +67,8 @@ def test_successful_auth_stamps_last_used(
     assert after.last_used_at is not None
 
 
-def test_ui_token_commits_as_scott() -> None:
-    assert commit_author("ui") == "scott"
+def test_ui_token_commits_as_the_editor() -> None:
+    assert commit_author("ui") == "editor"
     assert commit_author("ghostwriter") == "ghostwriter"
 
 
@@ -81,15 +81,15 @@ def test_git_author_is_the_acting_token_end_to_end(
 
     saved = client.put(
         f"/v1/drafts/{draft_id}",
-        json={"base_version": 0, "frontmatter": {"title": "Scott edits"}, "body": "b"},
+        json={"base_version": 0, "frontmatter": {"title": "Editor edits"}, "body": "b"},
         headers=auth(ui_token),
     )
     assert saved.status_code == 200
-    assert gitrepo.log_authors(store.repo_dir, limit=1) == ["scott"]
+    assert gitrepo.log_authors(store.repo_dir, limit=1) == ["editor"]
     assert saved.json()["version_no"] == 1
 
     version = client.get(f"/v1/drafts/{draft_id}/versions/1", headers=auth(agent_token)).json()
-    assert version["author"] == "scott"
+    assert version["author"] == "editor"
 
 
 def test_interleaved_stores_both_land(data_dir: Path) -> None:

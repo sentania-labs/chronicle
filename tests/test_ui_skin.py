@@ -165,10 +165,17 @@ def test_every_status_has_a_tone_and_only_meaningful_ones_carry_colour() -> None
     assert set(STATUS_TONES) == set(DRAFT_STATUSES)
     assert set(STATUS_TONES.values()) <= {"", "ok", "warn", "bad"}
     assert status_tone("published") == "ok"
-    assert status_tone("revision_requested") == "warn"
     assert status_tone("rejected") == "bad"
-    # In-progress statuses stay neutral: colour would be decoration.
-    for neutral in ("drafting", "in_review", "previewed", "approved", "unpublished"):
+    # In-progress statuses stay neutral: colour would be decoration. "Waiting
+    # on a person" is the `Came back from review` detail's warn, not a status's.
+    for neutral in (
+        "drafting",
+        "in_review",
+        "previewed",
+        "approved",
+        "unpublished",
+        "revision_requested",
+    ):
         assert status_tone(neutral) == ""
     assert status_tone("not-a-status") == ""
 

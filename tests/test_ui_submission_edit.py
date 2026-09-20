@@ -104,7 +104,7 @@ def test_edit_form_saves_through_the_ui_consumer_and_normalises_line_breaks(
     assert record["materials"][0]["text"] == "line one\nline two"
     assert record["materials"][2]["text"] == "a new note"
     version = services.store.get_submission_version(submission_id, 2)
-    assert version.author == "scott"
+    assert version.author == "editor"
 
 
 def test_clearing_a_material_row_removes_it(client: TestClient, agent_token: str) -> None:

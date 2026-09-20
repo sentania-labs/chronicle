@@ -661,7 +661,7 @@ def _offer_button(draft_id: str, offer: Offer) -> str:
             f'disabled title="{escape(offer.reason)}">{escape(offer.label)}</button> '
             f'<small class="offer-reason">{escape(offer.reason)}</small></span>'
         )
-    reserved = ' <span class="reserved">(reviewer only)</span>' if offer.reserved else ""
+    reserved = ' <span class="reserved">(editor only)</span>' if offer.reserved else ""
     action_url = f"/content/drafts/{escape(draft_id)}/actions/{offer.action}"
     # Lattice allows one primary per screen; `offers_for` marks at most one.
     css = "lat-btn lat-btn--primary" if offer.primary else "lat-btn"
