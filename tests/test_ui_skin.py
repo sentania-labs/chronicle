@@ -79,8 +79,9 @@ def test_the_current_tab_is_marked_and_only_that_one() -> None:
     html = _board()
     assert html.count("is-on") == 1
     assert '<a class="lat-tab is-on" href="/content/drafts" aria-current="page">Posts</a>' in html
-    imp = ui_templates.page("t", "", banner=False, active=ui_templates.IMPORT_TAB)
-    assert 'class="lat-tab is-on" href="/content/import"' in imp
+    previews = ui_templates.page("t", "", banner=False, active=ui_templates.PREVIEW_TAB)
+    assert 'class="lat-tab is-on" href="/content/previews"' in previews
+    assert "/content/import" not in previews
     assert "is-on" not in ui_templates.page("t", "", banner=False)
 
 

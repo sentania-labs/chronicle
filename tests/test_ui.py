@@ -631,88 +631,39 @@ def test_image_upload_enforces_size_and_type_like_the_api(
     assert len(services.store.get_draft(draft_id).images) == 0
 
 
-# --- Import -----------------------------------------------------------------
+# --- Draft warnings flash -----------------------------------------------------
 
 
-def test_import_search_and_create(client: TestClient, services: Services, data_dir: Path) -> None:
-    from chronicle.api.models import Post
-
-    services.store.apply_digest(
-        "scott",
-        [
-            Post(
-                slug="unifi-network",
-                path="content/posts/unifi.md",
-                title="My Unifi Network",
-                date="2026-01-01",
-                sha="abc",
-            ),
-            Post(
-                slug="other-post",
-                path="content/posts/other.md",
-                title="Something else",
-                date="2026-01-02",
-                sha="def",
-            ),
-        ],
-    )
-    (services.store.site_dir / "content" / "posts").mkdir(parents=True, exist_ok=True)
-    (services.store.site_dir / "content" / "posts" / "unifi.md").write_text(
-        "---\ntitle: My Unifi Network\n---\nbody\n", encoding="utf-8"
-    )
-
-    searched = client.get("/content/import?q=unifi")
-    assert searched.status_code == 200
-    assert "unifi-network" in searched.text
-    assert "other-post" not in searched.text
-
-    created = client.post("/content/import", data={"slug": "unifi-network"})
-    assert created.status_code == 200
-    draft_id = str(created.url).rstrip("/").rsplit("/", 1)[-1]
-    draft = services.store.get_draft(draft_id)
-    assert draft.slug == "unifi-network"
-
-
-def test_import_warnings_from_dropped_frontmatter_and_missing_image_render_on_the_editor(
-    client: TestClient, services: Services
+def test_draft_warnings_from_a_submission_render_on_the_editor_once(
+    client: TestClient, services: Services, agent_token: str
 ) -> None:
-    """Adversarial review finding: `create_draft`'s own warnings (dropped
-    unknown frontmatter keys, images it could not find) were discarded by
-    the redirect and never reached the editor, so an incomplete import
-    looked identical to a complete one."""
-    from chronicle.api.models import Post
+    """`create_draft`'s own warnings (a dropped unknown frontmatter key here)
+    ride one flash query parameter through the redirect to the editor, so an
+    incomplete seed does not look identical to a complete one. The flash is
+    one-shot: a plain reload shows nothing."""
+    submission = client.post(
+        "/v1/submissions",
+        json={
+            "brief": "b",
+            "materials": [
+                {
+                    "name": "post",
+                    "text": "---\ntitle: Lossy Post\nnotAnAllowedKey: surprise\n---\nbody\n",
+                }
+            ],
+        },
+        headers=auth(agent_token),
+    ).json()["id"]
 
-    services.store.apply_digest(
-        "scott",
-        [
-            Post(
-                slug="lossy-post",
-                path="content/posts/lossy.md",
-                title="Lossy Post",
-                date="2026-01-01",
-                sha="abc",
-            )
-        ],
-    )
-    (services.store.site_dir / "content" / "posts").mkdir(parents=True, exist_ok=True)
-    (services.store.site_dir / "content" / "posts" / "lossy.md").write_text(
-        "---\ntitle: Lossy Post\nnotAnAllowedKey: surprise\n---\n![missing](missing-image.png)\n",
-        encoding="utf-8",
-    )
-
-    created = client.post("/content/import", data={"slug": "lossy-post"})
+    created = client.post(f"/content/submissions/{submission}/draft")
     assert created.status_code == 200
     assert "warning" in created.text.lower()
     assert "notAnAllowedKey" in created.text
-    assert "missing-image.png" in created.text
 
     draft_id = str(created.url).rstrip("/").rsplit("/", 1)[-1].split("?", 1)[0]
     draft = services.store.get_draft(draft_id)
     assert "notAnAllowedKey" not in draft.frontmatter
-    assert draft.images == []
 
-    # A plain reload of the editor (no warnings query string) shows no
-    # leftover warning banner: the flash is one-shot, not sticky state.
     reload_ = client.get(f"/content/drafts/{draft_id}")
     assert "warning" not in reload_.text.lower()
 
@@ -992,7 +943,6 @@ def test_ui_token_never_appears_in_any_rendered_page(
         "/content/drafts",
         f"/content/drafts/{draft_id}",
         "/content/submissions",
-        "/content/import",
         "/content/previews",
     ]
     for path in pages:
@@ -1241,173 +1191,12 @@ def test_new_post_needs_a_live_ui_token(client: TestClient, services: Services) 
     assert services.store.list_drafts() == []
 
 
-# --- Import filter ----------------------------------------------------------
+# --- The Import tab is gone (#20) ---------------------------------------------
 
 
-def _set_fields(services: Services, draft_id: str, **fields: Any) -> None:
-    store = services.store
-    draft = store.get_draft(draft_id)
-    for key, value in fields.items():
-        setattr(draft, key, value)
-    store._write_json(store._draft_path(draft.id), draft.model_dump(mode="json"))
-    store.index.upsert_draft(draft)
-
-
-def _digest_posts(services: Services, *slugs: str) -> None:
-    services.store.apply_digest(
-        "scott",
-        [
-            Post(
-                slug=slug,
-                path=f"content/posts/{slug}.md",
-                title=f"Title of {slug}",
-                date="2026-01-01",
-                sha=f"sha-{slug}",
-            )
-            for slug in slugs
-        ],
-    )
-
-
-def test_import_lists_only_posts_no_draft_tracks(client: TestClient, services: Services) -> None:
-    _digest_posts(services, "by-slug", "by-source-path", "by-published-path", "loose")
-    slug_draft = make_draft(services, "published", title="t1")
-    _set_fields(services, slug_draft, slug="by-slug")
-    source_draft = make_draft(services, "published", title="t2")
-    _set_fields(
-        services,
-        source_draft,
-        slug="renamed-since",
-        source_post={"slug": "by-source-path", "path": "content/posts/by-source-path.md"},
-    )
-    published_draft = make_draft(services, "published", title="t3")
-    _set_fields(
-        services,
-        published_draft,
-        slug="also-renamed",
-        published={"post_path": "content/posts/by-published-path.md"},
-    )
-
-    html = client.get("/content/import").text
-    assert 'value="loose"' in html
-    for tracked in ("by-slug", "by-source-path", "by-published-path"):
-        assert f'value="{tracked}"' not in html
-    assert "Import as post" in html
-    assert "Posts with no record here yet: 1." in html
-
-
-def test_import_search_only_searches_the_untracked_posts(
-    client: TestClient, services: Services
-) -> None:
-    _digest_posts(services, "tracked-race", "loose-race")
-    tracked = make_draft(services, "published")
-    _set_fields(services, tracked, slug="tracked-race")
-
-    html = client.get("/content/import?q=race").text
-    assert 'value="loose-race"' in html
-    assert 'value="tracked-race"' not in html
-
-
-def test_import_says_so_plainly_when_every_post_is_tracked(
-    client: TestClient, services: Services
-) -> None:
-    _digest_posts(services, "one", "two")
-    for slug in ("one", "two"):
-        _set_fields(services, make_draft(services, "published"), slug=slug)
-
-    response = client.get("/content/import")
-    assert response.status_code == 200
-    assert "All 2 posts from the blog are already on the" in response.text
-    assert 'href="/content/drafts"' in response.text
-    assert "nothing to import" in response.text
-    assert "<table" not in response.text
-    assert "Import as post" not in response.text
-
-
-def test_import_says_so_when_nothing_has_been_digested(client: TestClient) -> None:
-    response = client.get("/content/import")
-    assert response.status_code == 200
-    assert "No posts have been digested" in response.text
-    assert "<table" not in response.text
-
-
-def test_import_post_for_an_already_tracked_post_explains_itself(
-    client: TestClient, services: Services
-) -> None:
-    _digest_posts(services, "already-here")
-    tracked = make_draft(services, "published")
-    _set_fields(services, tracked, slug="already-here")
-    before = len(services.store.list_drafts())
-
-    response = client.post("/content/import", data={"slug": "already-here"})
-    assert response.status_code == 409
-    assert "already a post on the Posts tab" in response.text
-    assert "image_dir_collision" not in response.text
-    assert "already pinned by another draft" not in response.text
-    assert len(services.store.list_drafts()) == before
-
-
-def test_import_image_folder_collision_reads_as_an_explanation(
-    client: TestClient, services: Services
-) -> None:
-    """The recovery path still runs, and its one remaining 409 (another post
-    owns the image folder this import would claim) no longer surfaces the raw
-    collision text."""
-    _digest_posts(services, "clash")
-    site_posts = services.store.site_dir / "content" / "posts"
-    site_posts.mkdir(parents=True, exist_ok=True)
-    (site_posts / "clash.md").write_text("---\ntitle: Clash\n---\nbody\n", encoding="utf-8")
-    owner = make_draft(services, "published", title="Owner")
-    _set_fields(services, owner, slug="someone-else", image_dir="clash")
-
-    response = client.post("/content/import", data={"slug": "clash"})
-    assert response.status_code == 409
-    assert "Could not import clash" in response.text
-    assert "static/images/clash/" in response.text
-    assert "belongs to another post on this board" in response.text
-    assert "already pinned by another draft" not in response.text
-    assert 'class="notice error lat-banner lat-banner--bad"' in response.text
-
-
-def test_import_still_creates_a_post_for_an_untracked_one(
-    client: TestClient, services: Services
-) -> None:
-    _digest_posts(services, "recover-me")
-    site_posts = services.store.site_dir / "content" / "posts"
-    site_posts.mkdir(parents=True, exist_ok=True)
-    (site_posts / "recover-me.md").write_text("---\ntitle: Recover\n---\nbody\n", encoding="utf-8")
-
-    response = client.post("/content/import", data={"slug": "recover-me"}, follow_redirects=False)
-    assert response.status_code == 303
-    assert [d.slug for d in services.store.list_drafts()] == ["recover-me"]
-
-
-def test_import_refusal_keeps_the_visitors_search_and_page(
-    client: TestClient, services: Services
-) -> None:
-    """A refused import re-renders the list the visitor was on, not page one
-    of an unfiltered list, and the listing's own forms carry both values."""
-    _digest_posts(services, "already-here", "other-race", "second-race")
-    _set_fields(services, make_draft(services, "published"), slug="already-here")
-
-    listed = client.get("/content/import?q=race").text
-    assert 'name="q" value="race"' in listed
-    assert 'name="page" value="1"' in listed
-
-    response = client.post(
-        "/content/import", data={"slug": "already-here", "q": "race", "page": "1"}
-    )
-    assert response.status_code == 409
-    assert 'value="race"' in response.text
-    assert 'value="other-race"' in response.text
-    assert "Title of already-here" not in response.text
-
-
-def test_import_refusal_tolerates_a_garbage_page(client: TestClient, services: Services) -> None:
-    _digest_posts(services, "already-here", "loose")
-    _set_fields(services, make_draft(services, "published"), slug="already-here")
-    response = client.post(
-        "/content/import", data={"slug": "already-here", "q": "", "page": "banana"}
-    )
-    assert response.status_code == 409
-    assert 'value="loose"' in response.text
+def test_the_import_tab_and_its_routes_are_gone(client: TestClient) -> None:
+    """Digest already lands a record for every post on main, so the UI has no
+    front door for `from_post`; the capability stays on the API and in the store."""
+    assert client.get("/content/import").status_code == 404
+    assert client.post("/content/import", data={"slug": "x"}).status_code in (404, 405)
+    assert "/content/import" not in client.get("/content/drafts").text

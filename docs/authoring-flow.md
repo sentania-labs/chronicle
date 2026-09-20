@@ -212,13 +212,6 @@ day. The API's JSON and the records on disk keep their ISO stamps unchanged.
   page past the first opens the archive. One card per post (title, slug,
   last author, updated, claim holder, open PR link, preview link, open
   reconciliation flags).
-- **Import** (`/content/import`): a searchable list of the posts no draft
-  record tracks yet (a post is tracked when its slug is some draft's slug,
-  or its path is some draft's `source_post` or `published` path, the same
-  rule digest uses), each row a one-click `from_post` import. Digest
-  already creates a record for every post it can, so on a digested blog
-  this is usually empty and the page says so; it is the recovery path for a
-  post digest could not import.
 - **Editor** (`/content/drafts/{id}`): frontmatter fields, a body textarea
   with a client-side live markdown preview pane (vendored `marked`, see
   [THIRD_PARTY.md](../THIRD_PARTY.md)), image upload and detach, a claim

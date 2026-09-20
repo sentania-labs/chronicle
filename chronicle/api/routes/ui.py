@@ -22,7 +22,7 @@ from .. import ui_templates as tpl
 from ..deps import Consumer, Services
 from ..errors import ApiError
 from ..images import MAX_IMAGE_BYTES, alt_text_for, safe_upload_filename
-from ..models import Draft, Material, Post, Submission
+from ..models import Draft, Material, Submission
 from ..pagination import Page, paginate
 from ..store import Store
 from ..ui_actions import staged_refusal
@@ -761,119 +761,6 @@ def draft_image_detach(
 ) -> RedirectResponse:
     services.store.detach_image(draft_id, image_id, consumer.name)
     return RedirectResponse(f"/content/drafts/{draft_id}", status_code=303)
-
-
-# --- Import ---------------------------------------------------------------
-
-
-def _untracked_posts(store: Store) -> tuple[list[Post], list[Post]]:
-    """(every post, the posts no draft record tracks yet).
-
-    Same rule as `Store._create_published_drafts_from_digest`, which holds
-    the other copy of it (store.py is owned elsewhere, so the two are kept in
-    step by hand: change one, change both). A post is tracked when its slug is
-    some draft's slug, or its path is some draft's `source_post` path or
-    `published` post path. Digest lands a record for each post it sees, so on
-    a digested blog this is usually empty; what is left is the recovery case
-    (a post digest could not import).
-    """
-    posts = store.list_posts()
-    drafts = store.list_drafts()
-    tracked_slugs = {d.slug for d in drafts if d.slug}
-    tracked_paths = {(d.source_post or {}).get("path") for d in drafts if d.source_post} | {
-        (d.published or {}).get("post_path") for d in drafts if d.published
-    }
-    untracked = [p for p in posts if p.slug not in tracked_slugs and p.path not in tracked_paths]
-    return posts, untracked
-
-
-def _import_listing(services: Services, q: str, page: int) -> tuple[Page[dict[str, Any]], int, int]:
-    """(the page to render, how many posts exist, how many are untracked)."""
-    posts, untracked = _untracked_posts(services.store)
-    needle = q.strip().lower()
-    shown = untracked
-    if needle:
-        shown = [p for p in shown if needle in p.slug.lower() or needle in p.title.lower()]
-    posts_dump = [_dump(p) for p in sorted(shown, key=lambda p: p.date, reverse=True)]
-    return paginate(posts_dump, page), len(posts), len(untracked)
-
-
-@router.get("/content/import", response_class=HTMLResponse)
-def import_search(
-    request: Request,
-    q: str = "",
-    page: int = Query(1, ge=1),
-    services: Services = Depends(get_services),
-) -> HTMLResponse:
-    pg, posts_total, untracked_total = _import_listing(services, q, page)
-    return HTMLResponse(
-        tpl.import_page(
-            pg,
-            q,
-            banner=banner_enabled(request),
-            posts_total=posts_total,
-            untracked_total=untracked_total,
-        )
-    )
-
-
-def _import_refusal(
-    services: Services, request: Request, message: str, status_code: int, q: str, page: int
-) -> Any:
-    pg, posts_total, untracked_total = _import_listing(services, q, page)
-    return HTMLResponse(
-        tpl.import_page(
-            pg,
-            q,
-            banner=banner_enabled(request),
-            notice=message,
-            posts_total=posts_total,
-            untracked_total=untracked_total,
-        ),
-        status_code=status_code,
-    )
-
-
-@router.post("/content/import")
-async def import_create(
-    request: Request,
-    _origin: None = Depends(check_same_origin),
-    consumer: Consumer = Depends(require_ui_consumer),
-    services: Services = Depends(get_services),
-) -> Any:
-    form = await request.form()
-    slug = str(form.get("slug", ""))
-    q = str(form.get("q", ""))
-    try:
-        page = max(1, int(str(form.get("page", "1"))))
-    except ValueError:
-        page = 1
-    posts, untracked = _untracked_posts(services.store)
-    if any(p.slug == slug for p in posts) and not any(p.slug == slug for p in untracked):
-        # A stale tab or a hand-built POST: the list no longer offers this
-        # post, because a record for it already exists.
-        return _import_refusal(
-            services,
-            request,
-            f"{slug} is already a post on the Posts tab, so there is nothing to import. "
-            "Open it from there.",
-            409,
-            q,
-            page,
-        )
-    try:
-        draft, warnings = services.store.create_draft(consumer.name, from_post=slug)
-    except ApiError as exc:
-        message = exc.message
-        if exc.code == "image_dir_collision":
-            folder = exc.extra.get("image_dir") or slug
-            message = (
-                f"Could not import {slug}: its image folder (static/images/{folder}/) belongs "
-                "to another post on this board. Nothing was created. If that post is this "
-                "one, it is already on the Posts tab."
-            )
-        return _import_refusal(services, request, message, exc.status_code, q, page)
-    return _redirect_to_draft(draft.id, warnings)
 
 
 # --- Preview tab ------------------------------------------------------------

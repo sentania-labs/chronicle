@@ -52,12 +52,10 @@ EDITOR_SCRIPTS = (
 # see ADR 017 for why a storage/route rename is deferred.
 SUBMISSIONS_TAB = "/content/submissions"
 POSTS_TAB = "/content/drafts"
-IMPORT_TAB = "/content/import"
 PREVIEW_TAB = "/content/previews"
 NAV_LINKS = (
     (SUBMISSIONS_TAB, "Submissions"),
     (POSTS_TAB, "Posts"),
-    (IMPORT_TAB, "Import"),
     (PREVIEW_TAB, "Preview"),
 )
 
@@ -436,90 +434,6 @@ def drafts_board_page(
 </details>
 """
     return page("Posts", body, banner=banner, active=POSTS_TAB)
-
-
-# --- Import ---------------------------------------------------------------
-
-
-def _frontmatter_date(raw: str) -> str:
-    """A post's frontmatter date for a human: local clock time when it parses
-    as ISO, else the author's own text unchanged."""
-    shown = local_time(raw)
-    return raw if shown == "-" else shown
-
-
-def import_page(
-    pg: Page[dict[str, Any]],
-    q: str,
-    *,
-    banner: bool,
-    posts_total: int,
-    untracked_total: int,
-    notice: str | None = None,
-) -> str:
-    """`posts_total` is every post the store knows; `untracked_total` is those
-    no draft record tracks yet, the only ones this tab lists. With none left
-    it says so plainly instead of drawing an empty table, and says why."""
-    if untracked_total == 0:
-        if posts_total == 0:
-            reason = "No posts have been digested from the blog yet, so there is nothing to import."
-        else:
-            reason = (
-                f"All {posts_total} posts from the blog are already on the "
-                '<a href="/content/drafts">Posts tab</a>, so there is nothing to import. '
-                "This tab only lists a post that has no record here yet."
-            )
-        return page(
-            "Import published post",
-            f'<p class="lat-banner">{reason}</p>',
-            banner=banner,
-            active=IMPORT_TAB,
-            notice=notice,
-            notice_kind="error",
-        )
-    rows = "".join(
-        "<tr>"
-        f'<td class="chr-mono">{escape(p["slug"])}</td>'
-        f"<td>{escape(p['title'])}</td>"
-        # A post's date is frontmatter and is often a bare YYYY-MM-DD. `local_time`
-        # leaves that as its own date on purpose: a date has no instant, and
-        # shifting it west of UTC would show the day before. Do not "fix" that
-        # into a clock time. A full stamp is converted to local clock time.
-        # Anything `local_time` cannot read (`July 4, 2026`) shows the author's
-        # own text, and an empty date stays an empty cell, never a dash.
-        # A naive stamp (`2026-07-24 12:00:00`) is assumed UTC here, the store's
-        # convention in `parse_stamp`; Hugo reads it in the site's timezone, so
-        # the shown time can differ from Hugo's by the site's offset.
-        f'<td class="lat-num">{escape(_frontmatter_date(p["date"]))}</td>'
-        '<td><form method="post" action="/content/import">'
-        f'<input type="hidden" name="slug" value="{escape(p["slug"])}">'
-        f'<input type="hidden" name="q" value="{escape(q)}">'
-        f'<input type="hidden" name="page" value="{pg.page}">'
-        '<button type="submit" class="lat-btn">Import as post</button></form></td>'
-        "</tr>"
-        for p in pg.items
-    )
-    extra = f"&q={quote(q)}" if q else ""
-    body = f"""
-<p class="muted">Posts with no record here yet: {untracked_total}.</p>
-<form method="get" action="/content/import" class="chr-filter">
-<div class="chr-field chr-grow">
-<label class="lat-label" for="q">Search published posts</label>
-<input type="text" class="lat-input" id="q" name="q" value="{escape(q)}" placeholder="title or slug">
-</div>
-<button type="submit" class="lat-btn">Search</button>
-</form>
-{_table('<th>slug</th><th>title</th><th class="lat-num">date</th><th></th>', rows or "<tr><td colspan=4>no posts match.</td></tr>")}
-{_pagination_links(pg, "/content/import", extra=extra)}
-"""
-    return page(
-        "Import published post",
-        body,
-        banner=banner,
-        active=IMPORT_TAB,
-        notice=notice,
-        notice_kind="error",
-    )
 
 
 # --- Editor ---------------------------------------------------------------
