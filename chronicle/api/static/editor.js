@@ -258,6 +258,25 @@ function lookupImageSrc(src, images, imageDir) {
   return dirMatch !== null ? dirMatch : src;
 }
 
+// The feature image select's currently chosen option carries the serving URL
+// for that image in a data attribute the server rendered
+// (ui_templates.image_url), never a value derived from the option's text or
+// the body. Returns null for "none" and for the orphan option (a stored
+// featureImage no attached image represents), neither of which carries the
+// attribute. `select` only needs `.options` and `.selectedIndex`, so a plain
+// object shaped like a <select> exercises this without a DOM.
+function featureImageSrc(select) {
+  if (!select || !select.options) {
+    return null;
+  }
+  var index = select.selectedIndex;
+  var option = index >= 0 ? select.options[index] : null;
+  if (!option || !option.dataset) {
+    return null;
+  }
+  return option.dataset.imageSrc || null;
+}
+
 function saveStateText(state, detail) {
   switch (state) {
     case "dirty":
@@ -355,15 +374,40 @@ function saveStateText(state, detail) {
     );
   }
 
+  // The feature image at the top of the preview: built from the selected
+  // option's own data attribute, never from the body, and run through
+  // sanitize the same as the body is, even though its source is already
+  // trusted, so there is exactly one sanitising path for everything the
+  // preview pane renders.
+  function featureImageHtml() {
+    var src = featureImageSrc(document.getElementById("featureImage"));
+    if (!src) {
+      return "";
+    }
+    return sanitize('<img src="' + src.replace(/"/g, "&quot;") + '" alt="feature image">');
+  }
+
   function renderMarkdown(text) {
     // marked passes raw HTML through, and a body is not trusted input (a
     // different consumer token can PUT one): everything reaching the render
     // goes through ui.js's sanitize, which also swaps attached-image
     // references for the URL the server serves them from.
     var images = attachedImages();
-    return sanitize(marked.parse(text || ""), function (src) {
+    var body = sanitize(marked.parse(text || ""), function (src) {
       return lookupImageSrc(src, images, imageDir);
     });
+    return featureImageHtml() + body;
+  }
+
+  function updateFeatureThumb() {
+    var select = document.getElementById("featureImage");
+    var thumb = document.getElementById("featureImageThumb");
+    if (!thumb) {
+      return;
+    }
+    var src = featureImageSrc(select);
+    thumb.src = src || "";
+    thumb.hidden = !src;
   }
 
   if (typeof EasyMDE !== "undefined") {
@@ -402,6 +446,31 @@ function saveStateText(state, detail) {
     });
     editor.toggleSideBySide();
   }
+
+  // Every caller that sets #featureImage's value programmatically (the
+  // change listener below, and the Restore path further down, which sets it
+  // through writeFields without firing a change event) must run this same
+  // refresh, or the thumbnail and the side-by-side preview keep showing
+  // whatever image was selected before.
+  function refreshFeatureImage() {
+    updateFeatureThumb();
+    if (editor) {
+      editor.codemirror.refresh();
+    }
+  }
+
+  // The feature image select lives in the refreshed frontmatter panel, so
+  // this listens on the document rather than the element: a save swaps the
+  // panel out for a fresh one with the same id, and a plain element listener
+  // would go stale. EasyMDE's side-by-side preview re-renders on the
+  // codemirror "update" event (fired by refresh()), not on a select change,
+  // so a change here has to ask for that refresh itself.
+  document.addEventListener("change", function (event) {
+    if (event.target && event.target.id === "featureImage") {
+      refreshFeatureImage();
+    }
+  });
+  updateFeatureThumb();
 
   function getBody() {
     return editor ? editor.value() : textarea.value;
@@ -518,6 +587,10 @@ function saveStateText(state, detail) {
       offerPending = false;
       setBody(pending.body);
       writeFields(pending.fields);
+      // writeFields sets #featureImage's value directly, which fires no
+      // change event: without this the thumbnail and the preview would keep
+      // showing whatever was selected before the restore.
+      refreshFeatureImage();
       // Restoring puts the text back at the version it was written against,
       // so if the server has moved on the next save is refused with the
       // differences shown rather than overwriting what landed meanwhile.
@@ -731,22 +804,41 @@ function saveStateText(state, detail) {
     }
   }
 
-  function addFeatureOption(filename, select) {
+  function addFeatureOption(filename, url, select) {
     var featureSelect = document.getElementById("featureImage");
     if (!featureSelect) {
       return;
     }
-    var found = Array.prototype.some.call(featureSelect.options, function (option) {
-      return option.value === filename;
+    var existing = null;
+    Array.prototype.some.call(featureSelect.options, function (option) {
+      if (option.value === filename) {
+        existing = option;
+        return true;
+      }
+      return false;
     });
-    if (!found) {
+    if (!existing) {
       var option = document.createElement("option");
       option.value = filename;
       option.textContent = filename;
+      // Without this, a freshly uploaded image selected as the feature image
+      // would show in the dropdown but not in the thumbnail or the preview
+      // pane until the next full page load: featureImageSrc reads this
+      // attribute, not the option's text or value.
+      if (url) {
+        option.dataset.imageSrc = url;
+      }
       featureSelect.appendChild(option);
+    } else if (url) {
+      // An orphan option (a stored featureImage whose image was detached)
+      // can already hold this filename with no data-image-src: uploading a
+      // replacement with the same name must still pick up the new URL,
+      // rather than leaving the thumbnail and preview blank.
+      existing.dataset.imageSrc = url;
     }
     if (select) {
       featureSelect.value = filename;
+      refreshFeatureImage();
     }
   }
 
@@ -796,9 +888,9 @@ function saveStateText(state, detail) {
           } else {
             textarea.value += "\n" + outcome.insert + "\n";
           }
-          addFeatureOption(outcome.filename, false);
+          addFeatureOption(outcome.filename, outcome.url, false);
         } else {
-          addFeatureOption(outcome.filename, true);
+          addFeatureOption(outcome.filename, outcome.url, true);
         }
         onChange();
         say(outcome.message, false);
@@ -932,5 +1024,6 @@ if (typeof module !== "undefined" && module.exports) {
     lookupImageSrc: lookupImageSrc,
     dirFilenameSrc: dirFilenameSrc,
     saveStateText: saveStateText,
+    featureImageSrc: featureImageSrc,
   };
 }

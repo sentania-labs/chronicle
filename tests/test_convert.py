@@ -182,6 +182,32 @@ def test_frontmatter_image_field_is_rewritten() -> None:
     assert "featureImage: /images/my-post/featured.png" in converted.text
 
 
+def test_a_ui_save_writes_shareimage_alongside_featureimage_in_site_path_form() -> None:
+    """routes/ui.py's `_build_frontmatter` sets `shareImage` to the same
+    value as `featureImage` on every save (so a dashboard-set share image
+    never drifts from what the editor shows). Prove convert's output keeps
+    both keys, both rewritten to the published site path."""
+    draft = _draft(
+        frontmatter={
+            "title": "My Post",
+            "date": "2026-08-01",
+            "featureImage": "content/posts/images/featured.png",
+            "shareImage": "content/posts/images/featured.png",
+        },
+        images=[
+            DraftImage(
+                image_id="img1",
+                filename="featured.png",
+                role="feature",
+                source_ref="content/posts/images/featured.png",
+            )
+        ],
+    )
+    converted = convert.convert(draft)
+    assert "featureImage: /images/my-post/featured.png" in converted.text
+    assert "shareImage: /images/my-post/featured.png" in converted.text
+
+
 def test_freshly_uploaded_image_with_no_source_ref_matches_by_filename() -> None:
     draft = _draft(
         body="![alt](fresh.png)",

@@ -68,6 +68,10 @@ td form, .lat-card > form:last-child, .lat-card form:last-child { margin-bottom:
 #body.lat-textarea { min-height: 12rem; }
 .lat-input::placeholder, .lat-textarea::placeholder { color: var(--ink-subtle); }
 form > .lat-btn:not(:first-child), .lat-select + .lat-btn { margin-top: var(--space-6); }
+.feature-thumb {
+  display: block; margin-top: var(--space-3); max-width: 100%; max-height: 8rem;
+  border: 1px solid var(--line); border-radius: var(--radius-md);
+}
 input[type="file"].lat-input { padding: var(--space-2) var(--space-3); }
 input[type="file"]::file-selector-button {
   font: inherit; font-size: 12px; margin-right: var(--space-4);
