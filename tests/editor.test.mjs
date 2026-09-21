@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 const require = createRequire(import.meta.url);
-const { pageTitles, sameState, backupVerdict, backupWriteAction, makeBackupStore, conflictBackupAction, backupMessage, uploadOutcome, lookupImageSrc, dirFilenameSrc, saveStateText, featureImageSrc } =
+const { pageTitles, sameState, backupVerdict, backupWriteAction, makeBackupStore, conflictBackupAction, backupMessage, uploadOutcome, lookupImageSrc, dirFilenameSrc, saveStateText, featureImageSrc, copyStateText } =
   require("../chronicle/api/static/editor.js");
 
 test("sameState compares the body and every field, missing and empty alike", () => {
@@ -470,4 +470,12 @@ test("a save response that swaps in a locked Save button is not re-enabled after
   assert.equal(page.fetches.length, 1);
   assert.equal(page.ids["save-btn"], freshSaveBtn);
   assert.equal(page.ids["save-btn"].disabled, true);
+});
+
+test("the copy confirmation says what happened, and never throws on a browser with no clipboard", () => {
+  // The announcements panel's only fallback is the message itself (ADR 021):
+  // there is no second copy mechanism to try.
+  assert.equal(copyStateText("copied"), "Copied");
+  assert.equal(copyStateText("unavailable"), "Copy not available, select the text and copy manually");
+  assert.equal(copyStateText(undefined), "Copy not available, select the text and copy manually");
 });
