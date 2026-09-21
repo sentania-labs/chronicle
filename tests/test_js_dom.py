@@ -229,7 +229,8 @@ FEATURE_PREVIEW_PAGE = """<!doctype html><meta charset="utf-8"><base href="http:
 <script src="file://{editor_js}"></script>
 <select id="featureImage">
 <option value="">none</option>
-<option value="feature.png" data-image-src="/content/drafts/d1/images/abc123/file" {selected}>feature.png</option>
+<option value="feature.png" data-image-src="/content/drafts/d1/images/abc123/file"
+{selected}>feature.png</option>
 </select>
 <textarea id="body">{body}</textarea>
 <pre id="results"></pre>
@@ -237,12 +238,15 @@ FEATURE_PREVIEW_PAGE = """<!doctype html><meta charset="utf-8"><base href="http:
 var select = document.getElementById("featureImage");
 var textarea = document.getElementById("body");
 var src = featureImageSrc(select);
-var featureHtml = src ? sanitize('<img src="' + src.replace(/"/g, "&quot;") + '" alt="feature image">') : "";
+var featureHtml = src
+  ? sanitize('<img src="' + src.replace(/"/g, "&quot;") + '" alt="feature image">')
+  : "";
 var body = sanitize(marked.parse(textarea.value), function (s) {{
   return lookupImageSrc(s, [], "");
 }});
 var html = featureHtml + body;
-document.getElementById("results").textContent = JSON.stringify({{ html: html, textarea: textarea.value }});
+var out = {{ html: html, textarea: textarea.value }};
+document.getElementById("results").textContent = JSON.stringify(out);
 </script>
 """
 
