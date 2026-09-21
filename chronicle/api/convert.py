@@ -75,6 +75,7 @@ PUBLISH_TZ = ZoneInfo("America/Chicago")
 def stamp_publish_date() -> str:
     return datetime.now(tz=PUBLISH_TZ).isoformat(timespec="seconds")
 
+
 # The two ways a post reaches an image, the same pair `store.py` scans for on
 # a `from_post` import: markdown `![alt](path)` and a bare `<img src="...">`.
 _MARKDOWN_IMAGE_REF = re.compile(r"(!\[[^\]]*\]\(\s*)([^)\s]+)")

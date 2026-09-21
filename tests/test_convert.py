@@ -516,7 +516,9 @@ def test_preview_post_url_drops_a_scheme_and_host_in_a_hand_set_url() -> None:
     """`url_problem` only judges the last path segment (ADR 015); a
     frontmatter `url` can still carry a scheme and host. The built preview
     link must never leave the preview site over it."""
-    url = convert.preview_post_url("https://x/preview/my-post/", "https://evil.example/2026/08/my-post/")
+    url = convert.preview_post_url(
+        "https://x/preview/my-post/", "https://evil.example/2026/08/my-post/"
+    )
     assert url == "https://x/preview/my-post/2026/08/my-post/"
 
 
@@ -526,7 +528,9 @@ def test_preview_post_url_drops_dot_dot_segments_in_a_hand_set_url() -> None:
 
 
 def test_preview_post_url_falls_back_to_the_base_for_a_root_url() -> None:
-    assert convert.preview_post_url("https://x/preview/my-post/", "/") == "https://x/preview/my-post/"
+    assert (
+        convert.preview_post_url("https://x/preview/my-post/", "/") == "https://x/preview/my-post/"
+    )
 
 
 # --- date always parseable, and agrees with post_url -----------------------
@@ -547,7 +551,8 @@ def test_stamp_publish_date_is_local_chicago_time_iso_with_seconds() -> None:
 
     stamped = convert.stamp_publish_date()
     parsed = datetime.fromisoformat(stamped)
-    assert parsed.tzinfo is not None
+    offset = parsed.utcoffset()
+    assert offset is not None
     # America/Chicago is never UTC+0 (CST is -6, CDT is -5); a naive or UTC
     # stamp would fail this.
-    assert parsed.utcoffset().total_seconds() != 0
+    assert offset.total_seconds() != 0

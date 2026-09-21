@@ -348,7 +348,10 @@ def test_preview_and_status_fall_back_when_the_run_predates_post_url(
         run_id,
         "test-builder",
         succeeded=True,
-        result={"preview_url": "https://x/preview/drift-and-recovery/", "slug": "drift-and-recovery"},
+        result={
+            "preview_url": "https://x/preview/drift-and-recovery/",
+            "slug": "drift-and-recovery",
+        },
     )
 
     status = client.get(f"/v1/drafts/{draft_id}/status", headers=auth(agent_token)).json()

@@ -1063,7 +1063,7 @@ def preview_list_page(rows: list[dict[str, Any]], *, banner: bool) -> str:
             "<tr>"
             f'<td><a href="/content/drafts/{escape(r["draft_id"])}">{escape(r["title"])}</a></td>'
             f'<td><a href="{escape(r.get("post_url") or r["preview_url"])}">'
-            f'{escape(r.get("post_url") or r["preview_url"])}</a></td>'
+            f"{escape(r.get('post_url') or r['preview_url'])}</a></td>"
             f"<td>{escape(local_time(r['built_at']))}</td>"
             f'<td class="lat-num">{escape(str(r["wall_seconds"]) if r["wall_seconds"] is not None else "-")}</td>'
             f"<td>{_toolchain_badge(r['toolchain_drift'])}</td>"

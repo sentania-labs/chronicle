@@ -816,9 +816,7 @@ def test_editor_falls_back_to_the_site_root_when_no_post_url_recorded(
     draft = services.store.get_draft(draft_id)
     run = services.store._queue_run(draft_id, "preview")
     services.store.start_run(run.id, "builder-1", "0.164.0", False, built_version=draft.version_no)
-    services.store.finish_run(
-        run.id, "builder-1", True, {"preview_url": f"/preview/{draft.slug}/"}
-    )
+    services.store.finish_run(run.id, "builder-1", True, {"preview_url": f"/preview/{draft.slug}/"})
 
     response = client.get(f"/content/drafts/{draft_id}")
     assert f'href="/preview/{draft.slug}/"' in response.text
@@ -832,7 +830,7 @@ def test_an_unpinned_draft_has_no_preview_link_at_all(
     assert "Last built preview" not in response.text
 
     board = client.get("/content/drafts?status=drafting")
-    assert "<p class=\"muted\">PR: - | preview: -</p>" in board.text
+    assert '<p class="muted">PR: - | preview: -</p>' in board.text
 
 
 # --- Preview tab and run log -------------------------------------------------
