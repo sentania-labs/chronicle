@@ -35,6 +35,11 @@ FRONTMATTER_ALLOWLIST = (
     "shareImage",
 )
 
+# The social channels a draft can carry a suggested announcement for (ADR
+# 021). Fixed, not open: announcements are draft-only text a human copies by
+# hand, so a new channel is a deliberate change here, never a caller's key.
+ANNOUNCEMENT_CHANNELS = ("x", "bluesky", "linkedin")
+
 SUBMISSION_STATUSES = ("new", "claimed", "drafted", "discarded")
 DRAFT_STATUSES = (
     "drafting",
@@ -159,6 +164,11 @@ class Draft(BaseModel):
     # reconciliation's content_drift check compares against post_blob_sha,
     # and republish reads date from here to keep it stable (spec section 9).
     published: dict[str, Any] | None = None
+    # Suggested social announcements, one optional entry per channel in
+    # ANNOUNCEMENT_CHANNELS (ADR 021). Draft-only: never frontmatter, never
+    # part of the converted post, never sent anywhere by Chronicle. A record
+    # written before this field existed loads with an empty mapping.
+    announcements: dict[str, str] = {}
 
 
 class Version(BaseModel):
@@ -170,6 +180,9 @@ class Version(BaseModel):
     message: str = ""
     frontmatter: dict[str, Any] = {}
     body: str = ""
+    # Carried so a version restores the announcements that were current when
+    # it was written, the same way it restores frontmatter and body.
+    announcements: dict[str, str] = {}
 
 
 class FeedbackEntry(BaseModel):
@@ -324,8 +337,16 @@ def render_submission_content(brief: str, materials: list[Material], image_ids: 
     return "\n".join(lines) + "\n"
 
 
-def render_content(frontmatter: dict[str, Any], body: str) -> str:
-    """Render a version as text for diffing, in allowlist field order."""
+def render_content(
+    frontmatter: dict[str, Any], body: str, announcements: dict[str, str] | None = None
+) -> str:
+    """Render a version as text for diffing, in allowlist field order.
+
+    Announcements are appended as a clearly labelled block after the body, in
+    `ANNOUNCEMENT_CHANNELS` order, so an announcement-only save still shows a
+    non-empty diff (a round of review found `_content_at` otherwise rendered
+    only frontmatter and body, making such a save look like a no-op change).
+    """
     lines = ["---"]
     for key in FRONTMATTER_ALLOWLIST:
         if key in frontmatter:
@@ -334,4 +355,11 @@ def render_content(frontmatter: dict[str, Any], body: str) -> str:
             lines.append(f"{key}: {rendered}")
     lines.append("---")
     lines.append("")
-    return "\n".join(lines) + body
+    text = "\n".join(lines) + body
+    if announcements:
+        blocks = ["", "--- announcements ---"]
+        for key in ANNOUNCEMENT_CHANNELS:
+            if key in announcements:
+                blocks.append(f"{key}: {announcements[key]}")
+        text += "\n" + "\n".join(blocks) + "\n"
+    return text

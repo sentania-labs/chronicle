@@ -35,6 +35,7 @@ from .errors import ApiError
 from .images import is_plain_filename, normalise
 from .index import Index, index_path
 from .models import (
+    ANNOUNCEMENT_CHANNELS,
     FRONTMATTER_ALLOWLIST,
     Claim,
     Draft,
@@ -897,7 +898,7 @@ class Store:
         if version_no < 1:
             return ""
         version = self.get_version(draft_id, version_no)
-        return render_content(version.frontmatter, version.body)
+        return render_content(version.frontmatter, version.body, version.announcements)
 
     def _diff(self, draft_id: str, from_version: int, to_version: int) -> str:
         return "".join(
@@ -927,6 +928,7 @@ class Store:
         frontmatter: dict[str, Any],
         body: str,
         message: str = "",
+        announcements: dict[str, Any] | None = None,
     ) -> Draft:
         draft = self.get_draft(draft_id)
         watch = self.get_watch(draft_id)
@@ -970,6 +972,18 @@ class Store:
                 slug=draft.slug,
             )
 
+        # Omitted means keep: only a caller that sends a mapping (`{}`
+        # included) replaces what the draft carries (ADR 021). Checked after
+        # the conflict check above so a stale save is always the 409 it was
+        # before this field existed, and never a 422 about announcements.
+        if announcements is None:
+            new_announcements = dict(draft.announcements)
+        else:
+            check_announcements(announcements)
+            # Every value is a string by the line above; the rebuild is what
+            # tells the type checker so without a cast.
+            new_announcements = {key: str(value) for key, value in announcements.items()}
+
         version = Version(
             draft_id=draft_id,
             version_no=draft.version_no + 1,
@@ -979,6 +993,7 @@ class Store:
             message=message,
             frontmatter=frontmatter,
             body=body,
+            announcements=new_announcements,
         )
         self._write_json(
             self._version_path(draft_id, version.version_no), version.model_dump(mode="json")
@@ -991,6 +1006,7 @@ class Store:
         draft.frontmatter = frontmatter
         draft.title = str(frontmatter["title"])
         draft.body = body
+        draft.announcements = new_announcements
         draft.version_no = version.version_no
         draft.updated_at = version.created_at
         self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
@@ -1996,6 +2012,7 @@ class Store:
             message=message,
             frontmatter=frontmatter,
             body=body,
+            announcements=dict(draft.announcements),
         )
         self._write_json(
             self._version_path(draft_id, version.version_no), version.model_dump(mode="json")
@@ -2397,6 +2414,32 @@ def _frontmatter_type_problem(key: str, value: Any) -> str | None:
     if key == "draft" and not isinstance(value, bool):
         return "true or false"
     return None
+
+
+def check_announcements(announcements: dict[str, Any]) -> None:
+    """Exactly the fixed channel keys, each holding plain text (ADR 021).
+
+    A channel may be absent, but no other key is accepted and no value type
+    other than a string is, so what reaches the record is always a mapping the
+    edit page can render into a textarea without guessing.
+    """
+    unknown = sorted(key for key in announcements if key not in ANNOUNCEMENT_CHANNELS)
+    if unknown:
+        raise ApiError(
+            422,
+            "announcement_channel_not_allowed",
+            f"announcement channels not allowed: {', '.join(unknown)}",
+            unknown_channels=unknown,
+            allowed_channels=list(ANNOUNCEMENT_CHANNELS),
+        )
+    wrong = sorted(key for key, value in announcements.items() if not isinstance(value, str))
+    if wrong:
+        raise ApiError(
+            422,
+            "announcement_wrong_type",
+            f"announcement text must be a string: {', '.join(wrong)}",
+            channels=wrong,
+        )
 
 
 def check_frontmatter(frontmatter: dict[str, Any], current_url: Any = None) -> None:

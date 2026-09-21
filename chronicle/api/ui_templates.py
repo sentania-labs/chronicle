@@ -724,6 +724,62 @@ def _panel(
     )
 
 
+# The channels the announcements panel renders, in the order it renders them,
+# with the label a human reads. The keys are `models.ANNOUNCEMENT_CHANNELS`;
+# this list is the presentation half of the same fixed set.
+ANNOUNCEMENT_LABELS = (("x", "X"), ("bluesky", "Bluesky"), ("linkedin", "LinkedIn"))
+
+
+def _announcement_fields(
+    announcements: dict[str, Any], published: dict[str, Any] | None, form_id: str
+) -> str:
+    """The edit page's announcements panel (ADR 021).
+
+    Plain textareas that join the edit form the same way the frontmatter
+    panel's fields do, plus a Copy button per channel that `editor.js` wires
+    to the clipboard. Announcement text is escaped and never rendered as
+    markdown or assigned as HTML anywhere: it is copy for a human to paste
+    into a social client, not content Chronicle publishes.
+    """
+    url = (published or {}).get("url")
+    link = ""
+    if isinstance(url, str) and url:
+        # No configured public base URL exists anywhere in the service, so
+        # this is the site-relative path convert.post_url wrote, shown as is.
+        link = f'<p class="announce-url">Published at <code>{escape(url)}</code></p>'
+    rows = "".join(
+        f'<label class="lat-label" for="announcement_{key}">{escape(label)}</label>'
+        f'<textarea class="lat-textarea announce-text" id="announcement_{key}" '
+        f'name="announcement_{key}" rows="3" form="{form_id}">'
+        f"{escape(str(announcements.get(key, '')))}</textarea>"
+        '<p class="announce-actions">'
+        f'<button type="button" class="lat-btn lat-btn--ghost announce-copy" '
+        f'data-announce-copy="{key}">Copy</button>'
+        f'<span class="announce-state" id="announce-state-{key}" role="status" '
+        'aria-live="polite"></span></p>'
+        for key, label in ANNOUNCEMENT_LABELS
+    )
+    return f'<div class="announce-panel">{link}{rows}</div>'
+
+
+def _announcement_hidden_fields(announcements: dict[str, Any]) -> str:
+    """Carry the draft's current announcements through the conflict page's
+    reload form (ADR 021).
+
+    That form has no announcements panel of its own (the visitor is
+    reapplying frontmatter and body, not editing announcements), but
+    `routes/ui.py`'s `_build_announcements` treats every submit as a full
+    replacement from the three `announcement_*` fields. Without these hidden
+    inputs, resubmitting the reload form after a conflict would send empty
+    strings for all three and silently clear whatever the current draft
+    carried.
+    """
+    return "".join(
+        f'<input type="hidden" name="announcement_{key}" value="{escape(value)}">'
+        for key, value in announcements.items()
+    )
+
+
 def _image_upload_form(draft_id: str, images: list[dict[str, Any]]) -> str:
     # Works with no script at all (a plain multipart post that re-renders the
     # page); editor.js upgrades it to upload-in-place and insert-at-cursor.
@@ -838,6 +894,7 @@ def editor_page(
 <aside class="editor-side">
 {_post_info(draft, last_run, preview_url)}
 {_panel("frontmatter-panel", "Frontmatter", _frontmatter_fields(frontmatter, draft["images"], draft["slug"], draft_id, include_title=False, form_id=EDIT_FORM_ID), open_=False, refresh=False)}
+{_panel("announcements-panel", "Announcements", _announcement_fields(draft.get("announcements") or {}, draft.get("published"), EDIT_FORM_ID), open_=False, refresh=False)}
 {_panel("feedback-panel", "Feedback", _feedback_log(feedback), open_=True, count=len(feedback))}
 {_panel("images-panel", "Images", _image_upload_form(draft["id"], draft["images"]), open_=True, count=len(draft["images"]))}
 {_panel("versions-panel", "Version history", _version_history(draft["id"], versions), open_=False, count=len(versions))}
@@ -895,6 +952,7 @@ pane on the right, so copy anything you need from it now.</span></p>
 <h2>Current version (reloaded, ready to reapply)</h2>
 <input type="hidden" name="base_version" value="{draft["version_no"]}">
 {_frontmatter_fields(draft["frontmatter"], draft["images"], draft["slug"], draft["id"])}
+{_announcement_hidden_fields(draft.get("announcements") or {})}
 <label class="lat-label" for="body">Body (markdown)</label>
 <textarea class="lat-textarea" id="body" name="body">{escape(draft["body"])}</textarea>
 <button type="submit" class="lat-btn lat-btn--primary">Save (reapply from here)</button>
@@ -904,6 +962,7 @@ pane on the right, so copy anything you need from it now.</span></p>
 <section class="lat-card">
 <h2>Your attempted text (not saved, for manual merging)</h2>
 {_attempted_frontmatter_summary(attempted.get("frontmatter", {}))}
+{_attempted_announcements_summary(attempted.get("fields", {}))}
 <pre class="lat-code" id="attempted-body" data-draft-id="{escape(draft["id"])}" data-base-version="{attempted["base_version"]}" data-fields="{escape(json.dumps(attempted.get("fields", {})))}">{escape(attempted.get("body", ""))}</pre>
 </section>
 </div>
@@ -917,6 +976,20 @@ pane on the right, so copy anything you need from it now.</span></p>
         notice_kind="conflict",
         editor_backup=True,
     )
+
+
+def _attempted_announcements_summary(fields: dict[str, Any]) -> str:
+    # The attempted pane otherwise shows only frontmatter and body, so a
+    # visitor whose local-storage backup could not be made (round C-review
+    # finding) had nowhere to read back the announcement text they typed
+    # before the conflict. `fields` is the raw posted form, the same map
+    # `data-fields` carries for editor.js's own backup.
+    rows = "".join(
+        f"<li>{escape(label)}: {escape(str(fields.get(f'announcement_{key}', '')))}</li>"
+        for key, label in ANNOUNCEMENT_LABELS
+        if fields.get(f"announcement_{key}")
+    )
+    return f"<ul class='muted'>{rows}</ul>" if rows else ""
 
 
 def _attempted_frontmatter_summary(frontmatter: dict[str, Any]) -> str:

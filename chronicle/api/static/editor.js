@@ -294,6 +294,67 @@ function saveStateText(state, detail) {
   }
 }
 
+// --- Announcements: copy one channel's text ------------------------------
+// The panel holds plain textareas (ADR 021). Nothing here parses, renders or
+// sends their text: the only thing a Copy button does is hand the field's
+// value to the clipboard, and say so next to the button.
+function copyStateText(outcome) {
+  return outcome === "copied"
+    ? "Copied"
+    : "Copy not available, select the text and copy manually";
+}
+
+(function () {
+  if (typeof document === "undefined") {
+    return;
+  }
+  function report(channel, outcome) {
+    var state = document.getElementById("announce-state-" + channel);
+    if (!state) {
+      return;
+    }
+    state.textContent = copyStateText(outcome);
+    if (typeof setTimeout === "function") {
+      setTimeout(function () {
+        state.textContent = "";
+      }, 4000);
+    }
+  }
+  document.addEventListener("click", function (event) {
+    var button =
+      event.target && event.target.closest && event.target.closest("[data-announce-copy]");
+    if (!button) {
+      return;
+    }
+    event.preventDefault();
+    var channel = button.getAttribute("data-announce-copy");
+    var field = document.getElementById("announcement_" + channel);
+    if (!field) {
+      return;
+    }
+    var clipboard = typeof navigator !== "undefined" && navigator.clipboard;
+    if (!clipboard || typeof clipboard.writeText !== "function") {
+      report(channel, "unavailable");
+      return;
+    }
+    try {
+      // A browser can refuse the write outright (no permission, not a
+      // trusted gesture, an insecure origin): the message is the whole
+      // fallback, there is no second mechanism to try.
+      Promise.resolve(clipboard.writeText(field.value)).then(
+        function () {
+          report(channel, "copied");
+        },
+        function () {
+          report(channel, "unavailable");
+        }
+      );
+    } catch (e) {
+      report(channel, "unavailable");
+    }
+  });
+})();
+
 // --- The conflict page: keep the attempted text in this browser -------------
 (function () {
   if (typeof document === "undefined") {
@@ -1024,6 +1085,7 @@ if (typeof module !== "undefined" && module.exports) {
     lookupImageSrc: lookupImageSrc,
     dirFilenameSrc: dirFilenameSrc,
     saveStateText: saveStateText,
+    copyStateText: copyStateText,
     featureImageSrc: featureImageSrc,
   };
 }
