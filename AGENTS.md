@@ -299,7 +299,11 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   every surface that shows a preview link falls back to `preview_url`
   instead of breaking. The date itself is pinned at the same moment as the
   slug (`store._pin_slug`, ADR 022), not only at first publish, since the
-  filename and default `url` are both derived from it.
+  filename and default `url` are both derived from it. `_pin_slug` never
+  runs a second time once `draft.slug` is set, so `Store.save_draft` carries
+  the stored date forward whenever a save on an already-pinned draft omits
+  it (an API caller that drops the key, or the editor's Date field cleared);
+  a hand-set different date still wins.
 - **`chronicle/backup.py`'s restore swap keeps the displaced tree until
   reindex succeeds, and `_safe_member` runs before any extraction.** A tar
   member with an absolute path, a `..` segment, or a symlink is refused

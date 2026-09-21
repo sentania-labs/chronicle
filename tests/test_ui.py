@@ -809,6 +809,25 @@ def test_editor_shows_the_post_link_first_and_the_site_link_second(
     assert f'href="/preview/{draft.slug}/2026/08/{draft.slug}/"' in board.text
 
 
+def test_editor_save_with_a_cleared_date_field_keeps_the_pinned_stamp(
+    client: TestClient, services: Services
+) -> None:
+    """ADR 022: the editor's Date field posts empty the same way an API save
+    can omit the key; once the slug is pinned, clearing it must not lose the
+    stamp `_pin_slug` wrote."""
+    draft_id = make_draft(services, "drafting", title="Dated post")
+    services.store.act_on_draft(draft_id, "preview", "ghostwriter", actor_is_ui=False)
+    draft = services.store.get_draft(draft_id)
+    stamped = draft.frontmatter["date"]
+    assert stamped
+
+    form = _save_form(draft, title=draft.title, date="")
+    response = client.post(f"/content/drafts/{draft_id}/save", data=form)
+    assert response.status_code == 200
+
+    assert services.store.get_draft(draft_id).frontmatter["date"] == stamped
+
+
 def test_editor_falls_back_to_the_site_root_when_no_post_url_recorded(
     client: TestClient, services: Services
 ) -> None:

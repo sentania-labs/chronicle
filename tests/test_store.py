@@ -307,6 +307,39 @@ def test_slug_pin_stamps_the_date_once_and_a_later_save_never_moves_it(store: St
     assert store.get_draft(draft.id).frontmatter["date"] == stamped
 
 
+def test_a_pinned_drafts_save_without_date_keeps_the_stamped_value(store: Store) -> None:
+    """ADR 022: once the slug is pinned, a later save that omits date (the
+    API) or clears it (the editor's Date field) must not lose the stamp
+    `_pin_slug` wrote; a later publish still derives the filename and url
+    from it."""
+    draft, _ = store.create_draft("ghostwriter")
+    store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
+    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+    stamped = previewed.frontmatter["date"]
+
+    no_date_frontmatter = {k: v for k, v in FRONTMATTER.items() if k != "date"}
+    saved = store.save_draft(draft.id, "ghostwriter", 1, no_date_frontmatter, "more body")
+    assert saved.frontmatter["date"] == stamped
+
+
+def test_a_pinned_drafts_save_with_a_different_hand_set_date_wins(store: Store) -> None:
+    draft, _ = store.create_draft("ghostwriter")
+    store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
+    store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+
+    saved = store.save_draft(
+        draft.id, "ghostwriter", 1, {**FRONTMATTER, "date": "2020-01-01T00:00:00-06:00"}, "more"
+    )
+    assert saved.frontmatter["date"] == "2020-01-01T00:00:00-06:00"
+
+
+def test_an_unpinned_drafts_save_without_date_stays_without_one(store: Store) -> None:
+    draft, _ = store.create_draft("ghostwriter")
+    no_date_frontmatter = {k: v for k, v in FRONTMATTER.items() if k != "date"}
+    saved = store.save_draft(draft.id, "ghostwriter", 0, no_date_frontmatter, "body")
+    assert "date" not in saved.frontmatter
+
+
 @pytest.mark.parametrize("url", ["/a/..", "/a/.", "/a/b\\c"])
 def test_save_refuses_a_url_whose_last_segment_is_not_a_directory_name(
     store: Store, url: str

@@ -77,6 +77,17 @@ itself a no-op past the first call (`draft.slug` is already set, so
 stamping is unchanged beyond now agreeing with an earlier stamp when one
 already exists.
 
+**A later save cannot lose the stamp once pinned.** `_pin_slug` runs once,
+so a save after it has nothing to re-stamp the date from if the incoming
+frontmatter drops the key, an API caller that omits `date` or the editor's
+Date field cleared. `Store.save_draft` (found in the same review as the
+backslash-escape fix above) carries the stored date forward whenever
+`draft.slug` is already pinned and the incoming frontmatter has none: the
+value on the current draft, or a fresh `stamp_publish_date` only if that is
+also somehow missing. A hand-set date that differs from the stored one
+still replaces it, the same as any other frontmatter field; only an absent
+one is filled in.
+
 ## Consequences
 
 - Opening a preview link now lands on the post, not the home page.

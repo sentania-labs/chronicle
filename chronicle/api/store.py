@@ -950,6 +950,15 @@ class Store:
         self._refuse_while_publishing(draft, "saved")
         check_frontmatter(frontmatter, current_url=draft.frontmatter.get("url"))
 
+        # ADR 022: once `_pin_slug` has stamped a date, a save that omits it
+        # (the API) or clears it (the editor's Date field) must not lose the
+        # stamp; the filename and url are derived from it, and `_pin_slug`
+        # never runs a second time once `draft.slug` is set. A hand-set
+        # different date still wins over the stored one.
+        if draft.slug is not None and not frontmatter.get("date"):
+            carried = draft.frontmatter.get("date") or convert.stamp_publish_date()
+            frontmatter = {**frontmatter, "date": carried}
+
         if base_version != draft.version_no:
             # A base_version that names no real version (0 aside, or ahead of
             # current) is still a conflict, not a lookup failure, so the diff
