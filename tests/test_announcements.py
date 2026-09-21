@@ -388,3 +388,52 @@ def test_a_ui_conflict_keeps_the_attempted_announcement_text(
     # The conflict page keeps every posted field for the editor's Restore,
     # with no special case for these three.
     assert "typed before the clash" in response.text
+
+
+def test_the_conflict_page_reload_form_carries_the_current_announcements(
+    client: TestClient, services: Services, agent_token: str
+) -> None:
+    # The reload form has no announcements panel of its own; without hidden
+    # fields carrying the current values, resubmitting it would send empty
+    # strings for all three and silently wipe them (found in review, ADR 021).
+    draft_id = _new_draft(client, agent_token)
+    _put(client, agent_token, draft_id, 0, announcements=THREE)
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(draft_id, "scott", draft.version_no, FRONTMATTER, "moved on")
+
+    form = {
+        "base_version": str(draft.version_no),
+        "title": draft.title,
+        "date": "",
+        "categories": "",
+        "tags": "",
+        "summary": "",
+        "url": "",
+        "featureImage": "",
+        "body": "mine",
+        "announcement_x": "",
+        "announcement_bluesky": "",
+        "announcement_linkedin": "",
+    }
+    conflict = client.post(f"/content/drafts/{draft_id}/save", data=form)
+    assert conflict.status_code == 409
+    for value in THREE.values():
+        assert value in conflict.text
+
+    reapply = {
+        "base_version": str(services.store.get_draft(draft_id).version_no),
+        "title": draft.title,
+        "date": "",
+        "categories": "",
+        "tags": "",
+        "summary": "",
+        "url": "",
+        "featureImage": "",
+        "body": "reapplied",
+        "announcement_x": THREE["x"],
+        "announcement_bluesky": THREE["bluesky"],
+        "announcement_linkedin": THREE["linkedin"],
+    }
+    reloaded = client.post(f"/content/drafts/{draft_id}/save", data=reapply)
+    assert reloaded.status_code == 200
+    assert services.store.get_draft(draft_id).announcements == THREE

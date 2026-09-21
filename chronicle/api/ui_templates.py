@@ -762,6 +762,24 @@ def _announcement_fields(
     return f'<div class="announce-panel">{link}{rows}</div>'
 
 
+def _announcement_hidden_fields(announcements: dict[str, Any]) -> str:
+    """Carry the draft's current announcements through the conflict page's
+    reload form (ADR 021).
+
+    That form has no announcements panel of its own (the visitor is
+    reapplying frontmatter and body, not editing announcements), but
+    `routes/ui.py`'s `_build_announcements` treats every submit as a full
+    replacement from the three `announcement_*` fields. Without these hidden
+    inputs, resubmitting the reload form after a conflict would send empty
+    strings for all three and silently clear whatever the current draft
+    carried.
+    """
+    return "".join(
+        f'<input type="hidden" name="announcement_{key}" value="{escape(value)}">'
+        for key, value in announcements.items()
+    )
+
+
 def _image_upload_form(draft_id: str, images: list[dict[str, Any]]) -> str:
     # Works with no script at all (a plain multipart post that re-renders the
     # page); editor.js upgrades it to upload-in-place and insert-at-cursor.
@@ -934,6 +952,7 @@ pane on the right, so copy anything you need from it now.</span></p>
 <h2>Current version (reloaded, ready to reapply)</h2>
 <input type="hidden" name="base_version" value="{draft["version_no"]}">
 {_frontmatter_fields(draft["frontmatter"], draft["images"], draft["slug"], draft["id"])}
+{_announcement_hidden_fields(draft.get("announcements") or {})}
 <label class="lat-label" for="body">Body (markdown)</label>
 <textarea class="lat-textarea" id="body" name="body">{escape(draft["body"])}</textarea>
 <button type="submit" class="lat-btn lat-btn--primary">Save (reapply from here)</button>
