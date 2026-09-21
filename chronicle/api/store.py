@@ -898,7 +898,7 @@ class Store:
         if version_no < 1:
             return ""
         version = self.get_version(draft_id, version_no)
-        return render_content(version.frontmatter, version.body)
+        return render_content(version.frontmatter, version.body, version.announcements)
 
     def _diff(self, draft_id: str, from_version: int, to_version: int) -> str:
         return "".join(

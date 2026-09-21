@@ -337,8 +337,16 @@ def render_submission_content(brief: str, materials: list[Material], image_ids: 
     return "\n".join(lines) + "\n"
 
 
-def render_content(frontmatter: dict[str, Any], body: str) -> str:
-    """Render a version as text for diffing, in allowlist field order."""
+def render_content(
+    frontmatter: dict[str, Any], body: str, announcements: dict[str, str] | None = None
+) -> str:
+    """Render a version as text for diffing, in allowlist field order.
+
+    Announcements are appended as a clearly labelled block after the body, in
+    `ANNOUNCEMENT_CHANNELS` order, so an announcement-only save still shows a
+    non-empty diff (a round of review found `_content_at` otherwise rendered
+    only frontmatter and body, making such a save look like a no-op change).
+    """
     lines = ["---"]
     for key in FRONTMATTER_ALLOWLIST:
         if key in frontmatter:
@@ -347,4 +355,11 @@ def render_content(frontmatter: dict[str, Any], body: str) -> str:
             lines.append(f"{key}: {rendered}")
     lines.append("---")
     lines.append("")
-    return "\n".join(lines) + body
+    text = "\n".join(lines) + body
+    if announcements:
+        blocks = ["", "--- announcements ---"]
+        for key in ANNOUNCEMENT_CHANNELS:
+            if key in announcements:
+                blocks.append(f"{key}: {announcements[key]}")
+        text += "\n" + "\n".join(blocks) + "\n"
+    return text

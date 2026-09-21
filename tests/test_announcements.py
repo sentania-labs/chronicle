@@ -169,6 +169,41 @@ def test_save_draft_keeps_announcements_when_none_is_passed(store: Store) -> Non
     assert store.get_version(draft.id, 2).announcements == THREE
 
 
+def test_an_announcement_only_save_yields_a_non_empty_diff_naming_the_channel(
+    store: Store,
+) -> None:
+    # _content_at used to render only frontmatter and body, so a save that
+    # changed nothing but announcement text produced an empty diff both in
+    # the UI diff view and in GET /v1/drafts/{id}/changes.
+    draft, _warnings = store.create_draft("ghostwriter")
+    store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
+    store.save_draft(draft.id, "ghostwriter", 1, FRONTMATTER, "body", announcements=THREE)
+
+    diff = store.diff_between(draft.id, 1, 2)
+    assert diff.strip() != ""
+    assert "x:" in diff
+    assert THREE["x"] in diff
+
+
+def test_a_body_only_save_diff_is_unchanged_in_shape_by_identical_announcements(
+    store: Store,
+) -> None:
+    draft, _warnings = store.create_draft("ghostwriter")
+    store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body one", announcements=THREE)
+    store.save_draft(draft.id, "ghostwriter", 1, FRONTMATTER, "body two", announcements=THREE)
+
+    diff = store.diff_between(draft.id, 1, 2)
+    # The body line changed, and nothing else: the announcements block, if it
+    # shows up as diff context at all, is identical on both sides.
+    assert "-body one" in diff
+    assert "+body two" in diff
+    lines = diff.splitlines()
+    added_lines = [line for line in lines if line.startswith("+") and not line.startswith("+++")]
+    removed_lines = [line for line in lines if line.startswith("-") and not line.startswith("---")]
+    assert added_lines == ["+body two"]
+    assert removed_lines == ["-body one"]
+
+
 def test_save_draft_refuses_an_unknown_channel(store: Store) -> None:
     draft, _warnings = store.create_draft("ghostwriter")
     with pytest.raises(ApiError) as caught:
