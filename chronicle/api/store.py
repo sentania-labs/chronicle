@@ -2012,6 +2012,7 @@ class Store:
             message=message,
             frontmatter=frontmatter,
             body=body,
+            announcements=dict(draft.announcements),
         )
         self._write_json(
             self._version_path(draft_id, version.version_no), version.model_dump(mode="json")

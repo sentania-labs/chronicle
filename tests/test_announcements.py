@@ -178,6 +178,18 @@ def test_save_draft_refuses_an_unknown_channel(store: Store) -> None:
     assert caught.value.status_code == 422
 
 
+def test_record_github_version_carries_the_drafts_announcements(store: Store) -> None:
+    # A reconciliation-observed GitHub edit (content_drift) used to build its
+    # Version with no announcements at all, so the historical snapshot said
+    # {} even though the draft itself still carried them.
+    draft, _warnings = store.create_draft("ghostwriter")
+    store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body", announcements=THREE)
+    store.record_github_version(draft.id, {"title": "A Post"}, "revised on github", "drift")
+
+    assert store.get_draft(draft.id).announcements == THREE
+    assert store.get_version(draft.id, 2).announcements == THREE
+
+
 # --- On disk ------------------------------------------------------------
 
 
