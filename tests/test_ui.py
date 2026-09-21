@@ -807,6 +807,7 @@ def test_editor_shows_the_post_link_first_and_the_site_link_second(
 
     board = client.get("/content/drafts?status=previewed")
     assert f'href="/preview/{draft.slug}/2026/08/{draft.slug}/"' in board.text
+    assert f'(<a href="/preview/{draft.slug}/">site</a>)' in board.text
 
 
 def test_editor_save_with_a_cleared_date_field_keeps_the_pinned_stamp(
@@ -839,6 +840,10 @@ def test_editor_falls_back_to_the_site_root_when_no_post_url_recorded(
 
     response = client.get(f"/content/drafts/{draft_id}")
     assert f'href="/preview/{draft.slug}/"' in response.text
+
+    board = client.get("/content/drafts?status=previewed")
+    assert f'href="/preview/{draft.slug}/"' in board.text
+    assert "site</a>" not in board.text
 
 
 def test_an_unpinned_draft_has_no_preview_link_at_all(
@@ -873,6 +878,7 @@ def test_preview_list_and_rebuild_and_run_log(client: TestClient, services: Serv
     listing = client.get("/content/previews")
     assert listing.status_code == 200
     assert f'href="/preview/{draft.slug}/2026/08/{draft.slug}/"' in listing.text
+    assert f'(<a href="/preview/{draft.slug}/">site</a>)' in listing.text
     assert "Rebuild" in listing.text
 
     log_page = client.get(f"/runs/{run.id}")
@@ -881,6 +887,21 @@ def test_preview_list_and_rebuild_and_run_log(client: TestClient, services: Serv
 
     rebuild = client.post(f"/content/previews/{draft_id}/rebuild")
     assert rebuild.status_code == 200
+
+
+def test_preview_list_page_shows_no_site_link_without_a_distinct_post_url(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "previewed")
+    draft = services.store.get_draft(draft_id)
+    run = services.store._queue_run(draft_id, "preview")
+    services.store.start_run(run.id, "builder-1", "0.164.0", False, built_version=draft.version_no)
+    services.store.finish_run(run.id, "builder-1", True, {"preview_url": f"/preview/{draft.slug}/"})
+
+    listing = client.get("/content/previews")
+    assert listing.status_code == 200
+    assert f'href="/preview/{draft.slug}/"' in listing.text
+    assert "site</a>" not in listing.text
 
 
 def _base_run(**overrides: Any) -> dict[str, Any]:
