@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 const require = createRequire(import.meta.url);
-const { pageTitles, sameState, backupVerdict, backupWriteAction, makeBackupStore, conflictBackupAction, backupMessage, uploadOutcome, lookupImageSrc, dirFilenameSrc, saveStateText } =
+const { pageTitles, sameState, backupVerdict, backupWriteAction, makeBackupStore, conflictBackupAction, backupMessage, uploadOutcome, lookupImageSrc, dirFilenameSrc, saveStateText, featureImageSrc } =
   require("../chronicle/api/static/editor.js");
 
 test("sameState compares the body and every field, missing and empty alike", () => {
@@ -258,6 +258,27 @@ test("the conflict page never overwrites earlier unanswered work, and stores onl
   assert.equal(conflictBackupAction({ nope: true }, attempted), "write");
 });
 
+
+test("featureImageSrc reads the selected option's data attribute", () => {
+  const select = {
+    selectedIndex: 1,
+    options: [{ dataset: {} }, { dataset: { imageSrc: "/content/drafts/d1/images/i1/file" } }],
+  };
+  assert.equal(featureImageSrc(select), "/content/drafts/d1/images/i1/file");
+});
+
+test("featureImageSrc is null for the none option and for an orphan option with no attached image", () => {
+  const none = { selectedIndex: 0, options: [{ dataset: {} }] };
+  assert.equal(featureImageSrc(none), null);
+  const orphan = { selectedIndex: 1, options: [{ dataset: {} }, { dataset: {} }] };
+  assert.equal(featureImageSrc(orphan), null);
+});
+
+test("featureImageSrc never throws on a select-like object with nothing selected", () => {
+  assert.equal(featureImageSrc({ options: [] }), null);
+  assert.equal(featureImageSrc({ selectedIndex: -1, options: [] }), null);
+  assert.equal(featureImageSrc(null), null);
+});
 
 test("pageTitles reads the tab title and heading the server rendered (#36)", () => {
   const doc = { title: "Post: New name", querySelector: (sel) => (sel === "h1" ? { textContent: "Post: New name" } : null) };

@@ -535,9 +535,15 @@ def _build_frontmatter(
             frontmatter.pop(key, None)
     feature = form.get("featureImage", "").strip()
     if feature:
+        # shareImage is not an editable field on this page (it is a
+        # dashboard-set passthrough key), so it drifts from a post's actual
+        # feature image the moment this form changes it. Writing the same
+        # value to both keeps them in step without exposing a second control.
         frontmatter["featureImage"] = feature
+        frontmatter["shareImage"] = feature
     else:
         frontmatter.pop("featureImage", None)
+        frontmatter.pop("shareImage", None)
     return frontmatter
 
 

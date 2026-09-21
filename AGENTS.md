@@ -232,6 +232,11 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   matching by filename alone would let one draft's preview show another
   post's image. This is a render-time substitution only: the stored body is
   never rewritten, and publish's own output is unaffected.
+- **`shareImage` follows `featureImage` on a UI save and is never edited on
+  its own.** `routes/ui.py`'s `_build_frontmatter` writes `shareImage` to the
+  same value whenever `featureImage` is set, and drops both when it is
+  cleared, so a post's dashboard-set share image cannot drift from what the
+  editor shows just because this page has no `shareImage` field of its own.
 - **The editor's Preview and Publish offers are staged, and the table is
   still the only decider.** `ui_actions.offers_for` renders an offer available
   only if `transitions.plan_action` finds a path, and `Store.act_on_draft_staged`

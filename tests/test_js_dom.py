@@ -215,3 +215,87 @@ def test_a_site_path_image_from_a_different_posts_directory_stays_broken(tmp_pat
     body = "![x](/images/some-other-post/image.png)"
     result = render_draft_preview(tmp_path, body, "vcf-operations-can-now-see-my-unifi-network")
     assert 'src="/images/some-other-post/image.png"' in result["html"]
+
+
+# The feature image at the top of the preview: composed the same way
+# editor.js's renderMarkdown does (featureImageSrc off the selected <option>'s
+# data attribute, run through sanitize, prepended ahead of the body's own
+# sanitized markdown). This exercises featureImageSrc, sanitize, and their
+# combination in a real DOM the same way DRAFT_PREVIEW_PAGE exercises
+# lookupImageSrc, without needing EasyMDE itself in headless Chrome.
+FEATURE_PREVIEW_PAGE = """<!doctype html><meta charset="utf-8"><base href="http://localhost/">
+<script src="file://{marked_js}"></script>
+<script src="file://{ui_js}"></script>
+<script src="file://{editor_js}"></script>
+<select id="featureImage">
+<option value="">none</option>
+<option value="feature.png" data-image-src="/content/drafts/d1/images/abc123/file" {selected}>feature.png</option>
+</select>
+<textarea id="body">{body}</textarea>
+<pre id="results"></pre>
+<script>
+var select = document.getElementById("featureImage");
+var textarea = document.getElementById("body");
+var src = featureImageSrc(select);
+var featureHtml = src ? sanitize('<img src="' + src.replace(/"/g, "&quot;") + '" alt="feature image">') : "";
+var body = sanitize(marked.parse(textarea.value), function (s) {{
+  return lookupImageSrc(s, [], "");
+}});
+var html = featureHtml + body;
+document.getElementById("results").textContent = JSON.stringify({{ html: html, textarea: textarea.value }});
+</script>
+"""
+
+
+def render_feature_preview(tmp_path: Path, body: str, *, selected: bool) -> dict:
+    page = tmp_path / "feature-preview.html"
+    page.write_text(
+        FEATURE_PREVIEW_PAGE.format(
+            marked_js=(STATIC / "vendor" / "marked.min.js").as_posix(),
+            ui_js=(STATIC / "ui.js").as_posix(),
+            editor_js=(STATIC / "editor.js").as_posix(),
+            body=body,
+            selected="selected" if selected else "",
+        ),
+        encoding="utf-8",
+    )
+    assert CHROME is not None
+    result = subprocess.run(
+        [
+            CHROME,
+            "--headless=new",
+            "--no-sandbox",
+            "--disable-gpu",
+            f"--user-data-dir={tmp_path / 'profile'}",
+            "--dump-dom",
+            page.as_uri(),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    marker = '<pre id="results">'
+    start = result.stdout.index(marker) + len(marker)
+    text = result.stdout[start : result.stdout.index("</pre>", start)]
+    import html
+
+    return json.loads(html.unescape(text))
+
+
+def test_the_selected_feature_image_renders_at_the_top_of_the_preview(tmp_path: Path) -> None:
+    result = render_feature_preview(tmp_path, "the body text", selected=True)
+    assert result["html"].startswith(
+        '<img src="/content/drafts/d1/images/abc123/file" alt="feature image">'
+    )
+    assert "the body text" in result["html"]
+    # renderMarkdown never touches the textarea itself: only the preview pane
+    # (EasyMDE's own innerHTML assignment) is built from it.
+    assert result["textarea"] == "the body text"
+
+
+def test_no_feature_image_selected_renders_nothing_at_the_top(tmp_path: Path) -> None:
+    result = render_feature_preview(tmp_path, "the body text", selected=False)
+    assert "<img" not in result["html"]
+    assert "the body text" in result["html"]

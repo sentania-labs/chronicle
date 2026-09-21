@@ -456,6 +456,7 @@ def _frontmatter_fields(
     frontmatter: dict[str, Any],
     images: list[dict[str, Any]],
     slug: str | None,
+    draft_id: str,
     *,
     include_title: bool = True,
     form_id: str | None = None,
@@ -501,6 +502,7 @@ def _frontmatter_fields(
 
     ranked = [(img, r) for img in images for r in [_feature_rank(img)] if r is not None]
     matched: set[str] = set()
+    thumb_src = ""
     if ranked:
         best_rank = min(r for _, r in ranked)
         # Still ambiguous at the best rank (e.g. two images sharing a
@@ -508,19 +510,26 @@ def _frontmatter_fields(
         # renders `selected`.
         best_img = next(img for img, r in ranked if r == best_rank)
         matched = {best_img["image_id"]}
+        thumb_src = image_url(draft_id, best_img["image_id"])
     feature_options = "".join(
         # A matched option's value is the draft's own stored string, not the
         # bare filename, so resubmitting the form unchanged round-trips the
         # original path byte for byte instead of collapsing it to a filename.
+        # data-image-src carries the same serving URL the thumbnail and the
+        # live preview use, so the page can go from a selected <option> to an
+        # image URL without a new route and without keying one on filename.
         f'<option value="{escape(stored_feature if img["image_id"] in matched else img["filename"])}"'
         + (" selected" if img["image_id"] in matched else "")
+        + f' data-image-src="{escape(image_url(draft_id, img["image_id"]))}"'
         + f">{escape(img['filename'])}</option>"
         for img in images
     )
     if stored_feature and not matched:
         # No attached image represents this value (e.g. detached since
         # import): keep it selectable and preserved rather than silently
-        # falling back to "none" and losing it on the next save.
+        # falling back to "none" and losing it on the next save. No
+        # data-image-src: nothing attached backs this option, so there is no
+        # URL to show a thumbnail or preview from.
         feature_options += (
             f'<option value="{escape(stored_feature)}" selected>{escape(stored_feature)}</option>'
         )
@@ -542,6 +551,7 @@ def _frontmatter_fields(
 {url_field}
 <label class="lat-label" for="featureImage">Feature image</label>
 <select class="lat-select" id="featureImage" name="featureImage"{join}><option value="">none</option>{feature_options}</select>
+<img id="featureImageThumb" class="feature-thumb" alt="" src="{escape(thumb_src)}"{"" if thumb_src else " hidden"}>
 """
 
 
@@ -827,7 +837,7 @@ def editor_page(
 </div>
 <aside class="editor-side">
 {_post_info(draft, last_run, preview_url)}
-{_panel("frontmatter-panel", "Frontmatter", _frontmatter_fields(frontmatter, draft["images"], draft["slug"], include_title=False, form_id=EDIT_FORM_ID), open_=False, refresh=False)}
+{_panel("frontmatter-panel", "Frontmatter", _frontmatter_fields(frontmatter, draft["images"], draft["slug"], draft_id, include_title=False, form_id=EDIT_FORM_ID), open_=False, refresh=False)}
 {_panel("feedback-panel", "Feedback", _feedback_log(feedback), open_=True, count=len(feedback))}
 {_panel("images-panel", "Images", _image_upload_form(draft["id"], draft["images"]), open_=True, count=len(draft["images"]))}
 {_panel("versions-panel", "Version history", _version_history(draft["id"], versions), open_=False, count=len(versions))}
@@ -884,7 +894,7 @@ pane on the right, so copy anything you need from it now.</span></p>
 <form method="post" class="lat-card" action="/content/drafts/{escape(draft["id"])}/save">
 <h2>Current version (reloaded, ready to reapply)</h2>
 <input type="hidden" name="base_version" value="{draft["version_no"]}">
-{_frontmatter_fields(draft["frontmatter"], draft["images"], draft["slug"])}
+{_frontmatter_fields(draft["frontmatter"], draft["images"], draft["slug"], draft["id"])}
 <label class="lat-label" for="body">Body (markdown)</label>
 <textarea class="lat-textarea" id="body" name="body">{escape(draft["body"])}</textarea>
 <button type="submit" class="lat-btn lat-btn--primary">Save (reapply from here)</button>

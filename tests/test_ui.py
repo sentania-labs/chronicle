@@ -20,6 +20,7 @@ from PIL import Image as PillowImage
 
 from chronicle.api.deps import Services
 from chronicle.api.models import DRAFT_STATUSES, Post
+from chronicle.api.ui_templates import image_url
 
 from .conftest import auth, png_bytes
 
@@ -573,6 +574,47 @@ def test_save_defaults_to_summary_key_when_neither_was_present(
     saved = services.store.get_draft(draft_id)
     assert saved.frontmatter.get("summary") == "brand new"
     assert "description" not in saved.frontmatter
+
+
+def test_save_with_a_feature_image_writes_shareimage_to_match(
+    client: TestClient, services: Services
+) -> None:
+    """`shareImage` is never an editable field on this page: a save that
+    sets `featureImage` writes the same value to `shareImage` so a post's
+    dashboard-set share image never drifts from what the editor shows."""
+    draft_id = make_draft(services, "drafting", title="Share")
+    draft = services.store.get_draft(draft_id)
+
+    form = _save_form(draft, featureImage="featured.png")
+    response = client.post(f"/content/drafts/{draft_id}/save", data=form)
+    assert response.status_code == 200
+
+    saved = services.store.get_draft(draft_id)
+    assert saved.frontmatter.get("featureImage") == "featured.png"
+    assert saved.frontmatter.get("shareImage") == "featured.png"
+
+
+def test_save_with_an_empty_feature_image_removes_a_pre_existing_shareimage(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "drafting", title="Clear Share")
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(
+        draft_id,
+        "scott",
+        draft.version_no,
+        {**draft.frontmatter, "featureImage": "featured.png", "shareImage": "featured.png"},
+        draft.body,
+    )
+    draft = services.store.get_draft(draft_id)
+
+    form = _save_form(draft, featureImage="")
+    response = client.post(f"/content/drafts/{draft_id}/save", data=form)
+    assert response.status_code == 200
+
+    saved = services.store.get_draft(draft_id)
+    assert "featureImage" not in saved.frontmatter
+    assert "shareImage" not in saved.frontmatter
 
 
 def test_stale_save_renders_409_with_diff_summary_and_both_panes(
@@ -1280,7 +1322,11 @@ def test_imported_feature_image_path_survives_an_unchanged_save(
     # `value="<path>" selected` on its own, so pin the assertion to the
     # matched option's display text (the real image's filename) to prove
     # the select actually recognised the attached image.
-    assert f'<option value="{stored_feature_image}" selected>featured.png</option>' in editor.text
+    image_id = draft.images[0].image_id
+    assert (
+        f'<option value="{stored_feature_image}" selected data-image-src="'
+        f'{image_url(draft.id, image_id)}">featured.png</option>' in editor.text
+    )
     assert editor.text.count(" selected") == 1
 
     form = {
@@ -1378,6 +1424,82 @@ def test_save_never_writes_pinned_slug_into_frontmatter(
     assert unchanged.slug == "pinned-slug"
 
 
+def test_feature_image_thumbnail_shows_the_selected_attached_image(
+    client: TestClient, services: Services
+) -> None:
+    store = services.store
+    draft, _warnings = store.create_draft("scott")
+    image, _created = store.put_image(png_bytes(), "featured.png")
+    store.attach_image(draft.id, image.image_id, "feature", "scott")
+    store.save_draft(
+        draft.id,
+        "scott",
+        store.get_draft(draft.id).version_no,
+        {"title": "Thumb", "featureImage": "featured.png"},
+        "body",
+    )
+
+    editor = client.get(f"/content/drafts/{draft.id}")
+    assert editor.status_code == 200
+    src = image_url(draft.id, image.image_id)
+    thumb_match = re.search(r'<img id="featureImageThumb"[^>]*>', editor.text)
+    assert thumb_match is not None
+    thumb_tag = thumb_match.group(0)
+    assert f'src="{src}"' in thumb_tag
+    assert "hidden" not in thumb_tag
+
+
+def test_feature_image_thumbnail_is_hidden_when_no_feature_image_is_set(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "drafting", title="No feature")
+    editor = client.get(f"/content/drafts/{draft_id}")
+    assert editor.status_code == 200
+    thumb_match = re.search(r'<img id="featureImageThumb"[^>]*>', editor.text)
+    assert thumb_match is not None
+    assert "hidden" in thumb_match.group(0)
+
+
+def test_feature_image_thumbnail_is_hidden_for_an_orphan_feature_image(
+    client: TestClient, services: Services
+) -> None:
+    """A stored `featureImage` value with no attached image behind it (e.g.
+    detached since import) still keeps its option selected, but there is no
+    URL to show a thumbnail from."""
+    draft_id = make_draft(services, "drafting", title="Orphan")
+    store = services.store
+    draft = store.get_draft(draft_id)
+    store.save_draft(
+        draft_id,
+        "scott",
+        draft.version_no,
+        {"title": "Orphan", "featureImage": "gone.png"},
+        "body",
+    )
+
+    editor = client.get(f"/content/drafts/{draft_id}")
+    assert editor.status_code == 200
+    assert '<option value="gone.png" selected>gone.png</option>' in editor.text
+    thumb_match = re.search(r'<img id="featureImageThumb"[^>]*>', editor.text)
+    assert thumb_match is not None
+    assert "hidden" in thumb_match.group(0)
+
+
+def test_feature_image_option_data_attribute_escapes_dangerous_filenames(
+    client: TestClient, services: Services
+) -> None:
+    store = services.store
+    draft, _warnings = store.create_draft("scott")
+    dangerous = 'weird"><script>.png'
+    image, _created = store.put_image(png_bytes(), dangerous)
+    store.attach_image(draft.id, image.image_id, "inline", "scott")
+
+    editor = client.get(f"/content/drafts/{draft.id}")
+    assert editor.status_code == 200
+    assert "<script>" not in editor.text
+    assert f'data-image-src="{image_url(draft.id, image.image_id)}"' in editor.text
+
+
 def test_feature_image_select_prefers_exact_match_over_basename_collision(
     client: TestClient, services: Services
 ) -> None:
@@ -1409,8 +1531,14 @@ def test_feature_image_select_prefers_exact_match_over_basename_collision(
 
     editor = client.get(f"/content/drafts/{draft.id}")
     assert editor.status_code == 200
-    assert '<option value="featured.png" selected>featured.png</option>' in editor.text
-    assert '<option value="hero.png">hero.png</option>' in editor.text
+    assert (
+        f'<option value="featured.png" selected data-image-src="'
+        f'{image_url(draft.id, image_a.image_id)}">featured.png</option>' in editor.text
+    )
+    assert (
+        f'<option value="hero.png" data-image-src="{image_url(draft.id, image_b.image_id)}"'
+        ">hero.png</option>" in editor.text
+    )
     assert editor.text.count(" selected") == 1
 
 
