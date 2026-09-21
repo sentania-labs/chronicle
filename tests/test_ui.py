@@ -784,6 +784,57 @@ def test_draft_warnings_from_a_submission_render_on_the_editor_once(
     assert "warning" not in reload_.text.lower()
 
 
+def test_editor_shows_the_post_link_first_and_the_site_link_second(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "previewed", title="Linked post")
+    draft = services.store.get_draft(draft_id)
+    run = services.store._queue_run(draft_id, "preview")
+    services.store.start_run(run.id, "builder-1", "0.164.0", False, built_version=draft.version_no)
+    services.store.finish_run(
+        run.id,
+        "builder-1",
+        True,
+        {
+            "preview_url": f"/preview/{draft.slug}/",
+            "post_url": f"/preview/{draft.slug}/2026/08/{draft.slug}/",
+        },
+    )
+
+    response = client.get(f"/content/drafts/{draft_id}")
+    assert f'href="/preview/{draft.slug}/2026/08/{draft.slug}/"' in response.text
+    assert f'href="/preview/{draft.slug}/"' in response.text
+
+    board = client.get("/content/drafts?status=previewed")
+    assert f'href="/preview/{draft.slug}/2026/08/{draft.slug}/"' in board.text
+
+
+def test_editor_falls_back_to_the_site_root_when_no_post_url_recorded(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "previewed", title="Old run")
+    draft = services.store.get_draft(draft_id)
+    run = services.store._queue_run(draft_id, "preview")
+    services.store.start_run(run.id, "builder-1", "0.164.0", False, built_version=draft.version_no)
+    services.store.finish_run(
+        run.id, "builder-1", True, {"preview_url": f"/preview/{draft.slug}/"}
+    )
+
+    response = client.get(f"/content/drafts/{draft_id}")
+    assert f'href="/preview/{draft.slug}/"' in response.text
+
+
+def test_an_unpinned_draft_has_no_preview_link_at_all(
+    client: TestClient, services: Services
+) -> None:
+    draft_id = make_draft(services, "drafting", title="Fresh draft")
+    response = client.get(f"/content/drafts/{draft_id}")
+    assert "Last built preview" not in response.text
+
+    board = client.get("/content/drafts?status=drafting")
+    assert "<p class=\"muted\">PR: - | preview: -</p>" in board.text
+
+
 # --- Preview tab and run log -------------------------------------------------
 
 
@@ -792,11 +843,19 @@ def test_preview_list_and_rebuild_and_run_log(client: TestClient, services: Serv
     draft = services.store.get_draft(draft_id)
     run = services.store._queue_run(draft_id, "preview")
     services.store.start_run(run.id, "builder-1", "0.164.0", False, built_version=draft.version_no)
-    services.store.finish_run(run.id, "builder-1", True, {"preview_url": f"/preview/{draft.slug}/"})
+    services.store.finish_run(
+        run.id,
+        "builder-1",
+        True,
+        {
+            "preview_url": f"/preview/{draft.slug}/",
+            "post_url": f"/preview/{draft.slug}/2026/08/{draft.slug}/",
+        },
+    )
 
     listing = client.get("/content/previews")
     assert listing.status_code == 200
-    assert f"/preview/{draft.slug}/" in listing.text
+    assert f'href="/preview/{draft.slug}/2026/08/{draft.slug}/"' in listing.text
     assert "Rebuild" in listing.text
 
     log_page = client.get(f"/runs/{run.id}")
@@ -873,6 +932,31 @@ def test_run_log_page_shows_a_successful_preview_runs_result() -> None:
     assert "a-slug" in html
     assert "12.3s" in html
     assert "notice error" not in html
+
+
+def test_run_log_page_shows_the_post_url_first_and_the_site_second() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run(
+        status="succeeded",
+        result={
+            "preview_url": "/preview/a-slug/",
+            "post_url": "/preview/a-slug/2026/08/a-slug/",
+            "slug": "a-slug",
+        },
+    )
+    html = tpl.run_log_page(run, "", banner=False)
+    assert 'href="/preview/a-slug/2026/08/a-slug/"' in html
+    assert 'href="/preview/a-slug/"' in html
+    assert "notice error" not in html
+
+
+def test_run_log_page_falls_back_to_the_site_root_when_no_post_url_recorded() -> None:
+    from chronicle.api import ui_templates as tpl
+
+    run = _base_run(status="succeeded", result={"preview_url": "/preview/a-slug/"})
+    html = tpl.run_log_page(run, "", banner=False)
+    assert 'href="/preview/a-slug/"' in html
 
 
 def test_run_log_page_shows_a_successful_publish_runs_result() -> None:

@@ -199,6 +199,7 @@ def test_successful_build_moves_draft_to_previewed_and_records_result(
     assert finished.result["preview_url"].endswith("/preview/a-real-post/") or "a-real-post" in (
         finished.result.get("slug", "")
     )
+    assert finished.result["post_url"] == finished.result["preview_url"] + "2026/08/a-real-post/"
     assert store.get_draft(draft_id).status == "previewed"
     assert not (store.queue_dir / f"{run_id}.json").exists()
     slug = store.get_draft(draft_id).slug

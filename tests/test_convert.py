@@ -493,3 +493,61 @@ def test_convert_does_not_trust_a_pinned_percent_encoded_image_dir() -> None:
     placed = convert.convert(draft).images[0]
     assert placed.site_path == "static/images/my-post/shot.png"
     assert placed.url == "/images/my-post/shot.png"
+
+
+# --- preview_post_url -----------------------------------------------------
+
+
+def test_preview_post_url_joins_the_preview_base_with_the_dated_url() -> None:
+    draft = _draft()
+    converted = convert.convert(draft)
+    url = convert.preview_post_url("https://x/preview/my-post/", converted.url)
+    assert url == "https://x/preview/my-post/2026/08/my-post/"
+
+
+def test_preview_post_url_joins_the_preview_base_with_a_hand_set_url() -> None:
+    draft = _draft(frontmatter={"title": "My Post", "date": "2026-08-01", "url": "/about/"})
+    converted = convert.convert(draft)
+    url = convert.preview_post_url("https://x/preview/my-post/", converted.url)
+    assert url == "https://x/preview/my-post/about/"
+
+
+def test_preview_post_url_drops_a_scheme_and_host_in_a_hand_set_url() -> None:
+    """`url_problem` only judges the last path segment (ADR 015); a
+    frontmatter `url` can still carry a scheme and host. The built preview
+    link must never leave the preview site over it."""
+    url = convert.preview_post_url("https://x/preview/my-post/", "https://evil.example/2026/08/my-post/")
+    assert url == "https://x/preview/my-post/2026/08/my-post/"
+
+
+def test_preview_post_url_drops_dot_dot_segments_in_a_hand_set_url() -> None:
+    url = convert.preview_post_url("https://x/preview/my-post/", "/../../etc/passwd")
+    assert url == "https://x/preview/my-post/etc/passwd/"
+
+
+def test_preview_post_url_falls_back_to_the_base_for_a_root_url() -> None:
+    assert convert.preview_post_url("https://x/preview/my-post/", "/") == "https://x/preview/my-post/"
+
+
+# --- date always parseable, and agrees with post_url -----------------------
+
+
+def test_a_converted_post_always_carries_a_parseable_date_and_post_url_agrees() -> None:
+    draft = _draft(frontmatter={"title": "My Post"})
+    converted = convert.convert(draft)
+    lines = converted.text.splitlines()
+    date_line = next(line for line in lines if line.startswith("date:"))
+    stamped = date_line.split(":", 1)[1].strip().strip("'\"")
+    stamp_date = convert.post_date({"date": stamped})
+    assert f"/{stamp_date.year:04d}/{stamp_date.month:02d}/" in converted.url
+
+
+def test_stamp_publish_date_is_local_chicago_time_iso_with_seconds() -> None:
+    from datetime import datetime
+
+    stamped = convert.stamp_publish_date()
+    parsed = datetime.fromisoformat(stamped)
+    assert parsed.tzinfo is not None
+    # America/Chicago is never UTC+0 (CST is -6, CDT is -5); a naive or UTC
+    # stamp would fail this.
+    assert parsed.utcoffset().total_seconds() != 0

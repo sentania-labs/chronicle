@@ -275,6 +275,38 @@ def test_slug_pin_sets_image_dir_from_slug_when_no_url(store: Store) -> None:
     assert previewed.image_dir == "a-post-about-drift"
 
 
+def test_slug_pin_stamps_a_missing_date(store: Store) -> None:
+    """ADR 022: the date the filename and url are derived from is pinned at
+    the same moment as the slug, not only at first publish."""
+    from datetime import datetime
+
+    draft, _ = store.create_draft("ghostwriter")
+    store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
+    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+    stamped = previewed.frontmatter.get("date")
+    assert isinstance(stamped, str) and stamped
+    parsed = datetime.fromisoformat(stamped)
+    assert parsed.tzinfo is not None
+
+
+def test_slug_pin_never_overwrites_a_hand_set_date(store: Store) -> None:
+    draft, _ = store.create_draft("ghostwriter")
+    store.save_draft(
+        draft.id, "ghostwriter", 0, {**FRONTMATTER, "date": "2020-01-01T00:00:00-06:00"}, "body"
+    )
+    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+    assert previewed.frontmatter["date"] == "2020-01-01T00:00:00-06:00"
+
+
+def test_slug_pin_stamps_the_date_once_and_a_later_save_never_moves_it(store: Store) -> None:
+    draft, _ = store.create_draft("ghostwriter")
+    store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
+    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+    stamped = previewed.frontmatter["date"]
+    store.save_draft(draft.id, "ghostwriter", 1, {**FRONTMATTER, "date": stamped}, "more body")
+    assert store.get_draft(draft.id).frontmatter["date"] == stamped
+
+
 @pytest.mark.parametrize("url", ["/a/..", "/a/.", "/a/b\\c"])
 def test_save_refuses_a_url_whose_last_segment_is_not_a_directory_name(
     store: Store, url: str

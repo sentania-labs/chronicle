@@ -483,6 +483,13 @@ def convert(
     frontmatter = dict(draft.frontmatter)
     frontmatter["draft"] = False
     frontmatter["url"] = post_url(draft, slug)
+    # A draft normally has its date stamped at the slug pin (ADR 022) or at
+    # first publish (`store.record_publish_result`), both before this ever
+    # runs; this only fires for a draft built by hand (a test) or written
+    # before either stamp existed. `post_date` is what `url` above and
+    # `post_filename` already use, so this never disagrees with them.
+    if not frontmatter.get("date"):
+        frontmatter["date"] = post_date(draft.frontmatter).isoformat()
     for key in IMAGE_FRONTMATTER_KEYS:
         value = frontmatter.get(key)
         if isinstance(value, str) and value.strip():
