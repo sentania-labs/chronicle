@@ -447,6 +447,18 @@ function saveStateText(state, detail) {
     editor.toggleSideBySide();
   }
 
+  // Every caller that sets #featureImage's value programmatically (the
+  // change listener below, and the Restore path further down, which sets it
+  // through writeFields without firing a change event) must run this same
+  // refresh, or the thumbnail and the side-by-side preview keep showing
+  // whatever image was selected before.
+  function refreshFeatureImage() {
+    updateFeatureThumb();
+    if (editor) {
+      editor.codemirror.refresh();
+    }
+  }
+
   // The feature image select lives in the refreshed frontmatter panel, so
   // this listens on the document rather than the element: a save swaps the
   // panel out for a fresh one with the same id, and a plain element listener
@@ -455,10 +467,7 @@ function saveStateText(state, detail) {
   // so a change here has to ask for that refresh itself.
   document.addEventListener("change", function (event) {
     if (event.target && event.target.id === "featureImage") {
-      updateFeatureThumb();
-      if (editor) {
-        editor.codemirror.refresh();
-      }
+      refreshFeatureImage();
     }
   });
   updateFeatureThumb();
@@ -578,6 +587,10 @@ function saveStateText(state, detail) {
       offerPending = false;
       setBody(pending.body);
       writeFields(pending.fields);
+      // writeFields sets #featureImage's value directly, which fires no
+      // change event: without this the thumbnail and the preview would keep
+      // showing whatever was selected before the restore.
+      refreshFeatureImage();
       // Restoring puts the text back at the version it was written against,
       // so if the server has moved on the next save is refused with the
       // differences shown rather than overwriting what landed meanwhile.
@@ -796,10 +809,15 @@ function saveStateText(state, detail) {
     if (!featureSelect) {
       return;
     }
-    var found = Array.prototype.some.call(featureSelect.options, function (option) {
-      return option.value === filename;
+    var existing = null;
+    Array.prototype.some.call(featureSelect.options, function (option) {
+      if (option.value === filename) {
+        existing = option;
+        return true;
+      }
+      return false;
     });
-    if (!found) {
+    if (!existing) {
       var option = document.createElement("option");
       option.value = filename;
       option.textContent = filename;
@@ -811,13 +829,16 @@ function saveStateText(state, detail) {
         option.dataset.imageSrc = url;
       }
       featureSelect.appendChild(option);
+    } else if (url) {
+      // An orphan option (a stored featureImage whose image was detached)
+      // can already hold this filename with no data-image-src: uploading a
+      // replacement with the same name must still pick up the new URL,
+      // rather than leaving the thumbnail and preview blank.
+      existing.dataset.imageSrc = url;
     }
     if (select) {
       featureSelect.value = filename;
-      updateFeatureThumb();
-      if (editor) {
-        editor.codemirror.refresh();
-      }
+      refreshFeatureImage();
     }
   }
 

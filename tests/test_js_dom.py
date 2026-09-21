@@ -381,17 +381,9 @@ setTimeout(function () {{
 """
 
 
-def test_a_freshly_uploaded_feature_image_shows_in_the_thumbnail_without_reload(
-    tmp_path: Path,
-) -> None:
-    page = tmp_path / "upload.html"
-    page.write_text(
-        UPLOAD_PAGE.format(
-            ui_js=(STATIC / "ui.js").as_posix(),
-            editor_js=(STATIC / "editor.js").as_posix(),
-        ),
-        encoding="utf-8",
-    )
+def run_page(tmp_path: Path, name: str, page_html: str) -> dict:
+    page = tmp_path / name
+    page.write_text(page_html, encoding="utf-8")
     assert CHROME is not None
     result = subprocess.run(
         [
@@ -415,8 +407,188 @@ def test_a_freshly_uploaded_feature_image_shows_in_the_thumbnail_without_reload(
     text = result.stdout[start : result.stdout.index("</pre>", start)]
     import html
 
-    out = json.loads(html.unescape(text))
+    return json.loads(html.unescape(text))
+
+
+def test_a_freshly_uploaded_feature_image_shows_in_the_thumbnail_without_reload(
+    tmp_path: Path,
+) -> None:
+    out = run_page(
+        tmp_path,
+        "upload.html",
+        UPLOAD_PAGE.format(
+            ui_js=(STATIC / "ui.js").as_posix(),
+            editor_js=(STATIC / "editor.js").as_posix(),
+        ),
+    )
     assert out["selectValue"] == "new-feature.png"
+    assert out["optionHasSrc"] is True
+    assert out["optionSrc"] == "/content/drafts/d1/images/newsha/file"
+    assert out["thumbHidden"] is False
+    assert out["thumbSrc"].endswith("/content/drafts/d1/images/newsha/file")
+
+
+# Restoring a local backup whose featureImage differs from the server's current
+# selection: writeFields sets #featureImage's value directly, which fires no
+# change event, so a review round on this change found the thumbnail and the
+# preview kept showing the previous image until the next manual change or page
+# load. The backup is seeded into localStorage by an inline script that runs
+# before editor.js's own IIFE, which is what makes backupVerdict offer it
+# (#backup-banner starts hidden in a real editor page; here it is written out
+# already hidden and editor.js's own logic un-hides it).
+RESTORE_PAGE = """<!doctype html><meta charset="utf-8"><base href="http://localhost/">
+<script>
+window.localStorage.setItem("chronicle-backup:d1", JSON.stringify({{
+  body: "server body",
+  fields: {{ featureImage: "image-b.png" }},
+  baseVersion: 1,
+  savedAt: new Date().toISOString(),
+}}));
+</script>
+<div id="editor-app" data-draft-id="d1">
+<form id="edit-form" method="post" action="/content/drafts/d1/save">
+<input type="hidden" id="base_version" name="base_version" value="1">
+<textarea id="body" name="body">server body</textarea>
+<select id="featureImage" name="featureImage">
+<option value="">none</option>
+<option value="image-a.png" data-image-src="/content/drafts/d1/images/a/file"
+selected>image-a.png</option>
+<option value="image-b.png" data-image-src="/content/drafts/d1/images/b/file">
+image-b.png</option>
+</select>
+</form>
+</div>
+<button id="save-btn">Save</button>
+<span id="save-state"></span>
+<span id="upload-state"></span>
+<img id="featureImageThumb" alt="" hidden>
+<div id="backup-banner" hidden>
+<span id="backup-banner-text"></span>
+<button id="backup-restore" type="button">Restore</button>
+<button id="backup-discard" type="button">Discard</button>
+</div>
+<pre id="results"></pre>
+<script src="file://{ui_js}"></script>
+<script src="file://{editor_js}"></script>
+<script>
+document.getElementById("backup-restore").click();
+var select = document.getElementById("featureImage");
+var thumb = document.getElementById("featureImageThumb");
+document.getElementById("results").textContent = JSON.stringify({{
+  selectValue: select.value,
+  thumbHidden: thumb.hidden,
+  thumbSrc: thumb.src,
+  bannerHidden: document.getElementById("backup-banner").hidden,
+}});
+</script>
+"""
+
+
+def test_restoring_a_backup_with_a_different_feature_image_updates_the_thumbnail(
+    tmp_path: Path,
+) -> None:
+    out = run_page(
+        tmp_path,
+        "restore.html",
+        RESTORE_PAGE.format(
+            ui_js=(STATIC / "ui.js").as_posix(),
+            editor_js=(STATIC / "editor.js").as_posix(),
+        ),
+    )
+    assert out["selectValue"] == "image-b.png"
+    assert out["thumbHidden"] is False
+    assert out["thumbSrc"].endswith("/content/drafts/d1/images/b/file")
+    assert out["bannerHidden"] is True
+
+
+# An orphan option (a stored featureImage whose image was detached) already
+# holding the filename an upload reuses: addFeatureOption's "found" branch
+# used to leave it with no data-image-src, so the thumbnail and preview stayed
+# blank until a full reload even though the option was freshly re-uploaded
+# under the same name.
+ORPHAN_UPLOAD_PAGE = """<!doctype html><meta charset="utf-8"><base href="http://localhost/">
+<script>
+window.__error = null;
+window.onerror = function (msg) {{ window.__error = String(msg); }};
+window.fetch = function (url, opts) {{
+  if (String(url).indexOf("/images") !== -1 && opts && opts.method === "POST") {{
+    return Promise.resolve({{
+      json: function () {{
+        return Promise.resolve({{
+          ok: true,
+          filename: "orphan.png",
+          role: "feature",
+          markdown: null,
+          url: "/content/drafts/d1/images/newsha/file",
+        }});
+      }},
+    }});
+  }}
+  return Promise.resolve({{ text: function () {{ return Promise.resolve("<html></html>"); }} }});
+}};
+</script>
+<div id="editor-app" data-draft-id="d1">
+<form id="edit-form" method="post" action="/content/drafts/d1/save">
+<input type="hidden" id="base_version" value="1">
+<textarea id="body"></textarea>
+</form>
+</div>
+<button id="save-btn">Save</button>
+<span id="save-state"></span>
+<span id="upload-state"></span>
+<select id="featureImage">
+<option value="">none</option>
+<option value="orphan.png">orphan.png</option>
+</select>
+<img id="featureImageThumb" alt="" hidden>
+<div id="images-panel"></div>
+<form id="image-form">
+<input type="file" id="file">
+<select id="role"><option value="feature" selected>feature</option></select>
+</form>
+<pre id="results"></pre>
+<script src="file://{ui_js}"></script>
+<script src="file://{editor_js}"></script>
+<script>
+var input = document.getElementById("file");
+var dt = new DataTransfer();
+dt.items.add(new File(["x"], "orphan.png", {{ type: "image/png" }}));
+input.files = dt.files;
+var submitEvent = new Event("submit", {{ bubbles: true, cancelable: true }});
+document.getElementById("image-form").dispatchEvent(submitEvent);
+setTimeout(function () {{
+  var select = document.getElementById("featureImage");
+  var thumb = document.getElementById("featureImageThumb");
+  var option = select.options[select.selectedIndex];
+  document.getElementById("results").textContent = JSON.stringify({{
+    optionCount: select.options.length,
+    selectValue: select.value,
+    optionHasSrc: !!(option && option.dataset.imageSrc),
+    optionSrc: option && option.dataset.imageSrc,
+    thumbHidden: thumb.hidden,
+    thumbSrc: thumb.src,
+    error: window.__error,
+  }});
+}}, 50);
+</script>
+"""
+
+
+def test_uploading_over_an_orphan_feature_option_fills_in_its_image_src(
+    tmp_path: Path,
+) -> None:
+    out = run_page(
+        tmp_path,
+        "orphan-upload.html",
+        ORPHAN_UPLOAD_PAGE.format(
+            ui_js=(STATIC / "ui.js").as_posix(),
+            editor_js=(STATIC / "editor.js").as_posix(),
+        ),
+    )
+    assert out["error"] is None
+    # No new option was created: the existing orphan option was reused.
+    assert out["optionCount"] == 2
+    assert out["selectValue"] == "orphan.png"
     assert out["optionHasSrc"] is True
     assert out["optionSrc"] == "/content/drafts/d1/images/newsha/file"
     assert out["thumbHidden"] is False
