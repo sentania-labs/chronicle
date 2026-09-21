@@ -217,6 +217,16 @@ def post_url(draft: Draft, slug: str) -> str:
 _SINGLE_DOT_SEGMENTS = frozenset({".", "%2e"})
 _DOUBLE_DOT_SEGMENTS = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
 
+# A backslash is not a URL delimiter, so `urlsplit` leaves it inside a single
+# path segment, but a browser treats it as a path separator for an https URL
+# (found in review: `/..\..\admin/ok/` passes `url_problem`, since that check
+# only judges the last segment ("ok"), and the backslash-bearing segment
+# survives the dot-segment filter below untouched, only to be split by the
+# browser on navigation). Normalising both the raw and percent-encoded forms
+# to "/" before splitting means the dot-segment filter sees every segment a
+# browser would.
+_BACKSLASH_RE = re.compile(r"\\|%5c", re.IGNORECASE)
+
 
 def preview_post_url(preview_base: str, post_url_value: str) -> str:
     """The post's own URL inside the preview site, from the preview site's
@@ -228,10 +238,12 @@ def preview_post_url(preview_base: str, post_url_value: str) -> str:
     only judges a url's last path segment (ADR 015), so a hand-set
     frontmatter `url` can still carry a scheme, a host, or a dot segment
     (literal or percent-encoded) anywhere else in it. Only the path is ever
-    used, and every dot segment is dropped, so a crafted url can never make
-    the built link leave the preview site.
+    used, backslashes are normalised to "/" first, and every dot segment is
+    dropped, so a crafted url can never make the built link leave the
+    preview site.
     """
     path = urlsplit(post_url_value.strip()).path
+    path = _BACKSLASH_RE.sub("/", path)
     segments = [
         part
         for part in path.split("/")

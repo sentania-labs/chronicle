@@ -542,6 +542,20 @@ def test_preview_post_url_falls_back_to_the_base_for_a_root_url() -> None:
     )
 
 
+def test_preview_post_url_normalises_backslash_segments_before_filtering_dots() -> None:
+    """A browser treats a backslash as a path separator in an https URL, so a
+    segment carrying one (`..\\..\\admin`) must be split and its dot segments
+    dropped the same as a forward-slash one, or the built link escapes
+    `/preview/<slug>/`."""
+    url = convert.preview_post_url("https://x/preview/my-post/", "/..\\..\\admin/ok/")
+    assert url == "https://x/preview/my-post/admin/ok/"
+
+
+def test_preview_post_url_normalises_percent_encoded_backslash_segments() -> None:
+    url = convert.preview_post_url("https://x/preview/my-post/", "/..%5c..%5cadmin/ok/")
+    assert url == "https://x/preview/my-post/admin/ok/"
+
+
 # --- date always parseable, and agrees with post_url -----------------------
 
 
