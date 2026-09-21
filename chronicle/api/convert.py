@@ -205,6 +205,19 @@ def post_url(draft: Draft, slug: str) -> str:
     return f"/{stamp.year:04d}/{stamp.month:02d}/{slug}/"
 
 
+# A browser normalises a URL path's dot segments before it ever requests
+# anything, and the WHATWG URL Standard treats a lone percent-encoded "%2e"
+# as a single-dot segment and "..", ".%2e", "%2e.", "%2e%2e" (case-insensitive)
+# as a double-dot one, the same as their literal forms. Filtering only the
+# literal "." and ".." here would let a crafted `%2e%2e` segment survive into
+# the built href and have the *browser* collapse it back to ".." on
+# navigation, walking the link out of `/preview/<slug>/` to another path on
+# the same host (found in review: `url_problem` only judges a url's last
+# segment, so an earlier one can carry this).
+_SINGLE_DOT_SEGMENTS = frozenset({".", "%2e"})
+_DOUBLE_DOT_SEGMENTS = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
+
+
 def preview_post_url(preview_base: str, post_url_value: str) -> str:
     """The post's own URL inside the preview site, from the preview site's
     root (`preview_base`, e.g. `https://x/preview/<slug>/`) and the post's
@@ -213,12 +226,19 @@ def preview_post_url(preview_base: str, post_url_value: str) -> str:
 
     `post_url_value` is untrusted past what `url_problem` catches: that check
     only judges a url's last path segment (ADR 015), so a hand-set
-    frontmatter `url` can still carry a scheme, host, or `..` segment. Only
-    the path is ever used, and `..`/`.` segments are dropped, so a crafted
-    url can never make the built link leave the preview site.
+    frontmatter `url` can still carry a scheme, a host, or a dot segment
+    (literal or percent-encoded) anywhere else in it. Only the path is ever
+    used, and every dot segment is dropped, so a crafted url can never make
+    the built link leave the preview site.
     """
     path = urlsplit(post_url_value.strip()).path
-    segments = [part for part in path.split("/") if part not in ("", ".", "..")]
+    segments = [
+        part
+        for part in path.split("/")
+        if part
+        and part.lower() not in _SINGLE_DOT_SEGMENTS
+        and part.lower() not in _DOUBLE_DOT_SEGMENTS
+    ]
     base = preview_base.rstrip("/")
     return f"{base}/{'/'.join(segments)}/" if segments else f"{base}/"
 

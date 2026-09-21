@@ -527,6 +527,15 @@ def test_preview_post_url_drops_dot_dot_segments_in_a_hand_set_url() -> None:
     assert url == "https://x/preview/my-post/etc/passwd/"
 
 
+@pytest.mark.parametrize("segment", ["%2e%2e", "%2E%2E", ".%2e", "%2e.", "%2e", "%2E"])
+def test_preview_post_url_drops_percent_encoded_dot_segments(segment: str) -> None:
+    """A browser normalises `%2e%2e` back to `..` on navigation (WHATWG URL
+    Standard), so filtering only the literal string would let a hand-set url
+    walk the built link out of the preview site anyway."""
+    url = convert.preview_post_url("https://x/preview/my-post/", f"/{segment}/real-slug/")
+    assert url == "https://x/preview/my-post/real-slug/"
+
+
 def test_preview_post_url_falls_back_to_the_base_for_a_root_url() -> None:
     assert (
         convert.preview_post_url("https://x/preview/my-post/", "/") == "https://x/preview/my-post/"

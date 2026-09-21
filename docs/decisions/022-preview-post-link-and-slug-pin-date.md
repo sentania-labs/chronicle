@@ -31,10 +31,16 @@ post_url_value)` builds the full link from the preview site's root and the
 post's own `url` (`convert.post_url`'s output): no second derivation of the
 date path anywhere. It treats `post_url_value` as untrusted past what
 `convert.url_problem` already catches (that check only judges a url's last
-path segment, ADR 015): only the path component is used, and `.`/`..`
-segments are dropped, so a hand-set frontmatter `url` carrying a scheme, a
+path segment, ADR 015): only the path component is used, and every dot
+segment is dropped, so a hand-set frontmatter `url` carrying a scheme, a
 host, or a `..` segment can never make the built link leave the preview
-site.
+site. This also drops the percent-encoded forms (`%2e%2e`, `.%2e`, `%2e.`,
+a lone `%2e`, all case-insensitively): the WHATWG URL Standard treats those
+as dot segments too and a browser normalises them on navigation, so
+filtering only the literal string would still let a crafted url walk the
+built link out of `/preview/<slug>/` onto another path on the same host
+(found in the in-lane adversarial review, since `url_problem` only judges a
+url's last segment and an earlier one can carry this).
 
 The builder's run result gains `post_url` beside the existing `preview_url`.
 Every surface that shows a preview link makes the post URL the primary link
