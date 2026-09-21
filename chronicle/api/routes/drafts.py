@@ -30,6 +30,12 @@ class DraftSave(BaseModel):
     frontmatter: dict[str, Any] = {}
     body: str = ""
     message: str = ""
+    # Omitted (None) keeps whatever the draft already carries; a mapping,
+    # `{}` included, replaces it in full (ADR 021). Typed loosely here so an
+    # unknown channel or a non-string value is refused by
+    # `store.check_announcements` in the same 422 envelope as every other
+    # domain refusal, rather than as a framework validation error.
+    announcements: dict[str, Any] | None = None
 
 
 class ActionBody(BaseModel):
@@ -85,6 +91,7 @@ def save_draft(
         payload.frontmatter,
         payload.body,
         payload.message,
+        announcements=payload.announcements,
     )
     return _dump(draft)
 

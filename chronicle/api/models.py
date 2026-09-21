@@ -35,6 +35,11 @@ FRONTMATTER_ALLOWLIST = (
     "shareImage",
 )
 
+# The social channels a draft can carry a suggested announcement for (ADR
+# 021). Fixed, not open: announcements are draft-only text a human copies by
+# hand, so a new channel is a deliberate change here, never a caller's key.
+ANNOUNCEMENT_CHANNELS = ("x", "bluesky", "linkedin")
+
 SUBMISSION_STATUSES = ("new", "claimed", "drafted", "discarded")
 DRAFT_STATUSES = (
     "drafting",
@@ -159,6 +164,11 @@ class Draft(BaseModel):
     # reconciliation's content_drift check compares against post_blob_sha,
     # and republish reads date from here to keep it stable (spec section 9).
     published: dict[str, Any] | None = None
+    # Suggested social announcements, one optional entry per channel in
+    # ANNOUNCEMENT_CHANNELS (ADR 021). Draft-only: never frontmatter, never
+    # part of the converted post, never sent anywhere by Chronicle. A record
+    # written before this field existed loads with an empty mapping.
+    announcements: dict[str, str] = {}
 
 
 class Version(BaseModel):
@@ -170,6 +180,9 @@ class Version(BaseModel):
     message: str = ""
     frontmatter: dict[str, Any] = {}
     body: str = ""
+    # Carried so a version restores the announcements that were current when
+    # it was written, the same way it restores frontmatter and body.
+    announcements: dict[str, str] = {}
 
 
 class FeedbackEntry(BaseModel):

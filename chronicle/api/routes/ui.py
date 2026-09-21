@@ -23,7 +23,7 @@ from .. import ui_templates as tpl
 from ..deps import Consumer, Services
 from ..errors import ApiError
 from ..images import MAX_IMAGE_BYTES, alt_text_for, safe_upload_filename
-from ..models import Draft, Material, Submission
+from ..models import ANNOUNCEMENT_CHANNELS, Draft, Material, Submission
 from ..pagination import Page, paginate
 from ..store import Store
 from ..ui_actions import staged_refusal
@@ -547,6 +547,23 @@ def _build_frontmatter(
     return frontmatter
 
 
+def _build_announcements(form: dict[str, str]) -> dict[str, str]:
+    """The three announcement textareas as a mapping (ADR 021).
+
+    The edit page always submits all three fields, so the result always
+    replaces the draft's mapping in full: a channel whose textarea is blank
+    or whitespace is absent from it rather than stored as an empty string.
+    The keep-what-is-there behaviour of an omitted `announcements` belongs to
+    the raw `PUT /v1/drafts/{id}` payload, not to this form.
+    """
+    out = {}
+    for channel in ANNOUNCEMENT_CHANNELS:
+        text = _crlf_to_lf(form.get(f"announcement_{channel}", "")).strip()
+        if text:
+            out[channel] = text
+    return out
+
+
 @router.post("/content/drafts/{draft_id}/save", response_class=HTMLResponse)
 async def draft_save(
     draft_id: str,
@@ -561,8 +578,16 @@ async def draft_save(
     draft = services.store.get_draft(draft_id)
     frontmatter = _build_frontmatter(draft.frontmatter, form, draft.slug)
     body_text = _crlf_to_lf(form.get("body", ""))
+    announcements = _build_announcements(form)
     try:
-        services.store.save_draft(draft_id, consumer.name, base_version, frontmatter, body_text)
+        services.store.save_draft(
+            draft_id,
+            consumer.name,
+            base_version,
+            frontmatter,
+            body_text,
+            announcements=announcements,
+        )
     except ApiError as exc:
         # Only a stale base_version is the conflict this view exists for; a
         # draft with an open publish PR also saves as a 409
