@@ -54,6 +54,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -61,6 +63,17 @@ from .models import FRONTMATTER_ALLOWLIST, Draft
 
 POSTS_DIR = "content/posts"
 STATIC_IMAGES_DIR = "static/images"
+
+# Spec section 5: "First publish stamps today in America/Chicago", regardless
+# of what timezone the container itself runs in. ADR 022: the slug pin
+# (`store.Store._pin_slug`) stamps a missing date with the same clock, since
+# the pin is the moment the filename and url are derived from it, not first
+# preview or publish alone.
+PUBLISH_TZ = ZoneInfo("America/Chicago")
+
+
+def stamp_publish_date() -> str:
+    return datetime.now(tz=PUBLISH_TZ).isoformat(timespec="seconds")
 
 # The two ways a post reaches an image, the same pair `store.py` scans for on
 # a `from_post` import: markdown `![alt](path)` and a bare `<img src="...">`.
@@ -189,6 +202,24 @@ def post_url(draft: Draft, slug: str) -> str:
     # by hand, which this function then leaves alone.
     stamp = post_date(draft.frontmatter)
     return f"/{stamp.year:04d}/{stamp.month:02d}/{slug}/"
+
+
+def preview_post_url(preview_base: str, post_url_value: str) -> str:
+    """The post's own URL inside the preview site, from the preview site's
+    root (`preview_base`, e.g. `https://x/preview/<slug>/`) and the post's
+    own `url` (this module's `post_url` output, already written into the
+    converted frontmatter).
+
+    `post_url_value` is untrusted past what `url_problem` catches: that check
+    only judges a url's last path segment (ADR 015), so a hand-set
+    frontmatter `url` can still carry a scheme, host, or `..` segment. Only
+    the path is ever used, and `..`/`.` segments are dropped, so a crafted
+    url can never make the built link leave the preview site.
+    """
+    path = urlsplit(post_url_value.strip()).path
+    segments = [part for part in path.split("/") if part not in ("", ".", "..")]
+    base = preview_base.rstrip("/")
+    return f"{base}/{'/'.join(segments)}/" if segments else f"{base}/"
 
 
 def _last_segment(url: str) -> str | None:

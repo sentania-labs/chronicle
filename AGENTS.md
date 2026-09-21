@@ -292,6 +292,14 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   `static/images/<image_dir>/`, not `static/images/<slug>/`, for exactly
   this reason (found live in the C6 three-post diff: the wrong directory
   silently dropped every unreferenced image on a dated-filename post).
+- **A preview run's `preview_url` is the site root; `post_url` is the post.**
+  `convert.preview_post_url` builds the latter from the former and
+  `convert.post_url`'s own output, never a second derivation of the date
+  path; a run recorded before this field existed carries no `post_url`, and
+  every surface that shows a preview link falls back to `preview_url`
+  instead of breaking. The date itself is pinned at the same moment as the
+  slug (`store._pin_slug`, ADR 022), not only at first publish, since the
+  filename and default `url` are both derived from it.
 - **`chronicle/backup.py`'s restore swap keeps the displaced tree until
   reindex succeeds, and `_safe_member` runs before any extraction.** A tar
   member with an absolute path, a `..` segment, or a symlink is refused
