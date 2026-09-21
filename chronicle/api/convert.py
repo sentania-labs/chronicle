@@ -54,6 +54,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -61,6 +63,18 @@ from .models import FRONTMATTER_ALLOWLIST, Draft
 
 POSTS_DIR = "content/posts"
 STATIC_IMAGES_DIR = "static/images"
+
+# Spec section 5: "First publish stamps today in America/Chicago", regardless
+# of what timezone the container itself runs in. ADR 022: the slug pin
+# (`store.Store._pin_slug`) stamps a missing date with the same clock, since
+# the pin is the moment the filename and url are derived from it, not first
+# preview or publish alone.
+PUBLISH_TZ = ZoneInfo("America/Chicago")
+
+
+def stamp_publish_date() -> str:
+    return datetime.now(tz=PUBLISH_TZ).isoformat(timespec="seconds")
+
 
 # The two ways a post reaches an image, the same pair `store.py` scans for on
 # a `from_post` import: markdown `![alt](path)` and a bare `<img src="...">`.
@@ -189,6 +203,56 @@ def post_url(draft: Draft, slug: str) -> str:
     # by hand, which this function then leaves alone.
     stamp = post_date(draft.frontmatter)
     return f"/{stamp.year:04d}/{stamp.month:02d}/{slug}/"
+
+
+# A browser normalises a URL path's dot segments before it ever requests
+# anything, and the WHATWG URL Standard treats a lone percent-encoded "%2e"
+# as a single-dot segment and "..", ".%2e", "%2e.", "%2e%2e" (case-insensitive)
+# as a double-dot one, the same as their literal forms. Filtering only the
+# literal "." and ".." here would let a crafted `%2e%2e` segment survive into
+# the built href and have the *browser* collapse it back to ".." on
+# navigation, walking the link out of `/preview/<slug>/` to another path on
+# the same host (found in review: `url_problem` only judges a url's last
+# segment, so an earlier one can carry this).
+_SINGLE_DOT_SEGMENTS = frozenset({".", "%2e"})
+_DOUBLE_DOT_SEGMENTS = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
+
+# A backslash is not a URL delimiter, so `urlsplit` leaves it inside a single
+# path segment, but a browser treats it as a path separator for an https URL
+# (found in review: `/..\..\admin/ok/` passes `url_problem`, since that check
+# only judges the last segment ("ok"), and the backslash-bearing segment
+# survives the dot-segment filter below untouched, only to be split by the
+# browser on navigation). Normalising both the raw and percent-encoded forms
+# to "/" before splitting means the dot-segment filter sees every segment a
+# browser would.
+_BACKSLASH_RE = re.compile(r"\\|%5c", re.IGNORECASE)
+
+
+def preview_post_url(preview_base: str, post_url_value: str) -> str:
+    """The post's own URL inside the preview site, from the preview site's
+    root (`preview_base`, e.g. `https://x/preview/<slug>/`) and the post's
+    own `url` (this module's `post_url` output, already written into the
+    converted frontmatter).
+
+    `post_url_value` is untrusted past what `url_problem` catches: that check
+    only judges a url's last path segment (ADR 015), so a hand-set
+    frontmatter `url` can still carry a scheme, a host, or a dot segment
+    (literal or percent-encoded) anywhere else in it. Only the path is ever
+    used, backslashes are normalised to "/" first, and every dot segment is
+    dropped, so a crafted url can never make the built link leave the
+    preview site.
+    """
+    path = urlsplit(post_url_value.strip()).path
+    path = _BACKSLASH_RE.sub("/", path)
+    segments = [
+        part
+        for part in path.split("/")
+        if part
+        and part.lower() not in _SINGLE_DOT_SEGMENTS
+        and part.lower() not in _DOUBLE_DOT_SEGMENTS
+    ]
+    base = preview_base.rstrip("/")
+    return f"{base}/{'/'.join(segments)}/" if segments else f"{base}/"
 
 
 def _last_segment(url: str) -> str | None:
@@ -452,6 +516,13 @@ def convert(
     frontmatter = dict(draft.frontmatter)
     frontmatter["draft"] = False
     frontmatter["url"] = post_url(draft, slug)
+    # A draft normally has its date stamped at the slug pin (ADR 022) or at
+    # first publish (`store.record_publish_result`), both before this ever
+    # runs; this only fires for a draft built by hand (a test) or written
+    # before either stamp existed. `post_date` is what `url` above and
+    # `post_filename` already use, so this never disagrees with them.
+    if not frontmatter.get("date"):
+        frontmatter["date"] = post_date(draft.frontmatter).isoformat()
     for key in IMAGE_FRONTMATTER_KEYS:
         value = frontmatter.get(key)
         if isinstance(value, str) and value.strip():

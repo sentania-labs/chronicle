@@ -376,12 +376,14 @@ def build_one(
         _atomic_swap(output, destination)
         swapped = True
         preview_url = f"{settings.external_url}/preview/{converted.slug}/"
+        post_url = convert.preview_post_url(preview_url, converted.url)
         store.finish_run(
             run.id,
             settings.builder_id,
             succeeded=True,
             result={
                 "preview_url": preview_url,
+                "post_url": post_url,
                 "slug": converted.slug,
                 "wall_time_seconds": round(wall_time, 3),
             },

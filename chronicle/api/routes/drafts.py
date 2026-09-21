@@ -146,6 +146,19 @@ def _preview_url(last_preview_run: Any) -> str | None:
     return url if isinstance(url, str) else None
 
 
+def _post_url(last_preview_run: Any) -> str | None:
+    """The post's own page inside the preview site, or None.
+
+    A run recorded before this field existed carries no `post_url`; every
+    caller falls back to `preview_url` (the site root) rather than break.
+    """
+    if last_preview_run is None or last_preview_run.status != "succeeded":
+        return None
+    result = last_preview_run.result or {}
+    url = result.get("post_url")
+    return url if isinstance(url, str) else None
+
+
 @router.get("/{draft_id}/status")
 def get_status(draft_id: str, services: Services = Depends(get_services)) -> dict[str, Any]:
     draft = services.store.get_draft(draft_id)
@@ -157,6 +170,7 @@ def get_status(draft_id: str, services: Services = Depends(get_services)) -> dic
         "slug": draft.slug,
         "last_run": last_run.model_dump(mode="json") if last_run else None,
         "preview_url": _preview_url(last_preview_run),
+        "post_url": _post_url(last_preview_run),
         # Set once a publish or unpublish run has actually recorded a
         # result (Store.record_publish_result); null before that, not a
         # guessed value.
@@ -177,6 +191,7 @@ def get_preview(draft_id: str, services: Services = Depends(get_services)) -> di
     last_preview_run = services.store.last_run(draft.id, kind="preview")
     return {
         "preview_url": _preview_url(last_preview_run),
+        "post_url": _post_url(last_preview_run),
         "last_run": last_preview_run.model_dump(mode="json") if last_preview_run else None,
     }
 

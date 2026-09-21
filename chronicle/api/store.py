@@ -950,6 +950,15 @@ class Store:
         self._refuse_while_publishing(draft, "saved")
         check_frontmatter(frontmatter, current_url=draft.frontmatter.get("url"))
 
+        # ADR 022: once `_pin_slug` has stamped a date, a save that omits it
+        # (the API) or clears it (the editor's Date field) must not lose the
+        # stamp; the filename and url are derived from it, and `_pin_slug`
+        # never runs a second time once `draft.slug` is set. A hand-set
+        # different date still wins over the stored one.
+        if draft.slug is not None and not frontmatter.get("date"):
+            carried = draft.frontmatter.get("date") or convert.stamp_publish_date()
+            frontmatter = {**frontmatter, "date": carried}
+
         if base_version != draft.version_no:
             # A base_version that names no real version (0 aside, or ahead of
             # current) is still a conflict, not a lookup failure, so the diff
@@ -1149,6 +1158,13 @@ class Store:
             )
         draft.slug = candidate
         draft.image_dir = image_dir
+        # ADR 022: stamped here, not only at first publish (record_publish_result
+        # does the same thing for a draft written before this existed). The
+        # pin is the moment the filename and url are derived from the date
+        # (post_filename, post_url), so a date that drifted between preview
+        # and publish would move the post's own url out from under it.
+        if not draft.frontmatter.get("date"):
+            draft.frontmatter = {**draft.frontmatter, "date": convert.stamp_publish_date()}
 
     def _queue_run(self, draft_id: str, kind: str, approved_version: int | None = None) -> Run:
         run = Run(

@@ -17,7 +17,6 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from . import convert, lint
 from . import digest as digest_mod
@@ -36,9 +35,10 @@ from .store import Store
 log = logging.getLogger("chronicle.api.publisher")
 
 PUBLISHER_ACTOR = "chronicle-publisher"
-# Spec section 5: "First publish stamps today in America/Chicago", regardless
-# of what timezone the container itself runs in.
-PUBLISH_TZ = ZoneInfo("America/Chicago")
+# ADR 022: the stamp itself now lives in convert.py, so store._pin_slug can
+# use the same clock without publisher.py and store.py importing each other.
+PUBLISH_TZ = convert.PUBLISH_TZ
+stamp_publish_date = convert.stamp_publish_date
 HEARTBEAT_PATH = ("state", "publisher", "heartbeat.json")
 
 
@@ -46,10 +46,6 @@ class PublishFailed(Exception):
     def __init__(self, error_class: str, message: str) -> None:
         super().__init__(message)
         self.error_class = error_class
-
-
-def stamp_publish_date() -> str:
-    return datetime.now(tz=PUBLISH_TZ).isoformat(timespec="seconds")
 
 
 def _installation_token(admin: AdminServices, installation_id: str) -> str:
@@ -140,13 +136,26 @@ def _pr_title(draft: Draft, kind: str) -> str:
 
 
 def _pr_body(
-    draft: Draft, kind: str, run_id: str, preview_url: str | None, images: list[dict[str, str]]
+    draft: Draft,
+    kind: str,
+    run_id: str,
+    preview_url: str | None,
+    post_url: str | None,
+    images: list[dict[str, str]],
 ) -> str:
     summary = str(draft.frontmatter.get("summary") or draft.frontmatter.get("description") or "")
     lines = [f"# {draft.title}", ""]
     if summary:
         lines += [summary, ""]
-    if preview_url:
+    # The post's own page inside the preview site is the useful link; the
+    # site root is kept as a second line for anyone who wants to browse from
+    # there. A run recorded before post_url existed carries only the root.
+    if post_url:
+        lines.append(f"Preview: {post_url}")
+        if preview_url and preview_url != post_url:
+            lines.append(preview_url)
+        lines.append("")
+    elif preview_url:
         lines += [f"Preview: {preview_url}", ""]
     lines.append(f"Run: {run_id}")
     if images:
@@ -166,6 +175,7 @@ def _open_or_update_pr(
     kind: str,
     run_id: str,
     preview_url: str | None,
+    post_url: str | None,
     images: list[dict[str, str]],
     built_version: int | None,
 ) -> WatchEntry:
@@ -173,7 +183,7 @@ def _open_or_update_pr(
     instead of a second PR being opened, whether or not this process still
     has the earlier watch record (a restart, or a first-ever publish after
     an abandoned attempt, both go through this same path)."""
-    body = _pr_body(draft, kind, run_id, preview_url, images)
+    body = _pr_body(draft, kind, run_id, preview_url, post_url, images)
     open_prs = ops.list_open_pulls_by_head(branch)
     if open_prs:
         pr = open_prs[0]
@@ -278,8 +288,11 @@ def _publish(
 
     preview_run = store.last_run(draft.id, kind="preview")
     preview_url = None
+    post_url = None
     if preview_run is not None and preview_run.status == "succeeded":
-        preview_url = (preview_run.result or {}).get("preview_url")
+        result = preview_run.result or {}
+        preview_url = result.get("preview_url")
+        post_url = result.get("post_url")
 
     watch = _open_or_update_pr(
         store,
@@ -290,6 +303,7 @@ def _publish(
         "publish",
         run.id,
         preview_url,
+        post_url,
         images,
         run.built_version,
     )
@@ -339,7 +353,7 @@ def _unpublish(
     _reset_branch(ops, default_branch, branch, commit_sha)
 
     watch = _open_or_update_pr(
-        store, ops, default_branch, branch, draft, "unpublish", run.id, None, [], None
+        store, ops, default_branch, branch, draft, "unpublish", run.id, None, None, [], None
     )
 
     store.record_publish_result(

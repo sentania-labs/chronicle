@@ -306,6 +306,62 @@ def test_preview_queues_a_run_and_pins_a_slug(client: TestClient, agent_token: s
     assert status["pr_url"] is None
 
 
+def test_preview_and_status_carry_post_url_beside_preview_url(
+    client: TestClient, agent_token: str
+) -> None:
+    draft_id = new_draft(client, agent_token)
+    save(client, agent_token, draft_id, 0)
+    previewed = client.post(f"/v1/drafts/{draft_id}/actions/preview", headers=auth(agent_token))
+    run_id = previewed.json()["run_id"]
+
+    store = client.app.state.services.store  # type: ignore[attr-defined]
+    store.finish_run(
+        run_id,
+        "test-builder",
+        succeeded=True,
+        result={
+            "preview_url": "https://x/preview/drift-and-recovery/",
+            "post_url": "https://x/preview/drift-and-recovery/2026/08/drift-and-recovery/",
+            "slug": "drift-and-recovery",
+        },
+    )
+
+    status = client.get(f"/v1/drafts/{draft_id}/status", headers=auth(agent_token)).json()
+    assert status["preview_url"] == "https://x/preview/drift-and-recovery/"
+    assert status["post_url"] == "https://x/preview/drift-and-recovery/2026/08/drift-and-recovery/"
+
+    preview = client.get(f"/v1/drafts/{draft_id}/preview", headers=auth(agent_token)).json()
+    assert preview["preview_url"] == "https://x/preview/drift-and-recovery/"
+    assert preview["post_url"] == "https://x/preview/drift-and-recovery/2026/08/drift-and-recovery/"
+
+
+def test_preview_and_status_fall_back_when_the_run_predates_post_url(
+    client: TestClient, agent_token: str
+) -> None:
+    draft_id = new_draft(client, agent_token)
+    save(client, agent_token, draft_id, 0)
+    previewed = client.post(f"/v1/drafts/{draft_id}/actions/preview", headers=auth(agent_token))
+    run_id = previewed.json()["run_id"]
+
+    store = client.app.state.services.store  # type: ignore[attr-defined]
+    store.finish_run(
+        run_id,
+        "test-builder",
+        succeeded=True,
+        result={
+            "preview_url": "https://x/preview/drift-and-recovery/",
+            "slug": "drift-and-recovery",
+        },
+    )
+
+    status = client.get(f"/v1/drafts/{draft_id}/status", headers=auth(agent_token)).json()
+    assert status["preview_url"] == "https://x/preview/drift-and-recovery/"
+    assert status["post_url"] is None
+
+    preview = client.get(f"/v1/drafts/{draft_id}/preview", headers=auth(agent_token)).json()
+    assert preview["post_url"] is None
+
+
 def test_slug_collision_fails_the_action_with_409(client: TestClient, agent_token: str) -> None:
     first = new_draft(client, agent_token)
     save(client, agent_token, first, 0)

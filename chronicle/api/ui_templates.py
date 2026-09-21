@@ -371,7 +371,21 @@ def _draft_card(
         else "-"
     )
     preview_url = (run_info or {}).get("preview_url")
-    preview_link = f'<a href="{escape(preview_url)}">preview</a>' if preview_url else "-"
+    post_url = (run_info or {}).get("post_url")
+    # A run recorded before post_url existed falls back to the site root.
+    primary_url = post_url or preview_url
+    preview_link = (
+        (
+            f'<a href="{escape(primary_url)}">preview</a>'
+            + (
+                f' (<a href="{escape(preview_url)}">site</a>)'
+                if post_url and preview_url and preview_url != post_url
+                else ""
+            )
+        )
+        if primary_url
+        else "-"
+    )
     claim = draft.get("claim")
     claim_text = f"held by {escape(claim['author'])}" if claim else "unclaimed"
     return f"""
@@ -679,7 +693,10 @@ def _status_pill(status: str, details: list[Detail]) -> str:
 
 
 def _post_info(
-    draft: dict[str, Any], last_run: dict[str, Any] | None, preview_url: str | None
+    draft: dict[str, Any],
+    last_run: dict[str, Any] | None,
+    preview_url: str | None,
+    post_url: str | None = None,
 ) -> str:
     claim = draft.get("claim")
     if claim:
@@ -694,8 +711,19 @@ def _post_info(
             f'<form class="inline" method="post" action="/content/drafts/{escape(draft["id"])}/claim">'
             '<button type="submit" class="lat-btn">Claim</button></form></p>'
         )
+    # The post's own page is the primary link; a run recorded before
+    # post_url existed falls back to the preview site's root.
+    primary_url = post_url or preview_url
     preview_link = (
-        f'<p><a href="{escape(preview_url)}">Last built preview</a></p>' if preview_url else ""
+        f'<p><a href="{escape(primary_url)}">Last built preview</a>'
+        + (
+            f' (<a href="{escape(preview_url)}">site</a>)'
+            if post_url and preview_url and preview_url != post_url
+            else ""
+        )
+        + "</p>"
+        if primary_url
+        else ""
     )
     return (
         '<section id="post-info" data-refresh class="lat-card panel">'
@@ -828,6 +856,7 @@ def editor_page(
     feedback: list[dict[str, Any]],
     last_run: dict[str, Any] | None,
     preview_url: str | None,
+    post_url: str | None = None,
     *,
     banner: bool,
     came_back: bool = False,
@@ -892,7 +921,7 @@ def editor_page(
 </form>
 </div>
 <aside class="editor-side">
-{_post_info(draft, last_run, preview_url)}
+{_post_info(draft, last_run, preview_url, post_url)}
 {_panel("frontmatter-panel", "Frontmatter", _frontmatter_fields(frontmatter, draft["images"], draft["slug"], draft_id, include_title=False, form_id=EDIT_FORM_ID), open_=False, refresh=False)}
 {_panel("announcements-panel", "Announcements", _announcement_fields(draft.get("announcements") or {}, draft.get("published"), EDIT_FORM_ID), open_=False, refresh=False)}
 {_panel("feedback-panel", "Feedback", _feedback_log(feedback), open_=True, count=len(feedback))}
@@ -1044,7 +1073,14 @@ def preview_list_page(rows: list[dict[str, Any]], *, banner: bool) -> str:
         table = "".join(
             "<tr>"
             f'<td><a href="/content/drafts/{escape(r["draft_id"])}">{escape(r["title"])}</a></td>'
-            f'<td><a href="{escape(r["preview_url"])}">{escape(r["preview_url"])}</a></td>'
+            f'<td><a href="{escape(r.get("post_url") or r["preview_url"])}">'
+            f"{escape(r.get('post_url') or r['preview_url'])}</a>"
+            + (
+                f' (<a href="{escape(r["preview_url"])}">site</a>)'
+                if r.get("post_url") and r["preview_url"] != r["post_url"]
+                else ""
+            )
+            + "</td>"
             f"<td>{escape(local_time(r['built_at']))}</td>"
             f'<td class="lat-num">{escape(str(r["wall_seconds"]) if r["wall_seconds"] is not None else "-")}</td>'
             f"<td>{_toolchain_badge(r['toolchain_drift'])}</td>"
@@ -1086,9 +1122,21 @@ def _success_result_html(result: dict[str, Any]) -> str:
     page must not render."""
     rows = []
     preview_url = result.get("preview_url")
-    if isinstance(preview_url, str) and preview_url:
-        safe_url = escape(preview_url)
+    post_url = result.get("post_url")
+    # A run recorded before post_url existed falls back to the site root.
+    primary_url = post_url if isinstance(post_url, str) and post_url else preview_url
+    if isinstance(primary_url, str) and primary_url:
+        safe_url = escape(primary_url)
         rows.append(f'<li>preview: <a href="{safe_url}">{safe_url}</a></li>')
+    if (
+        isinstance(post_url, str)
+        and post_url
+        and isinstance(preview_url, str)
+        and preview_url
+        and preview_url != post_url
+    ):
+        safe_site_url = escape(preview_url)
+        rows.append(f'<li>preview site: <a href="{safe_site_url}">{safe_site_url}</a></li>')
     slug = result.get("slug")
     if isinstance(slug, str) and slug:
         rows.append(f"<li>slug: {escape(slug)}</li>")
