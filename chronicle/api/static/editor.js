@@ -791,7 +791,7 @@ function saveStateText(state, detail) {
     }
   }
 
-  function addFeatureOption(filename, select) {
+  function addFeatureOption(filename, url, select) {
     var featureSelect = document.getElementById("featureImage");
     if (!featureSelect) {
       return;
@@ -803,10 +803,21 @@ function saveStateText(state, detail) {
       var option = document.createElement("option");
       option.value = filename;
       option.textContent = filename;
+      // Without this, a freshly uploaded image selected as the feature image
+      // would show in the dropdown but not in the thumbnail or the preview
+      // pane until the next full page load: featureImageSrc reads this
+      // attribute, not the option's text or value.
+      if (url) {
+        option.dataset.imageSrc = url;
+      }
       featureSelect.appendChild(option);
     }
     if (select) {
       featureSelect.value = filename;
+      updateFeatureThumb();
+      if (editor) {
+        editor.codemirror.refresh();
+      }
     }
   }
 
@@ -856,9 +867,9 @@ function saveStateText(state, detail) {
           } else {
             textarea.value += "\n" + outcome.insert + "\n";
           }
-          addFeatureOption(outcome.filename, false);
+          addFeatureOption(outcome.filename, outcome.url, false);
         } else {
-          addFeatureOption(outcome.filename, true);
+          addFeatureOption(outcome.filename, outcome.url, true);
         }
         onChange();
         say(outcome.message, false);

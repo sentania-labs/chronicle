@@ -303,3 +303,121 @@ def test_no_feature_image_selected_renders_nothing_at_the_top(tmp_path: Path) ->
     result = render_feature_preview(tmp_path, "the body text", selected=False)
     assert "<img" not in result["html"]
     assert "the body text" in result["html"]
+
+
+# A freshly uploaded feature image: editor.js's addFeatureOption creates the
+# new <option> client-side (the frontmatter panel does not refresh after an
+# upload, ui_templates._panel's own `refresh=False`), and a round of review
+# on this change found it left that option with no `data-image-src`, so the
+# thumbnail and the preview stayed blank for an image just uploaded and
+# selected as the feature image, until the next full page load. This drives
+# the real upload path (a mocked fetch, a real DataTransfer-backed file
+# input, the actual `#image-form` submit handler) in a full editor.js load,
+# not a hand-rolled replica, since the bug was in wiring between two
+# functions rather than in either one alone.
+UPLOAD_PAGE = """<!doctype html><meta charset="utf-8"><base href="http://localhost/">
+<script>
+window.__error = null;
+window.onerror = function (msg) {{ window.__error = String(msg); }};
+window.fetch = function (url, opts) {{
+  if (String(url).indexOf("/images") !== -1 && opts && opts.method === "POST") {{
+    return Promise.resolve({{
+      json: function () {{
+        return Promise.resolve({{
+          ok: true,
+          filename: "new-feature.png",
+          role: "feature",
+          markdown: null,
+          url: "/content/drafts/d1/images/newsha/file",
+        }});
+      }},
+    }});
+  }}
+  return Promise.resolve({{ text: function () {{ return Promise.resolve("<html></html>"); }} }});
+}};
+</script>
+<div id="editor-app" data-draft-id="d1">
+<form id="edit-form" method="post" action="/content/drafts/d1/save">
+<input type="hidden" id="base_version" value="1">
+<textarea id="body"></textarea>
+</form>
+</div>
+<button id="save-btn">Save</button>
+<span id="save-state"></span>
+<span id="upload-state"></span>
+<select id="featureImage">
+<option value="">none</option>
+</select>
+<img id="featureImageThumb" alt="" hidden>
+<div id="images-panel"></div>
+<form id="image-form">
+<input type="file" id="file">
+<select id="role"><option value="feature" selected>feature</option></select>
+</form>
+<pre id="results"></pre>
+<script src="file://{ui_js}"></script>
+<script src="file://{editor_js}"></script>
+<script>
+var input = document.getElementById("file");
+var dt = new DataTransfer();
+dt.items.add(new File(["x"], "new-feature.png", {{ type: "image/png" }}));
+input.files = dt.files;
+var submitEvent = new Event("submit", {{ bubbles: true, cancelable: true }});
+document.getElementById("image-form").dispatchEvent(submitEvent);
+setTimeout(function () {{
+  var select = document.getElementById("featureImage");
+  var thumb = document.getElementById("featureImageThumb");
+  var option = select.options[select.selectedIndex];
+  document.getElementById("results").textContent = JSON.stringify({{
+    selectValue: select.value,
+    optionHasSrc: !!(option && option.dataset.imageSrc),
+    optionSrc: option && option.dataset.imageSrc,
+    thumbHidden: thumb.hidden,
+    thumbSrc: thumb.src,
+    error: window.__error,
+  }});
+}}, 50);
+</script>
+"""
+
+
+def test_a_freshly_uploaded_feature_image_shows_in_the_thumbnail_without_reload(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "upload.html"
+    page.write_text(
+        UPLOAD_PAGE.format(
+            ui_js=(STATIC / "ui.js").as_posix(),
+            editor_js=(STATIC / "editor.js").as_posix(),
+        ),
+        encoding="utf-8",
+    )
+    assert CHROME is not None
+    result = subprocess.run(
+        [
+            CHROME,
+            "--headless=new",
+            "--no-sandbox",
+            "--disable-gpu",
+            f"--user-data-dir={tmp_path / 'profile'}",
+            "--virtual-time-budget=2000",
+            "--dump-dom",
+            page.as_uri(),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    marker = '<pre id="results">'
+    start = result.stdout.index(marker) + len(marker)
+    text = result.stdout[start : result.stdout.index("</pre>", start)]
+    import html
+
+    out = json.loads(html.unescape(text))
+    assert out["selectValue"] == "new-feature.png"
+    assert out["optionHasSrc"] is True
+    assert out["optionSrc"] == "/content/drafts/d1/images/newsha/file"
+    assert out["thumbHidden"] is False
+    assert out["thumbSrc"].endswith("/content/drafts/d1/images/newsha/file")
