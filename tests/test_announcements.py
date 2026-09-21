@@ -388,6 +388,11 @@ def test_a_ui_conflict_keeps_the_attempted_announcement_text(
     # The conflict page keeps every posted field for the editor's Restore,
     # with no special case for these three.
     assert "typed before the clash" in response.text
+    # Round of review: the attempted pane rendered only frontmatter and body,
+    # so a visitor whose browser could not hold the local backup was told to
+    # copy from a pane that never showed their announcement edits. The visible
+    # summary list must name the channel and carry the attempted text.
+    assert "<li>X: typed before the clash</li>" in response.text
 
 
 def test_the_conflict_page_reload_form_carries_the_current_announcements(

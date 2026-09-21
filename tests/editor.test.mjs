@@ -258,6 +258,21 @@ test("the conflict page never overwrites earlier unanswered work, and stores onl
   assert.equal(conflictBackupAction({ nope: true }, attempted), "write");
 });
 
+test("the conflict backup treats announcement_* fields the same as any other posted field", () => {
+  // conflictBackupAction compares `fields` generically; announcement_x is a
+  // plain form field like title or tags, so a change in it alone must be
+  // enough to keep the offered backup rather than treat it as the same state.
+  const attempted = { body: "EDIT", fields: { title: "t", announcement_x: "typed before the clash" } };
+  assert.equal(
+    conflictBackupAction({ body: "EDIT", fields: { title: "t", announcement_x: "typed before the clash" } }, attempted),
+    "same"
+  );
+  assert.equal(
+    conflictBackupAction({ body: "EDIT", fields: { title: "t", announcement_x: "" } }, attempted),
+    "keep"
+  );
+});
+
 
 test("featureImageSrc reads the selected option's data attribute", () => {
   const select = {

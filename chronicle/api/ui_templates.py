@@ -962,6 +962,7 @@ pane on the right, so copy anything you need from it now.</span></p>
 <section class="lat-card">
 <h2>Your attempted text (not saved, for manual merging)</h2>
 {_attempted_frontmatter_summary(attempted.get("frontmatter", {}))}
+{_attempted_announcements_summary(attempted.get("fields", {}))}
 <pre class="lat-code" id="attempted-body" data-draft-id="{escape(draft["id"])}" data-base-version="{attempted["base_version"]}" data-fields="{escape(json.dumps(attempted.get("fields", {})))}">{escape(attempted.get("body", ""))}</pre>
 </section>
 </div>
@@ -975,6 +976,20 @@ pane on the right, so copy anything you need from it now.</span></p>
         notice_kind="conflict",
         editor_backup=True,
     )
+
+
+def _attempted_announcements_summary(fields: dict[str, Any]) -> str:
+    # The attempted pane otherwise shows only frontmatter and body, so a
+    # visitor whose local-storage backup could not be made (round C-review
+    # finding) had nowhere to read back the announcement text they typed
+    # before the conflict. `fields` is the raw posted form, the same map
+    # `data-fields` carries for editor.js's own backup.
+    rows = "".join(
+        f"<li>{escape(label)}: {escape(str(fields.get(f'announcement_{key}', '')))}</li>"
+        for key, label in ANNOUNCEMENT_LABELS
+        if fields.get(f"announcement_{key}")
+    )
+    return f"<ul class='muted'>{rows}</ul>" if rows else ""
 
 
 def _attempted_frontmatter_summary(frontmatter: dict[str, Any]) -> str:
