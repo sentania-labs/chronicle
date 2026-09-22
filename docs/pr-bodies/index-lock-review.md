@@ -102,3 +102,61 @@ the whole tree for `CalledProcessError`; no site does an exact
 
 Two valid findings (#1 and #3), both fixed and covered by new tests. Five
 other angles checked and found already safe by construction.
+
+## Codex round
+
+Codex reviewed the pushed PR and filed one finding against
+`chronicle/api/digest.py:595`.
+
+### Codex finding (P2): the site lock was released before the read it protects
+
+`clone_or_update`'s `_SITE_GIT_LOCK` serialized the clone itself, but every
+caller released it before reading the clone: `read_hugo_conventions`,
+`discover_posts`, and `parse_toolchain` all ran outside the lock. When two
+refreshes overlap (an hourly reconcile racing the watcher's post-merge
+reconcile, or either racing an admin "run digest now" click), a second
+caller's clone could land between the first caller's clone and its own
+read. `discover_posts` captures a path -> blob sha map with one `ls-tree`
+call, then walks the tree reading each file separately, so a reset landing
+in the middle of that walk hands it new file content paired with an old
+sha. The result: Chronicle persists a post record whose title/body came
+from one commit and whose recorded blob sha came from another, which
+`reconcile.py`'s `content_drift` check reads back later as ground truth.
+
+**Fixed.** `_SITE_GIT_LOCK` is now a `threading.RLock`, exposed through a
+public `digest.site_clone_lock()` context manager. `digest_runner.py`'s
+`refresh_from_target` and `run` both hold it across the whole
+clone-through-apply span (clone, `read_hugo_conventions`, `discover_posts`,
+`with_observed_post_dir`, `store.apply_digest`, `parse_toolchain`).
+`reconcile.py`'s `run` holds it across `refresh_from_target`, its own
+`read_hugo_conventions`/`discover_posts`, and the `_content_drift` loop
+(the one place after that which reads `store.site_dir` a second time, once
+per published draft). `clone_or_update` still takes the same lock itself,
+so a bare call (the admin digest button's only use of it) still
+serializes on its own; the `RLock` is what lets a caller already holding
+`site_clone_lock()` call `clone_or_update` without deadlocking itself.
+
+Each caller's token-minting call (`target.token_provider()` in
+`refresh_from_target`, `_clone_url`'s installation-token mint in `run`)
+runs before the lock is taken: neither touches `data/site/`, and in
+`AppRepoOps`'s case it is one GitHub API call bounded by the client's own
+15-second httpx timeout, not an unbounded wait, so there was no need to
+restructure it further. `reconcile.run` does end up holding that same
+bounded call inside its own outer `site_clone_lock()` (since it wraps the
+whole `refresh_from_target` call), which is documented in a comment there;
+it costs at most 15 seconds against the lock, never unbounded, so it was
+left as is rather than adding new timeout machinery.
+
+Out of scope, named per the fix instructions: the builder's hardlink copy
+of `data/site/` (`chronicle/builder/runner.py`) and the image routes never
+touch `data/site/` directly and are not covered by this lock.
+
+Covered by
+`test_a_second_refresh_cannot_reset_the_clone_while_the_first_is_still_reading_it`
+in `tests/test_digest.py`, confirmed failing against pre-fix HEAD (5d6c4fc)
+first: the first refresh is paused right after its blob-sha map is
+captured, a second refresh is given a bounded window to race ahead and
+reset the clone to a revised commit, and the first refresh is then
+released. Against 5d6c4fc the first goes on to pair the pre-pause sha with
+the post-reset title; against the fix the second cannot even start its
+clone until the first has entirely finished.

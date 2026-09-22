@@ -78,3 +78,24 @@ Full review in `docs/pr-bodies/index-lock-review.md`. Summary:
 The builder's "database is locked" crash on every pod start, believed to be
 the actual source of the lock in the first place, is out of scope here and
 is a separate, already-known issue.
+
+## Codex round
+
+Codex filed one finding (P2, `chronicle/api/digest.py:595`): the shared
+site-clone lock covered `clone_or_update` alone, not the reads that follow
+it. When two refreshes overlap, a second caller's clone could land between
+the first caller's clone and its own read of the tree, pairing one
+commit's blob shas with another commit's file content in the record
+Chronicle persists.
+
+Fixed by making `_SITE_GIT_LOCK` reentrant and holding it across the whole
+clone-through-read/apply span in `digest_runner.py`'s `refresh_from_target`
+and `run`, and in `reconcile.py`'s `run` (through its own
+`read_hugo_conventions`/`discover_posts` and the `_content_drift` loop).
+Full writeup and the fix commit in `docs/pr-bodies/index-lock-review.md`'s
+Codex round section. Covered by a new test in `tests/test_digest.py`,
+confirmed failing against the pre-fix commit first.
+
+Out of scope: the builder's hardlink copy of `data/site/` and the image
+routes never touch `data/site/` directly, so this lock does not reach
+them.
