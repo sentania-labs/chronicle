@@ -73,6 +73,19 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   resolved and does no translation of its own. Records written before this
   name changed still say `scott` and are not rewritten; see ADR 014's
   amendment.
+- **Site-clone git is serialized in one process-wide lock, and a stale
+  `index.lock` is cleared, not just reported.** `digest.clone_or_update`
+  runs every git call against `data/site/` behind `_SITE_GIT_LOCK`, so the
+  hourly reconcile loop, the watcher's post-merge reconcile, and the admin
+  digest route can never race on the same clone. An `index.lock` or
+  `shallow.lock` older than `STALE_GIT_LOCK_SECONDS` (a git step killed
+  mid-write, issue #57's live case) is removed with a logged warning; a
+  younger one is left alone and raises `DigestError` naming the path and
+  its age, since something may still be using it. Every git failure here
+  raises `GitCommandError` (a `CalledProcessError` subclass) whose `str()`
+  carries git's own scrubbed stderr, which is what makes reconcile's and
+  the watcher's existing log calls show the real error, not just an exit
+  code.
 - **A save can change a draft's status.** `PUT /v1/drafts/{id}` on a draft in
   `revision_requested` or `published` moves it to `drafting`. That is not one
   of the API's named actions, so it is modelled as the `revise` action in

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from typing import cast
@@ -413,3 +414,29 @@ def test_publisher_treats_a_digest_created_record_as_an_update(store: Store) -> 
     commit_messages = [commit["message"] for commit in ops.commits.values() if "message" in commit]
     assert any(msg.startswith("chronicle: update hello") for msg in commit_messages)
     assert not any(msg.startswith("chronicle: publish hello") for msg in commit_messages)
+
+
+def test_run_once_logged_shows_gits_stderr_not_just_the_exit_code(
+    store: Store, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Issue #57's second ask: the log only showed
+    `returned non-zero exit status 128`, never git's own error. This drives
+    a real git failure (cloning a repo url that does not exist) through
+    `reconcile.run_once_logged` exactly as the hourly loop would hit one,
+    and checks git's real stderr line reaches the log, not only the
+    generic subprocess message.
+    """
+
+    def _refresh_against_a_bad_url(
+        store_: Store, target: publisher.RepoTarget, actor: str, admin: AdminServices | None = None
+    ) -> None:
+        digest_mod.clone_or_update(store_.site_dir, "file:///no/such/repo/on/this/host", "main")
+
+    monkeypatch.setattr(reconcile, "refresh_from_target", _refresh_against_a_bad_url)
+    caplog.set_level(logging.WARNING)
+
+    reconcile.run_once_logged(store, _ADMIN)
+
+    assert "reconcile: run failed" in caplog.text
+    assert "returned non-zero exit status" in caplog.text
+    assert "fatal" in caplog.text.lower() or "does not exist" in caplog.text.lower()

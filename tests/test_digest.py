@@ -477,9 +477,7 @@ def test_clone_of_a_source_owned_by_a_different_uid_is_not_refused(tmp_path: Pat
     assert sha
 
 
-def test_clone_or_update_clears_a_stale_empty_index_lock(
-    tmp_path: Path, blog_repo: Path
-) -> None:
+def test_clone_or_update_clears_a_stale_empty_index_lock(tmp_path: Path, blog_repo: Path) -> None:
     """Issue #57: an empty `index.lock` left behind by a git step killed
     mid-write must not wedge every later digest forever. A lock stamped
     well before `STALE_GIT_LOCK_SECONDS` is provably abandoned, since
