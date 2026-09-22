@@ -42,6 +42,8 @@ import tempfile
 import threading
 import time
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -59,7 +61,38 @@ log = logging.getLogger("chronicle.api.digest")
 # git against `data/site/`: the builder copies it with hardlinks
 # (`chronicle/builder/runner.py`) and Hugo's own build never shells out to
 # git against it (`--enableGitInfo` is never set, `chronicle/builder/hugo.py`).
-_SITE_GIT_LOCK = threading.Lock()
+#
+# An `RLock`, not a plain `Lock` (round C7 review, P2): the clone alone is
+# not the whole race. A caller that clones and then reads the clone
+# (`read_hugo_conventions`, `discover_posts`, `parse_toolchain`) needs the
+# lock held across that whole span through `site_clone_lock()` below, and
+# `clone_or_update` takes the same lock itself so it still works when
+# called on its own (the admin digest route's only use). Reentrancy is what
+# lets a caller already holding `site_clone_lock()` call `clone_or_update`
+# without deadlocking itself.
+_SITE_GIT_LOCK = threading.RLock()
+
+
+@contextmanager
+def site_clone_lock() -> Iterator[None]:
+    """Hold the process-wide site-clone lock across a clone plus every read of it.
+
+    `clone_or_update` alone only serializes the clone; a caller that reads
+    `data/site/` afterwards (`read_hugo_conventions`, `discover_posts`,
+    `with_observed_post_dir`, `parse_toolchain`, or a store apply that reads
+    the clone) must hold this across the whole span, or a second caller's
+    clone can land in between the first caller's clone and its read,
+    producing a snapshot mixing content and blob shas from two different
+    commits (round C7 review, P2, issue #57's follow-up). `digest_runner.py`
+    and `reconcile.py` are the callers that need this; `clone_or_update`
+    keeps taking `_SITE_GIT_LOCK` itself so a bare call still serializes on
+    its own. Reentrant, so nesting (`site_clone_lock()` wrapping a call that
+    calls `clone_or_update`, which takes the same lock again) does not
+    deadlock.
+    """
+    with _SITE_GIT_LOCK:
+        yield
+
 
 # How old `.git/index.lock` (or `.git/shallow.lock`) must be before it is
 # treated as abandoned rather than live. A few minutes is comfortably

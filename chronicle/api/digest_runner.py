@@ -107,41 +107,65 @@ def refresh_from_target(
     for someone to run a manual digest. The watcher's own call (right after
     observing a merge, before reconciliation runs again) omits `admin`,
     since the reconcile pass that follows the same merge covers it.
+
+    `token_provider()` runs before `site_clone_lock()` is taken: it is
+    either instant (test-token mode) or one bounded GitHub API call
+    (`AppRepoOps`'s own 15s httpx timeout), never a git call against
+    `data/site/`, so it does not need the lock and must not sit inside it.
+    Everything from the clone through `parse_toolchain` runs under the
+    lock (round C7 review, P2): the clone alone being serialized was not
+    enough, since a second caller's clone could still land between this
+    call's clone and its own read of the same tree.
     """
     token = target.token_provider() if target.token_provider else None
-    digest_mod.clone_or_update(store.site_dir, target.repo_url, target.default_branch, token=token)
-    conventions = digest_mod.read_hugo_conventions(store.site_dir)
-    discovered = digest_mod.discover_posts(store.site_dir, conventions)
-    conventions = digest_mod.with_observed_post_dir(conventions, discovered)
-    posts = [
-        Post(slug=item.slug, path=item.path, title=item.title, date=item.date, sha=item.sha)
-        for item in discovered
-    ]
-    store.apply_digest(actor, posts, conventions)
-    if admin is not None:
-        toolchain = digest_mod.parse_toolchain(store.site_dir)
-        admin.write_toolchain(
-            {
-                "hugo_version": toolchain.hugo_version,
-                "submodules": toolchain.submodules,
-                "conventions": conventions.as_dict(),
-            }
+    with digest_mod.site_clone_lock():
+        digest_mod.clone_or_update(
+            store.site_dir, target.repo_url, target.default_branch, token=token
         )
+        conventions = digest_mod.read_hugo_conventions(store.site_dir)
+        discovered = digest_mod.discover_posts(store.site_dir, conventions)
+        conventions = digest_mod.with_observed_post_dir(conventions, discovered)
+        posts = [
+            Post(slug=item.slug, path=item.path, title=item.title, date=item.date, sha=item.sha)
+            for item in discovered
+        ]
+        store.apply_digest(actor, posts, conventions)
+        if admin is not None:
+            toolchain = digest_mod.parse_toolchain(store.site_dir)
+            admin.write_toolchain(
+                {
+                    "hugo_version": toolchain.hugo_version,
+                    "submodules": toolchain.submodules,
+                    "conventions": conventions.as_dict(),
+                }
+            )
 
 
 def run(store: Store, actor: str, admin: AdminServices | None = None) -> DigestSummary:
+    """Clone (or fetch) main, read its conventions and posts, apply them.
+
+    `_clone_url` resolves the repo URL and token, including the same
+    bounded installation-token GitHub API call `refresh_from_target` makes,
+    before `site_clone_lock()` is taken; it never touches `data/site/`, so
+    it stays outside the lock. Everything from the clone through
+    `parse_toolchain` runs under the lock, for the same reason
+    `refresh_from_target` needs it (round C7 review, P2): a second caller's
+    clone landing between this call's clone and its own read would produce
+    a snapshot mixing content and blob shas from two different commits.
+    """
     started_at = now_stamp()
     repo_url, branch, token = _clone_url(admin)
-    digest_mod.clone_or_update(store.site_dir, repo_url, branch, token=token)
-    conventions = digest_mod.read_hugo_conventions(store.site_dir)
-    discovered = digest_mod.discover_posts(store.site_dir, conventions)
-    conventions = digest_mod.with_observed_post_dir(conventions, discovered)
-    posts = [
-        Post(slug=item.slug, path=item.path, title=item.title, date=item.date, sha=item.sha)
-        for item in discovered
-    ]
-    counts = store.apply_digest(actor, posts, conventions)
-    toolchain = digest_mod.parse_toolchain(store.site_dir)
+    with digest_mod.site_clone_lock():
+        digest_mod.clone_or_update(store.site_dir, repo_url, branch, token=token)
+        conventions = digest_mod.read_hugo_conventions(store.site_dir)
+        discovered = digest_mod.discover_posts(store.site_dir, conventions)
+        conventions = digest_mod.with_observed_post_dir(conventions, discovered)
+        posts = [
+            Post(slug=item.slug, path=item.path, title=item.title, date=item.date, sha=item.sha)
+            for item in discovered
+        ]
+        counts = store.apply_digest(actor, posts, conventions)
+        toolchain = digest_mod.parse_toolchain(store.site_dir)
 
     finished_at = now_stamp()
     summary = DigestSummary(

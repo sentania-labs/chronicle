@@ -13,12 +13,13 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from chronicle.api import digest
 from chronicle.api.admin_deps import AdminServices
-from chronicle.api.digest_runner import DigestNotConfigured
+from chronicle.api.digest_runner import DigestNotConfigured, refresh_from_target
 from chronicle.api.digest_runner import run as run_digest
 from chronicle.api.store import Store
 from tests.conftest import requires_hugo
@@ -600,3 +601,113 @@ def test_run_raises_digest_error_on_timeout_and_releases_the_lock(
 
     sha = digest.clone_or_update(site_dir, str(blog_repo), "main")
     assert sha
+
+
+def test_a_second_refresh_cannot_reset_the_clone_while_the_first_is_still_reading_it(
+    tmp_path: Path, blog_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round C7 review, P2 (digest.py:595): `_SITE_GIT_LOCK` used to cover
+    only `clone_or_update`, not the reads (`read_hugo_conventions`,
+    `discover_posts`, `parse_toolchain`) that follow it. If a second
+    refresh's reset lands between the first refresh's clone and its own
+    read, the first can pair one commit's blob shas with another commit's
+    file content: `discover_posts` captures a path -> sha map with one
+    `ls-tree`, then walks and reads each file separately, so a reset in
+    between hands it new content for an old sha.
+
+    Reproduced deterministically: the first refresh is paused right after
+    its blob-sha map is captured (before it reads any file), a second
+    refresh starts concurrently, and the remote is advanced while the first
+    is paused. This fails against HEAD 5d6c4fc (the lock released as soon
+    as the first refresh's own clone finished, so the second's clone and
+    reset ran while the first was still paused, and the first went on to
+    pair the old sha with the new title). Fixed: the lock now covers the
+    whole clone-through-read span, so the second cannot even start its
+    clone until the first refresh has entirely finished.
+    """
+    store, admin = _build(tmp_path / "data", blog_repo, monkeypatch)
+
+    reference_dir = tmp_path / "site-reference"
+    digest.clone_or_update(reference_dir, str(blog_repo), "main")
+    commit_a_sha = digest._blob_shas(reference_dir)["content/posts/first-post.md"]
+
+    reached_pause = threading.Event()
+    release_pause = threading.Event()
+    real_blob_shas = digest._blob_shas
+
+    def pausing_blob_shas(site_dir: Path) -> dict[str, str]:
+        shas = real_blob_shas(site_dir)
+        reached_pause.set()
+        release_pause.wait(timeout=10)
+        return shas
+
+    monkeypatch.setattr(digest, "_blob_shas", pausing_blob_shas)
+
+    real_discover_posts = digest.discover_posts
+    discovered_by_thread: dict[str, list[digest.DiscoveredPost]] = {}
+
+    def tracking_discover_posts(
+        site_dir: Path, conventions: digest.HugoConventions | None = None
+    ) -> list[digest.DiscoveredPost]:
+        result = real_discover_posts(site_dir, conventions)
+        discovered_by_thread[threading.current_thread().name] = result
+        return result
+
+    monkeypatch.setattr(digest, "discover_posts", tracking_discover_posts)
+
+    target = SimpleNamespace(
+        repo_url=str(blog_repo), default_branch="main", token_provider=lambda: None
+    )
+
+    errors: list[Exception] = []
+
+    def first_refresh() -> None:
+        try:
+            refresh_from_target(store, target, "chronicle", admin=admin)
+        except Exception as exc:  # noqa: BLE001 - captured for the assertion below
+            errors.append(exc)
+
+    first_thread = threading.Thread(target=first_refresh, name="first")
+    first_thread.start()
+    assert reached_pause.wait(timeout=10), "first refresh never reached its paused blob-sha read"
+
+    post_path = blog_repo / "content" / "posts" / "first-post.md"
+    post_path.write_text(
+        "---\ntitle: First Post Revised\ndate: 2024-01-01\n---\nbody one, edited\n",
+        encoding="utf-8",
+    )
+    _git(blog_repo, "add", "-A")
+    _git(blog_repo, "commit", "-m", "revise first post while the first refresh is paused")
+
+    def second_refresh() -> None:
+        try:
+            refresh_from_target(store, target, "chronicle", admin=admin)
+        except Exception as exc:  # noqa: BLE001 - captured for the assertion below
+            errors.append(exc)
+
+    second_thread = threading.Thread(target=second_refresh, name="second")
+    second_thread.start()
+
+    # A bounded window for the second refresh to race ahead while the
+    # first is paused, before releasing the first. Under the fix, the
+    # second cannot get past the lock at all in this window, since the
+    # first is still holding it (paused mid-read, not released); under the
+    # bug, this is ample time for a clone and reset of a small local repo
+    # to complete.
+    second_thread.join(timeout=1.0)
+
+    release_pause.set()
+    first_thread.join(timeout=15)
+    second_thread.join(timeout=15)
+
+    assert not first_thread.is_alive() and not second_thread.is_alive()
+    assert not errors, errors
+
+    # The first refresh's own discovery must pair one commit's content with
+    # that same commit's blob sha. Under the bug, the second refresh's
+    # reset (above) already landed on disk by the time the first resumed,
+    # so the first paired the pre-pause sha (commit A) with the post-reset
+    # title (commit B's "First Post Revised").
+    first_post = next(p for p in discovered_by_thread["first"] if p.slug == "first-post")
+    assert first_post.sha == commit_a_sha
+    assert first_post.title == "First Post"

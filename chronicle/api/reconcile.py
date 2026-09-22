@@ -76,81 +76,99 @@ def _allowed_frontmatter(raw: dict[str, object]) -> dict[str, object]:
 
 
 def run(store: Store, admin: AdminServices, actor: str = RECONCILE_ACTOR) -> ReconcileSummary:
+    """Refresh from main, then compare it against Chronicle's own records.
+
+    Everything from `refresh_from_target`'s clone through `_content_drift`'s
+    read of a landed post's source file runs under `digest_mod.site_clone_lock()`
+    (round C7 review, P2): `refresh_from_target` already needs the lock held
+    across its own clone-then-read span, and this function's own
+    `read_hugo_conventions`/`discover_posts` plus the `_content_drift` loop
+    (which reads `store.site_dir` a second time, for each drafted post) are
+    further reads of the same clone that a concurrent reconcile, watch, or
+    admin digest could otherwise reset out from under. The lock is
+    reentrant, so `refresh_from_target` taking it again internally does not
+    deadlock. `refresh_from_target` calls `target.token_provider()` (a
+    bounded GitHub API call, or instant in test-token mode) before it takes
+    the lock itself, so that call sits inside this function's outer lock
+    for its own bounded 15s at most, never unbounded; nothing else run in
+    this span makes a network call.
+    """
     target = build_repo_target(admin)
     if target is None:
         raise ReconcileNotConfigured("no GitHub App or test-token repo is configured yet")
 
-    refresh_from_target(store, target, actor, admin=admin)
-    conventions = digest_mod.read_hugo_conventions(store.site_dir)
-    discovered = digest_mod.discover_posts(store.site_dir, conventions)
-    discovered_by_slug = {item.slug: item for item in discovered}
+    with digest_mod.site_clone_lock():
+        refresh_from_target(store, target, actor, admin=admin)
+        conventions = digest_mod.read_hugo_conventions(store.site_dir)
+        discovered = digest_mod.discover_posts(store.site_dir, conventions)
+        discovered_by_slug = {item.slug: item for item in discovered}
 
-    drafts = store.list_drafts()
-    published_by_slug = {d.slug: d for d in drafts if d.status == "published" and d.slug}
-    posts = store.list_posts()
+        drafts = store.list_drafts()
+        published_by_slug = {d.slug: d for d in drafts if d.status == "published" and d.slug}
+        posts = store.list_posts()
 
-    flags_created = 0
+        flags_created = 0
 
-    for draft in drafts:
-        if draft.status != "published" or not draft.slug:
-            continue
-        if draft.slug not in discovered_by_slug:
+        for draft in drafts:
+            if draft.status != "published" or not draft.slug:
+                continue
+            if draft.slug not in discovered_by_slug:
+                flags_created += _create_if_new(
+                    store,
+                    "draft_published_missing_on_main",
+                    slug=draft.slug,
+                    draft_id=draft.id,
+                    detail=f"draft {draft.id} is published but slug {draft.slug!r} is not on main",
+                    actor=actor,
+                )
+
+        for post in posts:
+            if post.slug in discovered_by_slug or post.slug in published_by_slug:
+                continue
             flags_created += _create_if_new(
                 store,
-                "draft_published_missing_on_main",
-                slug=draft.slug,
-                draft_id=draft.id,
-                detail=f"draft {draft.id} is published but slug {draft.slug!r} is not on main",
+                "post_removed_without_unpublish",
+                slug=post.slug,
+                draft_id=None,
+                detail=f"post {post.slug!r} was on main (last seen {post.date}) and is gone,"
+                " with no published draft and no unpublish run",
                 actor=actor,
             )
 
-    for post in posts:
-        if post.slug in discovered_by_slug or post.slug in published_by_slug:
-            continue
-        flags_created += _create_if_new(
-            store,
-            "post_removed_without_unpublish",
-            slug=post.slug,
-            draft_id=None,
-            detail=f"post {post.slug!r} was on main (last seen {post.date}) and is gone,"
-            " with no published draft and no unpublish run",
-            actor=actor,
-        )
+        for item in discovered:
+            if item.slug in published_by_slug:
+                continue
+            flags_created += _create_if_new(
+                store,
+                "post_on_main_without_published_draft",
+                slug=item.slug,
+                draft_id=None,
+                detail=f"post {item.slug!r} is on main at {item.path} with no published draft"
+                " tracking it",
+                actor=actor,
+            )
 
-    for item in discovered:
-        if item.slug in published_by_slug:
-            continue
-        flags_created += _create_if_new(
-            store,
-            "post_on_main_without_published_draft",
-            slug=item.slug,
-            draft_id=None,
-            detail=f"post {item.slug!r} is on main at {item.path} with no published draft"
-            " tracking it",
-            actor=actor,
-        )
+        for draft in drafts:
+            if draft.status != "published" or not draft.published:
+                continue
+            post_path = draft.published.get("post_path")
+            if not post_path:
+                continue
+            landed = next((item for item in discovered if item.path == post_path), None)
+            if landed is None or landed.slug == draft.slug:
+                continue
+            flags_created += _create_if_new(
+                store,
+                "slug_drift",
+                slug=landed.slug,
+                draft_id=draft.id,
+                detail=f"draft {draft.id} is pinned to slug {draft.slug!r} but main now names"
+                f" {post_path} with slug {landed.slug!r}",
+                actor=actor,
+            )
 
-    for draft in drafts:
-        if draft.status != "published" or not draft.published:
-            continue
-        post_path = draft.published.get("post_path")
-        if not post_path:
-            continue
-        landed = next((item for item in discovered if item.path == post_path), None)
-        if landed is None or landed.slug == draft.slug:
-            continue
-        flags_created += _create_if_new(
-            store,
-            "slug_drift",
-            slug=landed.slug,
-            draft_id=draft.id,
-            detail=f"draft {draft.id} is pinned to slug {draft.slug!r} but main now names"
-            f" {post_path} with slug {landed.slug!r}",
-            actor=actor,
-        )
-
-    for draft in drafts:
-        flags_created += _content_drift(store, draft, discovered_by_slug, actor)
+        for draft in drafts:
+            flags_created += _content_drift(store, draft, discovered_by_slug, actor)
 
     return ReconcileSummary(
         flags_created=flags_created, checked_posts=len(posts), checked_drafts=len(drafts)
