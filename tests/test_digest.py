@@ -8,14 +8,18 @@ against the actual blog repo.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from chronicle.api import digest
 from chronicle.api.admin_deps import AdminServices
-from chronicle.api.digest_runner import DigestNotConfigured
+from chronicle.api.digest_runner import DigestNotConfigured, refresh_from_target
 from chronicle.api.digest_runner import run as run_digest
 from chronicle.api.store import Store
 from tests.conftest import requires_hugo
@@ -472,3 +476,238 @@ def test_clone_of_a_source_owned_by_a_different_uid_is_not_refused(tmp_path: Pat
     destination = tmp_path / "dest"
     sha = digest.clone_or_update(destination, str(repo))
     assert sha
+
+
+def test_clone_or_update_clears_a_stale_empty_index_lock(tmp_path: Path, blog_repo: Path) -> None:
+    """Issue #57: an empty `index.lock` left behind by a git step killed
+    mid-write must not wedge every later digest forever. A lock stamped
+    well before `STALE_GIT_LOCK_SECONDS` is provably abandoned, since
+    `clone_or_update` serializes every git call in this process behind
+    one lock, so nothing this process is doing could still be holding it.
+    """
+    site_dir = tmp_path / "site"
+    digest.clone_or_update(site_dir, str(blog_repo), "main")
+
+    lock_path = site_dir / ".git" / "index.lock"
+    lock_path.write_bytes(b"")
+    stale_time = time.time() - digest.STALE_GIT_LOCK_SECONDS - 60
+    os.utime(lock_path, (stale_time, stale_time))
+
+    (blog_repo / "content" / "posts" / "another.md").write_text(
+        "---\ntitle: Another\ndate: 2024-03-03\n---\nmore body\n", encoding="utf-8"
+    )
+    _git(blog_repo, "add", "-A")
+    _git(blog_repo, "commit", "-m", "another post")
+
+    sha = digest.clone_or_update(site_dir, str(blog_repo), "main")
+
+    assert not lock_path.exists()
+    remote_head = subprocess.run(
+        ["git", "-C", str(blog_repo), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=digest.GIT_ENV,
+    ).stdout.strip()
+    assert sha == remote_head
+
+
+def test_clone_or_update_refuses_a_fresh_index_lock(tmp_path: Path, blog_repo: Path) -> None:
+    site_dir = tmp_path / "site"
+    digest.clone_or_update(site_dir, str(blog_repo), "main")
+
+    lock_path = site_dir / ".git" / "index.lock"
+    lock_path.write_bytes(b"")
+
+    with pytest.raises(digest.DigestError) as excinfo:
+        digest.clone_or_update(site_dir, str(blog_repo), "main")
+
+    assert str(lock_path) in str(excinfo.value)
+    assert lock_path.exists()
+
+
+def test_git_command_error_scrubs_userinfo_url_and_authorization_header() -> None:
+    original = subprocess.CalledProcessError(
+        128,
+        ["git", "fetch"],
+        output="",
+        stderr=(
+            "fatal: could not read from"
+            " 'https://x-access-token:SECRET@github.com/o/r.git'\n"
+            "AUTHORIZATION: basic c2VjcmV0dG9rZW4=\n"
+        ),
+    )
+    err = digest.GitCommandError(original)
+    text = str(err)
+    assert "SECRET" not in text
+    assert "c2VjcmV0dG9rZW4=" not in text
+    assert "[redacted]" in text
+
+
+def test_two_threads_cloning_the_same_site_never_race_on_index_lock(
+    tmp_path: Path, blog_repo: Path
+) -> None:
+    site_dir = tmp_path / "site"
+    digest.clone_or_update(site_dir, str(blog_repo), "main")
+
+    errors: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            digest.clone_or_update(site_dir, str(blog_repo), "main")
+        except Exception as exc:  # noqa: BLE001 - captured for the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors, errors
+    assert not (site_dir / ".git" / "index.lock").exists()
+
+
+def test_run_raises_digest_error_on_timeout_and_releases_the_lock(
+    tmp_path: Path, blog_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #57 follow-up: an untimed `_run` would let a hung git process
+    hold `_SITE_GIT_LOCK` forever, stalling every later reconcile, watch, or
+    admin digest behind it. A timeout must fail the hung call with a
+    `DigestError` naming the subcommand (never a token, since a token only
+    ever reaches git through `_auth_env`'s environment, not argv) and must
+    still release the lock, so the very next `clone_or_update` succeeds.
+    """
+    site_dir = tmp_path / "site"
+    digest.clone_or_update(site_dir, str(blog_repo), "main")
+
+    real_run = subprocess.run
+
+    def hanging_run(cmd, **kwargs):
+        if cmd[:2] == ["git", "fetch"]:
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout") or 0)
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", hanging_run)
+
+    with pytest.raises(digest.DigestError) as excinfo:
+        digest.clone_or_update(site_dir, str(blog_repo), "main", token="super-secret-token")
+
+    message = str(excinfo.value)
+    assert "fetch" in message
+    assert "super-secret-token" not in message
+
+    monkeypatch.setattr(subprocess, "run", real_run)
+
+    sha = digest.clone_or_update(site_dir, str(blog_repo), "main")
+    assert sha
+
+
+def test_a_second_refresh_cannot_reset_the_clone_while_the_first_is_still_reading_it(
+    tmp_path: Path, blog_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round C7 review, P2 (digest.py:595): `_SITE_GIT_LOCK` used to cover
+    only `clone_or_update`, not the reads (`read_hugo_conventions`,
+    `discover_posts`, `parse_toolchain`) that follow it. If a second
+    refresh's reset lands between the first refresh's clone and its own
+    read, the first can pair one commit's blob shas with another commit's
+    file content: `discover_posts` captures a path -> sha map with one
+    `ls-tree`, then walks and reads each file separately, so a reset in
+    between hands it new content for an old sha.
+
+    Reproduced deterministically: the first refresh is paused right after
+    its blob-sha map is captured (before it reads any file), a second
+    refresh starts concurrently, and the remote is advanced while the first
+    is paused. This fails against HEAD 5d6c4fc (the lock released as soon
+    as the first refresh's own clone finished, so the second's clone and
+    reset ran while the first was still paused, and the first went on to
+    pair the old sha with the new title). Fixed: the lock now covers the
+    whole clone-through-read span, so the second cannot even start its
+    clone until the first refresh has entirely finished.
+    """
+    store, admin = _build(tmp_path / "data", blog_repo, monkeypatch)
+
+    reference_dir = tmp_path / "site-reference"
+    digest.clone_or_update(reference_dir, str(blog_repo), "main")
+    commit_a_sha = digest._blob_shas(reference_dir)["content/posts/first-post.md"]
+
+    reached_pause = threading.Event()
+    release_pause = threading.Event()
+    real_blob_shas = digest._blob_shas
+
+    def pausing_blob_shas(site_dir: Path) -> dict[str, str]:
+        shas = real_blob_shas(site_dir)
+        reached_pause.set()
+        release_pause.wait(timeout=10)
+        return shas
+
+    monkeypatch.setattr(digest, "_blob_shas", pausing_blob_shas)
+
+    real_discover_posts = digest.discover_posts
+    discovered_by_thread: dict[str, list[digest.DiscoveredPost]] = {}
+
+    def tracking_discover_posts(
+        site_dir: Path, conventions: digest.HugoConventions | None = None
+    ) -> list[digest.DiscoveredPost]:
+        result = real_discover_posts(site_dir, conventions)
+        discovered_by_thread[threading.current_thread().name] = result
+        return result
+
+    monkeypatch.setattr(digest, "discover_posts", tracking_discover_posts)
+
+    target = SimpleNamespace(
+        repo_url=str(blog_repo), default_branch="main", token_provider=lambda: None
+    )
+
+    errors: list[Exception] = []
+
+    def first_refresh() -> None:
+        try:
+            refresh_from_target(store, target, "chronicle", admin=admin)
+        except Exception as exc:  # noqa: BLE001 - captured for the assertion below
+            errors.append(exc)
+
+    first_thread = threading.Thread(target=first_refresh, name="first")
+    first_thread.start()
+    assert reached_pause.wait(timeout=10), "first refresh never reached its paused blob-sha read"
+
+    post_path = blog_repo / "content" / "posts" / "first-post.md"
+    post_path.write_text(
+        "---\ntitle: First Post Revised\ndate: 2024-01-01\n---\nbody one, edited\n",
+        encoding="utf-8",
+    )
+    _git(blog_repo, "add", "-A")
+    _git(blog_repo, "commit", "-m", "revise first post while the first refresh is paused")
+
+    def second_refresh() -> None:
+        try:
+            refresh_from_target(store, target, "chronicle", admin=admin)
+        except Exception as exc:  # noqa: BLE001 - captured for the assertion below
+            errors.append(exc)
+
+    second_thread = threading.Thread(target=second_refresh, name="second")
+    second_thread.start()
+
+    # A bounded window for the second refresh to race ahead while the
+    # first is paused, before releasing the first. Under the fix, the
+    # second cannot get past the lock at all in this window, since the
+    # first is still holding it (paused mid-read, not released); under the
+    # bug, this is ample time for a clone and reset of a small local repo
+    # to complete.
+    second_thread.join(timeout=1.0)
+
+    release_pause.set()
+    first_thread.join(timeout=15)
+    second_thread.join(timeout=15)
+
+    assert not first_thread.is_alive() and not second_thread.is_alive()
+    assert not errors, errors
+
+    # The first refresh's own discovery must pair one commit's content with
+    # that same commit's blob sha. Under the bug, the second refresh's
+    # reset (above) already landed on disk by the time the first resumed,
+    # so the first paired the pre-pause sha (commit A) with the post-reset
+    # title (commit B's "First Post Revised").
+    first_post = next(p for p in discovered_by_thread["first"] if p.slug == "first-post")
+    assert first_post.sha == commit_a_sha
+    assert first_post.title == "First Post"

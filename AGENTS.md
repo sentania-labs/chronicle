@@ -73,6 +73,34 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   resolved and does no translation of its own. Records written before this
   name changed still say `scott` and are not rewritten; see ADR 014's
   amendment.
+- **Site-clone git is serialized in one process-wide lock, held across the
+  clone AND every read of it, and a stale `index.lock` is cleared, not just
+  reported.** `digest._SITE_GIT_LOCK` is a reentrant lock; `clone_or_update`
+  still takes it itself for a bare call, but `digest_runner.py`'s
+  `refresh_from_target`/`run` and `reconcile.py`'s `run` all hold it via
+  `digest.site_clone_lock()` across the whole clone-through-read/apply span
+  (`read_hugo_conventions`, `discover_posts`, `parse_toolchain`, and
+  `reconcile.py`'s own later read of `store.site_dir` in `_content_drift`).
+  Covering the clone alone was not enough (round C7 review, P2): a second
+  caller's clone could land between a first caller's clone and its own
+  read, pairing one commit's blob shas with another commit's file content.
+  This is what lets the hourly reconcile loop, the watcher's post-merge
+  reconcile, and the admin digest route never race on the same clone or
+  read a torn snapshot of it. An `index.lock` or `shallow.lock` older than
+  `STALE_GIT_LOCK_SECONDS` (a git step killed mid-write, issue #57's live
+  case) is removed with a logged warning; a younger one is left alone and
+  raises `DigestError` naming the path and its age, since something may
+  still be using it. Every git failure here raises `GitCommandError` (a
+  `CalledProcessError` subclass) whose `str()` carries git's own scrubbed
+  stderr, which is what makes reconcile's and the watcher's existing log
+  calls show the real error, not just an exit code. Every call also runs
+  under `GIT_TIMEOUT_SECONDS`, so one hung fetch can never hold the lock
+  forever and stall every later reconcile, watch, and admin digest behind
+  it; a timeout raises `DigestError` naming the subcommand instead. A
+  caller's GitHub API token mint (`target.token_provider()`) runs before
+  the lock is taken where the caller controls that directly; `reconcile.run`
+  ends up holding it inside its own outer lock instead, bounded by the
+  GitHub client's own 15s httpx timeout, never unbounded.
 - **A save can change a draft's status.** `PUT /v1/drafts/{id}` on a draft in
   `revision_requested` or `published` moves it to `drafting`. That is not one
   of the API's named actions, so it is modelled as the `revise` action in

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from typing import cast
@@ -413,3 +414,55 @@ def test_publisher_treats_a_digest_created_record_as_an_update(store: Store) -> 
     commit_messages = [commit["message"] for commit in ops.commits.values() if "message" in commit]
     assert any(msg.startswith("chronicle: update hello") for msg in commit_messages)
     assert not any(msg.startswith("chronicle: publish hello") for msg in commit_messages)
+
+
+def test_run_once_logged_shows_gits_stderr_not_just_the_exit_code(
+    store: Store, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Issue #57's second ask: the log only showed
+    `returned non-zero exit status 128`, never git's own error. This drives
+    a real git failure (cloning a repo url that does not exist) through
+    `reconcile.run_once_logged` exactly as the hourly loop would hit one,
+    and checks git's real stderr line reaches the log, not only the
+    generic subprocess message.
+    """
+
+    def _refresh_against_a_bad_url(
+        store_: Store, target: publisher.RepoTarget, actor: str, admin: AdminServices | None = None
+    ) -> None:
+        digest_mod.clone_or_update(store_.site_dir, "file:///no/such/repo/on/this/host", "main")
+
+    monkeypatch.setattr(reconcile, "refresh_from_target", _refresh_against_a_bad_url)
+    caplog.set_level(logging.WARNING)
+
+    reconcile.run_once_logged(store, _ADMIN)
+
+    assert "reconcile: run failed" in caplog.text
+    assert "returned non-zero exit status" in caplog.text
+    assert "fatal" in caplog.text.lower() or "does not exist" in caplog.text.lower()
+
+
+def test_run_once_logged_treats_a_refused_stale_lock_as_an_expected_failure(
+    store: Store, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`digest.DigestError` (raised when `clone_or_update` refuses a lock
+    that is not yet old enough to call stale) must land in the same
+    "will retry next trigger" path as a plain git failure, not the
+    `_run_once_never_raises` catch-all for a genuinely unexpected bug.
+    Adversarial review of this change found `DigestError` missing from
+    `run_once_logged`'s except tuple, which would have logged a stale-lock
+    refusal as "unexpected failure" instead.
+    """
+
+    def _refresh_that_hits_a_fresh_lock(
+        store_: Store, target: publisher.RepoTarget, actor: str, admin: AdminServices | None = None
+    ) -> None:
+        raise digest_mod.DigestError("data/site/.git/index.lock exists and is 4s old")
+
+    monkeypatch.setattr(reconcile, "refresh_from_target", _refresh_that_hits_a_fresh_lock)
+    caplog.set_level(logging.WARNING)
+
+    reconcile.run_once_logged(store, _ADMIN)
+
+    assert "reconcile: run failed, will retry next trigger" in caplog.text
+    assert "unexpected failure" not in caplog.text

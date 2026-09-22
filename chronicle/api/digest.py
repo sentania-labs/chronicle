@@ -39,7 +39,11 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
+import time
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -47,6 +51,63 @@ from typing import Any
 import yaml
 
 log = logging.getLogger("chronicle.api.digest")
+
+# Every call to `clone_or_update` against the one `data/site/` clone this
+# process manages runs behind this lock, so two threads (the hourly
+# reconcile loop, the watcher's post-merge reconcile, the admin digest
+# route) can never race on the same working tree, and so a lock file this
+# process's own git process holds is never mistaken for a stale one by
+# another thread in the same process. Nothing outside the api process runs
+# git against `data/site/`: the builder copies it with hardlinks
+# (`chronicle/builder/runner.py`) and Hugo's own build never shells out to
+# git against it (`--enableGitInfo` is never set, `chronicle/builder/hugo.py`).
+#
+# An `RLock`, not a plain `Lock` (round C7 review, P2): the clone alone is
+# not the whole race. A caller that clones and then reads the clone
+# (`read_hugo_conventions`, `discover_posts`, `parse_toolchain`) needs the
+# lock held across that whole span through `site_clone_lock()` below, and
+# `clone_or_update` takes the same lock itself so it still works when
+# called on its own (the admin digest route's only use). Reentrancy is what
+# lets a caller already holding `site_clone_lock()` call `clone_or_update`
+# without deadlocking itself.
+_SITE_GIT_LOCK = threading.RLock()
+
+
+@contextmanager
+def site_clone_lock() -> Iterator[None]:
+    """Hold the process-wide site-clone lock across a clone plus every read of it.
+
+    `clone_or_update` alone only serializes the clone; a caller that reads
+    `data/site/` afterwards (`read_hugo_conventions`, `discover_posts`,
+    `with_observed_post_dir`, `parse_toolchain`, or a store apply that reads
+    the clone) must hold this across the whole span, or a second caller's
+    clone can land in between the first caller's clone and its read,
+    producing a snapshot mixing content and blob shas from two different
+    commits (round C7 review, P2, issue #57's follow-up). `digest_runner.py`
+    and `reconcile.py` are the callers that need this; `clone_or_update`
+    keeps taking `_SITE_GIT_LOCK` itself so a bare call still serializes on
+    its own. Reentrant, so nesting (`site_clone_lock()` wrapping a call that
+    calls `clone_or_update`, which takes the same lock again) does not
+    deadlock.
+    """
+    with _SITE_GIT_LOCK:
+        yield
+
+
+# How old `.git/index.lock` (or `.git/shallow.lock`) must be before it is
+# treated as abandoned rather than live. A few minutes is comfortably
+# longer than any fetch or reset this module runs against the blog repo
+# takes, so a lock still younger than this may belong to a genuinely
+# running git process and must be left alone; only a lock stamped well
+# before that gets removed, on the theory that whatever git process
+# created it has already died (the root cause reported in issue #57: a
+# git step killed mid-write by the builder's own crash loop).
+STALE_GIT_LOCK_SECONDS = 300.0
+
+# The lock files a hard reset or a shallow fetch can leave behind mid-write.
+# Not a general lock janitor: only these two, both directly in the path of
+# `clone_or_update`'s existing-clone steps.
+_GIT_LOCK_NAMES = ("index.lock", "shallow.lock")
 
 # The pre-ADR-017 hardcoded convention, kept as the fallback `contentdir`
 # `read_hugo_conventions` uses when Hugo's own config cannot be read: a walk
@@ -59,6 +120,18 @@ HUGO_WORKFLOW_PATH = ".github/workflows/hugo.yml"
 HUGO_ENVIRONMENT_ENV = "CHRONICLE_HUGO_ENVIRONMENT"
 DEFAULT_HUGO_ENVIRONMENT = "production"
 HUGO_CONFIG_TIMEOUT_SECONDS = 20.0
+# Every git call `_run` makes against `data/site/` runs under this timeout.
+# `_run`'s calls all run inside `clone_or_update`'s `_SITE_GIT_LOCK`, so a
+# git process that hangs (a stalled network fetch is the realistic case)
+# would otherwise hold that process-wide lock forever, stalling every later
+# reconcile, watch, and admin digest behind it instead of just its own
+# thread. 300 seconds is generous for even a slow clone or fetch of this
+# repo's size over a bad connection, while still bounding the lock's worst
+# case. A git process killed on timeout can leave `.git/index.lock` behind;
+# that is the same stale-lock shape `_clear_stale_git_locks` already clears
+# once it ages past `STALE_GIT_LOCK_SECONDS`, so the next call recovers on
+# its own.
+GIT_TIMEOUT_SECONDS = 300.0
 # The frontmatter keys `FRONTMATTER_ALLOWLIST` (models.py) carries for
 # Hugo's taxonomy system; `unconfigured_taxonomy_keys` checks these against
 # what a site's own `hugo config` says it actually defines.
@@ -117,6 +190,55 @@ GIT_ENV = {
 
 class DigestError(Exception):
     pass
+
+
+# Bounds how much of a failed git command's stderr ends up in a log line;
+# git's own error output is never this long, but a hung or confused process
+# writing to stderr in a loop must not be able to blow up log storage.
+_MAX_SCRUBBED_STDERR_CHARS = 4000
+
+# `https://user:pass@host/...` (a credential embedded in a URL, the shape
+# `_auth_env`'s comment describes git as never persisting but that a
+# misconfigured `CHRONICLE_DIGEST_REPO_URL` or a redirect could still echo
+# into stderr) and the two other places a token can appear in this module's
+# own git invocations: `AUTHORIZATION: basic ...` and `x-access-token:...`,
+# both from `_auth_env`'s per-invocation `http.extraheader`, which git can
+# echo back in a verbose or trace error line.
+_USERINFO_URL_RE = re.compile(r"(https?://)[^/\s@]+@")
+_AUTHORIZATION_HEADER_RE = re.compile(r"(?i)(authorization:\s*basic\s+)\S+")
+_ACCESS_TOKEN_RE = re.compile(r"(?i)(x-access-token:)\S+")
+
+
+def _scrub(text: str) -> str:
+    """Redact anything token-bearing from git's stderr before it is logged."""
+    text = _USERINFO_URL_RE.sub(r"\1[redacted]@", text)
+    text = _AUTHORIZATION_HEADER_RE.sub(r"\1[redacted]", text)
+    text = _ACCESS_TOKEN_RE.sub(r"\1[redacted]", text)
+    return text
+
+
+class GitCommandError(subprocess.CalledProcessError):
+    """A failed git command, with scrubbed stderr folded into `str()`.
+
+    Subclasses `CalledProcessError` so every existing
+    `except subprocess.CalledProcessError` handler (reconcile.py,
+    test fixtures, an admin route) keeps catching it with no change; only
+    `str()` differs, which is what makes `log.warning("...: %s", exc)` and
+    `log.exception(...)` (whose traceback line calls `str()` on the
+    exception) both show git's own error instead of just the exit code.
+    """
+
+    def __init__(self, original: subprocess.CalledProcessError) -> None:
+        super().__init__(original.returncode, original.cmd, original.output, original.stderr)
+
+    def __str__(self) -> str:
+        base = super().__str__()
+        stderr = _scrub(self.stderr or "").strip()
+        if not stderr:
+            return base
+        if len(stderr) > _MAX_SCRUBBED_STDERR_CHARS:
+            stderr = stderr[:_MAX_SCRUBBED_STDERR_CHARS] + "... (truncated)"
+        return f"{base}\nstderr: {stderr}"
 
 
 @dataclass(frozen=True)
@@ -414,14 +536,24 @@ def _run(
     args: list[str], cwd: Path | None = None, extra_env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     env = {**GIT_ENV, **(extra_env or {})}
-    return subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise GitCommandError(exc) from exc
+    except subprocess.TimeoutExpired as exc:
+        # `args` can carry the repo URL (a clone's argv includes it), so the
+        # command line is scrubbed the same way a failed command's stderr
+        # is before it lands in a log or an error message.
+        command = _scrub(" ".join(args))
+        raise DigestError(f"git {command} timed out after {GIT_TIMEOUT_SECONDS:.0f}s") from exc
 
 
 def _auth_env(token: str | None) -> dict[str, str]:
@@ -443,6 +575,37 @@ def _auth_env(token: str | None) -> dict[str, str]:
     }
 
 
+def _clear_stale_git_locks(site_dir: Path) -> None:
+    """Remove `.git/index.lock`/`.git/shallow.lock` if provably abandoned.
+
+    Called only from inside `clone_or_update`'s own `_SITE_GIT_LOCK`, so a
+    lock this process's own git process is holding right now can never be
+    seen here (that git call is the very next thing this same lock guards).
+    A lock younger than `STALE_GIT_LOCK_SECONDS` is left alone with a clear
+    error naming it and its age, on the theory that something else (a
+    process outside this one, or a genuine clock skew making the age look
+    negative) may still be using it. Uses `lstat`, not `stat`, so a
+    lock path that is itself a symlink is judged and removed by its own
+    age and identity, never by following it into wherever it points.
+    """
+    git_dir = site_dir / ".git"
+    for name in _GIT_LOCK_NAMES:
+        lock_path = git_dir / name
+        try:
+            info = lock_path.lstat()
+        except OSError:
+            continue
+        age_seconds = time.time() - info.st_mtime
+        if age_seconds < STALE_GIT_LOCK_SECONDS:
+            raise DigestError(
+                f"{lock_path} exists and is {age_seconds:.0f}s old, younger than the"
+                f" {STALE_GIT_LOCK_SECONDS:.0f}s staleness threshold; refusing to remove it"
+                " in case a git process is still using it"
+            )
+        log.warning("removing stale git lock %s (%.0fs old)", lock_path, age_seconds)
+        lock_path.unlink()
+
+
 def clone_or_update(
     site_dir: Path, repo_url: str, branch: str | None = None, token: str | None = None
 ) -> str:
@@ -455,23 +618,37 @@ def clone_or_update(
     layout). `repo_url` is always credential-free; `token`, when given, is
     injected per invocation through the environment (see `_auth_env`) and
     never persisted.
+
+    The whole call runs under `_SITE_GIT_LOCK`, so no two threads in this
+    process ever run git against the same clone at once, and a stale
+    `index.lock`/`shallow.lock` cleared here can never actually belong to a
+    git process this same lock is currently serializing.
     """
     auth_env = _auth_env(token)
-    if (site_dir / ".git").exists():
-        current_url = _run(["remote", "get-url", "origin"], cwd=site_dir).stdout.strip()
-        if current_url != repo_url:
-            _run(["remote", "set-url", "origin", repo_url], cwd=site_dir)
-        _run(["fetch", "--depth", "1", "origin"], cwd=site_dir, extra_env=auth_env)
-        target_branch = branch or _remote_default_branch(site_dir, auth_env)
-        _run(["reset", "--hard", f"origin/{target_branch}"], cwd=site_dir)
-    else:
-        site_dir.parent.mkdir(parents=True, exist_ok=True)
-        clone_args = ["clone", "--depth", "1", "--recurse-submodules", repo_url, str(site_dir)]
-        if branch:
-            clone_args[1:1] = ["--branch", branch]
-        _run(clone_args, extra_env=auth_env)
-    _run(["submodule", "update", "--init", "--recursive"], cwd=site_dir, extra_env=auth_env)
-    return _run(["rev-parse", "HEAD"], cwd=site_dir).stdout.strip()
+    with _SITE_GIT_LOCK:
+        if (site_dir / ".git").exists():
+            _clear_stale_git_locks(site_dir)
+            current_url = _run(["remote", "get-url", "origin"], cwd=site_dir).stdout.strip()
+            if current_url != repo_url:
+                _run(["remote", "set-url", "origin", repo_url], cwd=site_dir)
+            _run(["fetch", "--depth", "1", "origin"], cwd=site_dir, extra_env=auth_env)
+            target_branch = branch or _remote_default_branch(site_dir, auth_env)
+            _run(["reset", "--hard", f"origin/{target_branch}"], cwd=site_dir)
+        else:
+            site_dir.parent.mkdir(parents=True, exist_ok=True)
+            clone_args = [
+                "clone",
+                "--depth",
+                "1",
+                "--recurse-submodules",
+                repo_url,
+                str(site_dir),
+            ]
+            if branch:
+                clone_args[1:1] = ["--branch", branch]
+            _run(clone_args, extra_env=auth_env)
+        _run(["submodule", "update", "--init", "--recursive"], cwd=site_dir, extra_env=auth_env)
+        return _run(["rev-parse", "HEAD"], cwd=site_dir).stdout.strip()
 
 
 def _remote_default_branch(site_dir: Path, extra_env: dict[str, str] | None = None) -> str:
