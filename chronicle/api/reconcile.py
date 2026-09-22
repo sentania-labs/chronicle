@@ -219,7 +219,7 @@ def run_once_logged(store: Store, admin: AdminServices, actor: str = RECONCILE_A
         )
     except ReconcileNotConfigured:
         log.info("reconcile: skipped, no GitHub App or test-token repo configured yet")
-    except (OSError, subprocess.CalledProcessError, GitHubApiError) as exc:
+    except (OSError, subprocess.CalledProcessError, digest_mod.DigestError, GitHubApiError) as exc:
         log.warning("reconcile: run failed, will retry next trigger: %s", exc)
 
 

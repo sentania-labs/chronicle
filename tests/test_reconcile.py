@@ -440,3 +440,29 @@ def test_run_once_logged_shows_gits_stderr_not_just_the_exit_code(
     assert "reconcile: run failed" in caplog.text
     assert "returned non-zero exit status" in caplog.text
     assert "fatal" in caplog.text.lower() or "does not exist" in caplog.text.lower()
+
+
+def test_run_once_logged_treats_a_refused_stale_lock_as_an_expected_failure(
+    store: Store, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`digest.DigestError` (raised when `clone_or_update` refuses a lock
+    that is not yet old enough to call stale) must land in the same
+    "will retry next trigger" path as a plain git failure, not the
+    `_run_once_never_raises` catch-all for a genuinely unexpected bug.
+    Adversarial review of this change found `DigestError` missing from
+    `run_once_logged`'s except tuple, which would have logged a stale-lock
+    refusal as "unexpected failure" instead.
+    """
+
+    def _refresh_that_hits_a_fresh_lock(
+        store_: Store, target: publisher.RepoTarget, actor: str, admin: AdminServices | None = None
+    ) -> None:
+        raise digest_mod.DigestError("data/site/.git/index.lock exists and is 4s old")
+
+    monkeypatch.setattr(reconcile, "refresh_from_target", _refresh_that_hits_a_fresh_lock)
+    caplog.set_level(logging.WARNING)
+
+    reconcile.run_once_logged(store, _ADMIN)
+
+    assert "reconcile: run failed, will retry next trigger" in caplog.text
+    assert "unexpected failure" not in caplog.text
