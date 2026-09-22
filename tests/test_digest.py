@@ -565,3 +565,38 @@ def test_two_threads_cloning_the_same_site_never_race_on_index_lock(
 
     assert not errors, errors
     assert not (site_dir / ".git" / "index.lock").exists()
+
+
+def test_run_raises_digest_error_on_timeout_and_releases_the_lock(
+    tmp_path: Path, blog_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #57 follow-up: an untimed `_run` would let a hung git process
+    hold `_SITE_GIT_LOCK` forever, stalling every later reconcile, watch, or
+    admin digest behind it. A timeout must fail the hung call with a
+    `DigestError` naming the subcommand (never a token, since a token only
+    ever reaches git through `_auth_env`'s environment, not argv) and must
+    still release the lock, so the very next `clone_or_update` succeeds.
+    """
+    site_dir = tmp_path / "site"
+    digest.clone_or_update(site_dir, str(blog_repo), "main")
+
+    real_run = subprocess.run
+
+    def hanging_run(cmd, **kwargs):
+        if cmd[:2] == ["git", "fetch"]:
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout") or 0)
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", hanging_run)
+
+    with pytest.raises(digest.DigestError) as excinfo:
+        digest.clone_or_update(site_dir, str(blog_repo), "main", token="super-secret-token")
+
+    message = str(excinfo.value)
+    assert "fetch" in message
+    assert "super-secret-token" not in message
+
+    monkeypatch.setattr(subprocess, "run", real_run)
+
+    sha = digest.clone_or_update(site_dir, str(blog_repo), "main")
+    assert sha

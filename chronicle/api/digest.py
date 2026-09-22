@@ -87,6 +87,18 @@ HUGO_WORKFLOW_PATH = ".github/workflows/hugo.yml"
 HUGO_ENVIRONMENT_ENV = "CHRONICLE_HUGO_ENVIRONMENT"
 DEFAULT_HUGO_ENVIRONMENT = "production"
 HUGO_CONFIG_TIMEOUT_SECONDS = 20.0
+# Every git call `_run` makes against `data/site/` runs under this timeout.
+# `_run`'s calls all run inside `clone_or_update`'s `_SITE_GIT_LOCK`, so a
+# git process that hangs (a stalled network fetch is the realistic case)
+# would otherwise hold that process-wide lock forever, stalling every later
+# reconcile, watch, and admin digest behind it instead of just its own
+# thread. 300 seconds is generous for even a slow clone or fetch of this
+# repo's size over a bad connection, while still bounding the lock's worst
+# case. A git process killed on timeout can leave `.git/index.lock` behind;
+# that is the same stale-lock shape `_clear_stale_git_locks` already clears
+# once it ages past `STALE_GIT_LOCK_SECONDS`, so the next call recovers on
+# its own.
+GIT_TIMEOUT_SECONDS = 300.0
 # The frontmatter keys `FRONTMATTER_ALLOWLIST` (models.py) carries for
 # Hugo's taxonomy system; `unconfigured_taxonomy_keys` checks these against
 # what a site's own `hugo config` says it actually defines.
@@ -499,9 +511,16 @@ def _run(
             capture_output=True,
             text=True,
             check=True,
+            timeout=GIT_TIMEOUT_SECONDS,
         )
     except subprocess.CalledProcessError as exc:
         raise GitCommandError(exc) from exc
+    except subprocess.TimeoutExpired as exc:
+        # `args` can carry the repo URL (a clone's argv includes it), so the
+        # command line is scrubbed the same way a failed command's stderr
+        # is before it lands in a log or an error message.
+        command = _scrub(" ".join(args))
+        raise DigestError(f"git {command} timed out after {GIT_TIMEOUT_SECONDS:.0f}s") from exc
 
 
 def _auth_env(token: str | None) -> dict[str, str]:
