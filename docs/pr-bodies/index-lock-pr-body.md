@@ -20,6 +20,12 @@ fails with a clear error naming the path and its age instead, on the theory
 that something might still be using it. Every git failure through this path
 now logs git's own stderr (with any token-bearing text redacted), not just
 the exit code, so a future failure here is diagnosable from the log alone.
+Every git call also now times out after five minutes rather than running
+forever, so one hung fetch can no longer hold the new in-process lock
+indefinitely and stall every later reconcile, watch, and admin digest
+behind it; a timed-out call fails with a clear error naming the git
+subcommand, and the same stale-lock clearing above cleans up whatever the
+killed process left behind.
 
 ## Blast radius
 
@@ -60,12 +66,12 @@ Full review in `docs/pr-bodies/index-lock-review.md`. Summary:
   follows it), clock skew making a lock's age look negative (only makes the
   code more conservative, never less), and the stderr scrubber against both
   a credential-bearing URL and an `AUTHORIZATION` header line.
-- **Accepted, out of scope:** the process-wide lock is held across an
-  untimed git fetch (`_run` sets no `subprocess` timeout, true before this
-  change too), so a genuinely hung fetch now stalls every later reconcile,
-  watch, and manual digest instead of each failing fast on its own lock
-  error. Fixing this needs a timeout policy of its own and is a separate
-  piece of work, not folded into this fix.
+- **Fixed:** the process-wide lock was held across an untimed git fetch
+  (`_run` set no `subprocess` timeout, true before this change too), so a
+  genuinely hung fetch would have stalled every later reconcile, watch, and
+  manual digest instead of each failing fast on its own lock error. `_run`
+  now times out every git call after five minutes and raises `DigestError`
+  on a timeout, covered by a new test.
 
 ## Reported, not fixed
 

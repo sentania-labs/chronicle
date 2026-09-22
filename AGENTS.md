@@ -85,7 +85,10 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   raises `GitCommandError` (a `CalledProcessError` subclass) whose `str()`
   carries git's own scrubbed stderr, which is what makes reconcile's and
   the watcher's existing log calls show the real error, not just an exit
-  code.
+  code. Every call also runs under `GIT_TIMEOUT_SECONDS`, so one hung fetch
+  can never hold `_SITE_GIT_LOCK` forever and stall every later reconcile,
+  watch, and admin digest behind it; a timeout raises `DigestError` naming
+  the subcommand instead.
 - **A save can change a draft's status.** `PUT /v1/drafts/{id}` on a draft in
   `revision_requested` or `published` moves it to `drafting`. That is not one
   of the API's named actions, so it is modelled as the `revise` action in

@@ -37,19 +37,31 @@ way to hit this is someone running git by hand inside the api container
 against `data/site/`, which AGENTS.md's "no manual infra changes" rule
 already rules out. Left as designed; noted in the PR body.
 
-### 3. The process-wide lock is held across an untimed network fetch (noted, out of scope)
+### 3. The process-wide lock is held across an untimed network fetch (fixed)
 
-`_run`'s `subprocess.run` call has no `timeout`, and this was true before
+`_run`'s `subprocess.run` call had no `timeout`, and this was true before
 this change. Before this PR, one thread hanging on a fetch would still hold
 `.git/index.lock` for that duration, and any concurrent caller would fail
 fast with a lock error rather than block. After this PR, a concurrent caller
-blocks on `_SITE_GIT_LOCK` instead, so a genuinely hung fetch now stalls
-every future reconcile, watch, and manual digest indefinitely instead of
-each failing fast and retrying on its own schedule. This is a real behavior
-change, not just a latent pre-existing gap, but adding a timeout is a
-separate piece of work (choosing a sane bound, deciding what happens to a
-half-finished reset) and is out of scope for this fix. Noted as a one-line
-item in the PR body, not fixed here.
+blocks on `_SITE_GIT_LOCK` instead, so a genuinely hung fetch would have
+stalled every future reconcile, watch, and manual digest indefinitely
+instead of each failing fast and retrying on its own schedule.
+
+Fixed by giving `_run` a `GIT_TIMEOUT_SECONDS` (300s) timeout on every git
+call it makes. `subprocess.TimeoutExpired` is caught and re-raised as
+`DigestError`, naming the git subcommand with the same `_scrub` a failed
+command's stderr already goes through (a clone's argv carries the repo
+URL). Every caller path already handles `DigestError` without crashing:
+`reconcile.run_once_logged` catches it explicitly (finding #1, above), the
+watcher's two call sites (`chronicle/api/watcher.py`) both use a broad
+`except Exception`, and the admin digest routes either use a broad
+`except Exception` or let it surface as a normal 500 rather than crashing
+the process. A git process killed on timeout can leave `.git/index.lock`
+behind, which is the same stale-lock shape `_clear_stale_git_locks` already
+clears once it ages past `STALE_GIT_LOCK_SECONDS`, so the next run recovers
+on its own. Covered by
+`test_run_raises_digest_error_on_timeout_and_releases_the_lock` in
+`tests/test_digest.py`, confirmed failing against the pre-fix code first.
 
 ### 4. Symlinked lock path (checked, no change needed)
 
@@ -88,6 +100,5 @@ the whole tree for `CalledProcessError`; no site does an exact
 
 ## Disposition summary
 
-One valid finding (#1), fixed and covered by a new test. Six other angles
-checked and found already safe by construction, with #3 recorded as a
-known, accepted, out-of-scope tradeoff rather than a defect.
+Two valid findings (#1 and #3), both fixed and covered by new tests. Five
+other angles checked and found already safe by construction.
