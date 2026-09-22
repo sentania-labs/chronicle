@@ -8,7 +8,10 @@ against the actual blog repo.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -472,3 +475,95 @@ def test_clone_of_a_source_owned_by_a_different_uid_is_not_refused(tmp_path: Pat
     destination = tmp_path / "dest"
     sha = digest.clone_or_update(destination, str(repo))
     assert sha
+
+
+def test_clone_or_update_clears_a_stale_empty_index_lock(
+    tmp_path: Path, blog_repo: Path
+) -> None:
+    """Issue #57: an empty `index.lock` left behind by a git step killed
+    mid-write must not wedge every later digest forever. A lock stamped
+    well before `STALE_GIT_LOCK_SECONDS` is provably abandoned, since
+    `clone_or_update` serializes every git call in this process behind
+    one lock, so nothing this process is doing could still be holding it.
+    """
+    site_dir = tmp_path / "site"
+    digest.clone_or_update(site_dir, str(blog_repo), "main")
+
+    lock_path = site_dir / ".git" / "index.lock"
+    lock_path.write_bytes(b"")
+    stale_time = time.time() - digest.STALE_GIT_LOCK_SECONDS - 60
+    os.utime(lock_path, (stale_time, stale_time))
+
+    (blog_repo / "content" / "posts" / "another.md").write_text(
+        "---\ntitle: Another\ndate: 2024-03-03\n---\nmore body\n", encoding="utf-8"
+    )
+    _git(blog_repo, "add", "-A")
+    _git(blog_repo, "commit", "-m", "another post")
+
+    sha = digest.clone_or_update(site_dir, str(blog_repo), "main")
+
+    assert not lock_path.exists()
+    remote_head = subprocess.run(
+        ["git", "-C", str(blog_repo), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=digest.GIT_ENV,
+    ).stdout.strip()
+    assert sha == remote_head
+
+
+def test_clone_or_update_refuses_a_fresh_index_lock(tmp_path: Path, blog_repo: Path) -> None:
+    site_dir = tmp_path / "site"
+    digest.clone_or_update(site_dir, str(blog_repo), "main")
+
+    lock_path = site_dir / ".git" / "index.lock"
+    lock_path.write_bytes(b"")
+
+    with pytest.raises(digest.DigestError) as excinfo:
+        digest.clone_or_update(site_dir, str(blog_repo), "main")
+
+    assert str(lock_path) in str(excinfo.value)
+    assert lock_path.exists()
+
+
+def test_git_command_error_scrubs_userinfo_url_and_authorization_header() -> None:
+    original = subprocess.CalledProcessError(
+        128,
+        ["git", "fetch"],
+        output="",
+        stderr=(
+            "fatal: could not read from"
+            " 'https://x-access-token:SECRET@github.com/o/r.git'\n"
+            "AUTHORIZATION: basic c2VjcmV0dG9rZW4=\n"
+        ),
+    )
+    err = digest.GitCommandError(original)
+    text = str(err)
+    assert "SECRET" not in text
+    assert "c2VjcmV0dG9rZW4=" not in text
+    assert "[redacted]" in text
+
+
+def test_two_threads_cloning_the_same_site_never_race_on_index_lock(
+    tmp_path: Path, blog_repo: Path
+) -> None:
+    site_dir = tmp_path / "site"
+    digest.clone_or_update(site_dir, str(blog_repo), "main")
+
+    errors: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            digest.clone_or_update(site_dir, str(blog_repo), "main")
+        except Exception as exc:  # noqa: BLE001 - captured for the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors, errors
+    assert not (site_dir / ".git" / "index.lock").exists()
