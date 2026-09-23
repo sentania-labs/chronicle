@@ -99,3 +99,27 @@ one is filled in.
 - A percent-encoded, scheme-carrying, or `..`-bearing frontmatter `url` still
   cannot make `preview_post_url` produce a link outside the preview site,
   the same posture ADR 015 already takes for `image_dir`.
+
+### Amended 2026-09-22 (issue 61): a legacy run derives its post link at read time
+
+Every run recorded before this ADR's `post_url` field existed has none, so
+every surface fell back to the site root for it, forever, since nothing
+here rewrites a stored run. `convert.resolve_run_post_url(run, draft)`
+closes that gap by deriving the link at read time instead: a stored
+`post_url` still wins outright, otherwise a pinned slug and the draft's own
+`date` rebuild the same link a fresh build would, through the same
+`preview_post_url`/`post_url` logic, never a second implementation.
+
+The one wrinkle is a draft pinned before this ADR's date stamp existed: it
+has a slug but no `date` at all. Falling back to today at read time would
+be wrong, since the build this run actually produced used whatever date
+was live the day it ran, and "today" would silently move the post's own
+link on every later read. So the missing-date case derives from the run's
+own build moment instead (`started_at`, else `created_at`), converted to
+`PUBLISH_TZ` explicitly: those timestamps come from `now_stamp`, which
+carries whatever offset the container's clock runs in (UTC in production),
+so a build made late in the evening America/Chicago time can already be
+tomorrow in the stored string, and taking `.date()` off the raw offset
+would read the wrong day. Neither the run nor the draft is ever written to
+by this derivation; the computed date lives only in a local copy of the
+frontmatter passed through `post_url`'s own logic.

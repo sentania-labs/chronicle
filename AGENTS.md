@@ -323,15 +323,26 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
 - **A preview run's `preview_url` is the site root; `post_url` is the post.**
   `convert.preview_post_url` builds the latter from the former and
   `convert.post_url`'s own output, never a second derivation of the date
-  path; a run recorded before this field existed carries no `post_url`, and
-  every surface that shows a preview link falls back to `preview_url`
-  instead of breaking. The date itself is pinned at the same moment as the
-  slug (`store._pin_slug`, ADR 022), not only at first publish, since the
-  filename and default `url` are both derived from it. `_pin_slug` never
-  runs a second time once `draft.slug` is set, so `Store.save_draft` carries
-  the stored date forward whenever a save on an already-pinned draft omits
-  it (an API caller that drops the key, or the editor's Date field cleared);
-  a hand-set different date still wins.
+  path. A run recorded before this field existed carries no `post_url` in
+  its stored result, but `convert.resolve_run_post_url` (issue #61) derives
+  it at read time instead of leaving every such surface pointed at the
+  root: given the run and its draft, a stored `post_url` wins outright,
+  otherwise a pinned slug plus the draft's own date (or, when the draft has
+  none, the run's own `started_at`/`created_at` converted to `PUBLISH_TZ`,
+  never the raw offset a UTC container clock would carry) rebuilds the same
+  link a fresh build would. Every surface that shows a preview link (the
+  edit page, the board card, the run page, `/content/previews`, `GET
+  /v1/drafts/{id}/status` and `/preview`, the publish PR body) calls this
+  one function rather than growing its own copy, and it never writes
+  anything back to the run or the draft. It still falls back to
+  `preview_url` (the site root) when no derivation is possible: no slug, no
+  `preview_url`, or no date at all. The date itself is pinned at the same
+  moment as the slug (`store._pin_slug`, ADR 022), not only at first
+  publish, since the filename and default `url` are both derived from it.
+  `_pin_slug` never runs a second time once `draft.slug` is set, so
+  `Store.save_draft` carries the stored date forward whenever a save on an
+  already-pinned draft omits it (an API caller that drops the key, or the
+  editor's Date field cleared); a hand-set different date still wins.
 - **`chronicle/backup.py`'s restore swap keeps the displaced tree until
   reindex succeeds, and `_safe_member` runs before any extraction.** A tar
   member with an absolute path, a `..` segment, or a symlink is refused
