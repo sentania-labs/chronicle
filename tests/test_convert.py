@@ -606,17 +606,46 @@ def test_resolve_run_post_url_derives_the_link_for_a_legacy_run_with_a_dated_dra
 
 
 def test_resolve_run_post_url_uses_the_runs_own_build_date_when_the_draft_has_none() -> None:
-    """A draft pinned before ADR 022 has no date; a build made late in the
-    evening America/Chicago time is already the next day in UTC, so taking
-    the raw offset's date would land on the wrong month here (2026-08-01
-    23:30 CDT is 2026-08-02 04:30 UTC)."""
+    """A draft pinned before ADR 022 has no date, so the run's own stamp
+    decides the month. A pre-v0.3.3 build ran in whatever zone the builder
+    process's clock used (in practice UTC, since the images set no TZ), and
+    `post_date`'s fallback took `.date()` off that zone directly. A build at
+    2026-10-01T02:30:00+00:00 landed on Oct 1 in that same UTC process, even
+    though that instant is still Sept 30 in America/Chicago: the recorded
+    offset's own date must win, not a conversion to Chicago."""
     draft = _draft(frontmatter={"title": "My Post"})
     run = _run(
-        started_at="2026-08-02T04:30:00+00:00",
-        created_at="2026-08-02T04:30:00+00:00",
+        started_at="2026-10-01T02:30:00+00:00",
+        created_at="2026-10-01T02:30:00+00:00",
     )
     url = convert.resolve_run_post_url(run, draft)
-    assert url == "https://x/preview/my-post/2026/08/my-post/"
+    assert url == "https://x/preview/my-post/2026/10/my-post/"
+
+
+def test_resolve_run_post_url_uses_the_stamps_own_offset_for_a_negative_zone() -> None:
+    """A build in a Chicago-zoned process at 2026-09-30T23:30:00-05:00 used
+    Sept 30, the date in that same recorded offset, not a converted one."""
+    draft = _draft(frontmatter={"title": "My Post"})
+    run = _run(
+        started_at="2026-09-30T23:30:00-05:00",
+        created_at="2026-09-30T23:30:00-05:00",
+    )
+    url = convert.resolve_run_post_url(run, draft)
+    assert url == "https://x/preview/my-post/2026/09/my-post/"
+
+
+def test_resolve_run_post_url_treats_a_naive_stamp_as_the_current_process_zone() -> None:
+    """A naive timestamp carries no recorded offset, so it is read the same
+    way `datetime.now().astimezone()` would treat one: as this process's own
+    local zone, whatever that is on the machine running the test."""
+    from datetime import datetime
+
+    naive = "2026-09-30T23:30:00"
+    expected = datetime.fromisoformat(naive).astimezone().date()
+    draft = _draft(frontmatter={"title": "My Post"})
+    run = _run(started_at=naive, created_at=naive)
+    url = convert.resolve_run_post_url(run, draft)
+    assert url == f"https://x/preview/my-post/{expected.year:04d}/{expected.month:02d}/my-post/"
 
 
 def test_resolve_run_post_url_prefers_started_at_over_created_at() -> None:

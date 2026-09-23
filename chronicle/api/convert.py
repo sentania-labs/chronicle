@@ -270,15 +270,20 @@ def preview_post_url(preview_base: str, post_url_value: str) -> str:
 
 
 def _run_build_date(started_at: str | None, created_at: str | None) -> date | None:
-    """The wall-clock date `started_at` (else `created_at`) landed on in
-    `PUBLISH_TZ`, or None when neither parses.
+    """The wall-clock date `started_at` (else `created_at`) landed on in its
+    own recorded offset, or None when neither parses.
 
-    `Run` timestamps come from `now_stamp` (`datetime.now().astimezone()`),
-    which carries whatever offset the container's own clock runs in; in
-    production that is UTC, not America/Chicago, so a build made late in the
-    evening local time can already be tomorrow in the stored string. Taking
-    `.date()` off the raw offset would read that as the wrong day; converting
-    to `PUBLISH_TZ` first is what `stamp_publish_date` itself does.
+    This must reproduce what a pre-v0.3.3 build actually used, which came from
+    `post_date`'s fallback, `datetime.now().astimezone().date()`: whatever
+    zone rule the builder process's own clock ran under that day, taken
+    directly, never converted anywhere else first. `Run` timestamps come from
+    the same call (`now_stamp`), so the offset stored in `started_at` or
+    `created_at` IS that same process-local zone at that same moment; reading
+    `.date()` off it as-is reproduces the build, and converting to
+    `PUBLISH_TZ` would not, since the build never ran in Chicago's zone. A
+    naive timestamp (no offset recorded) is treated as the current process's
+    own local zone, the same fallback `datetime.now().astimezone()` uses when
+    given no zone.
     """
     raw = started_at or created_at
     if not isinstance(raw, str) or not raw.strip():
@@ -288,8 +293,8 @@ def _run_build_date(started_at: str | None, created_at: str | None) -> date | No
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=PUBLISH_TZ)
-    return parsed.astimezone(PUBLISH_TZ).date()
+        parsed = parsed.astimezone()
+    return parsed.date()
 
 
 def resolve_run_post_url(run: Run | None, draft: Draft | None) -> str | None:
