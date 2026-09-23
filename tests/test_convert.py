@@ -7,7 +7,7 @@ from urllib.parse import unquote
 import pytest
 
 from chronicle.api import convert
-from chronicle.api.models import Draft, DraftImage, now_stamp
+from chronicle.api.models import Draft, DraftImage, Run, now_stamp
 
 
 def _draft(**overrides: object) -> Draft:
@@ -579,3 +579,105 @@ def test_stamp_publish_date_is_local_chicago_time_iso_with_seconds() -> None:
     # America/Chicago is never UTC+0 (CST is -6, CDT is -5); a naive or UTC
     # stamp would fail this.
     assert offset.total_seconds() != 0
+
+
+# --- resolve_run_post_url (issue #61: legacy runs derive their post link) --
+
+
+def _run(**overrides: object) -> Run:
+    defaults: dict[str, object] = {
+        "id": "run1",
+        "draft_id": "d1",
+        "kind": "preview",
+        "status": "succeeded",
+        "created_at": now_stamp(),
+        "started_at": now_stamp(),
+        "result": {"preview_url": "https://x/preview/my-post/"},
+    }
+    defaults.update(overrides)
+    return Run.model_validate(defaults)
+
+
+def test_resolve_run_post_url_derives_the_link_for_a_legacy_run_with_a_dated_draft() -> None:
+    draft = _draft(frontmatter={"title": "My Post", "date": "2026-08-01T09:00:00-05:00"})
+    run = _run()
+    url = convert.resolve_run_post_url(run, draft)
+    assert url == "https://x/preview/my-post/2026/08/my-post/"
+
+
+def test_resolve_run_post_url_uses_the_runs_own_build_date_when_the_draft_has_none() -> None:
+    """A draft pinned before ADR 022 has no date; a build made late in the
+    evening America/Chicago time is already the next day in UTC, so taking
+    the raw offset's date would land on the wrong month here (2026-08-01
+    23:30 CDT is 2026-08-02 04:30 UTC)."""
+    draft = _draft(frontmatter={"title": "My Post"})
+    run = _run(
+        started_at="2026-08-02T04:30:00+00:00",
+        created_at="2026-08-02T04:30:00+00:00",
+    )
+    url = convert.resolve_run_post_url(run, draft)
+    assert url == "https://x/preview/my-post/2026/08/my-post/"
+
+
+def test_resolve_run_post_url_prefers_started_at_over_created_at() -> None:
+    draft = _draft(frontmatter={"title": "My Post"})
+    run = _run(
+        started_at="2026-08-01T23:30:00-05:00",
+        created_at="2026-01-01T00:00:00-05:00",
+    )
+    url = convert.resolve_run_post_url(run, draft)
+    assert url == "https://x/preview/my-post/2026/08/my-post/"
+
+
+def test_resolve_run_post_url_honors_a_hand_set_frontmatter_url() -> None:
+    draft = _draft(frontmatter={"title": "My Post", "url": "/about/"})
+    run = _run()
+    url = convert.resolve_run_post_url(run, draft)
+    assert url == "https://x/preview/my-post/about/"
+
+
+def test_resolve_run_post_url_leaves_a_recorded_post_url_unchanged() -> None:
+    draft = _draft(frontmatter={"title": "My Post"})
+    run = _run(result={"preview_url": "https://x/preview/my-post/", "post_url": "/somewhere/"})
+    assert convert.resolve_run_post_url(run, draft) == "/somewhere/"
+
+
+def test_resolve_run_post_url_treats_a_wrong_typed_post_url_as_missing() -> None:
+    draft = _draft(frontmatter={"title": "My Post", "date": "2026-08-01"})
+    run = _run(result={"preview_url": "https://x/preview/my-post/", "post_url": 12345})
+    url = convert.resolve_run_post_url(run, draft)
+    assert url == "https://x/preview/my-post/2026/08/my-post/"
+
+
+def test_resolve_run_post_url_is_none_without_a_pinned_slug() -> None:
+    draft = _draft(slug=None, frontmatter={"title": "My Post", "date": "2026-08-01"})
+    run = _run()
+    assert convert.resolve_run_post_url(run, draft) is None
+
+
+def test_resolve_run_post_url_is_none_without_a_preview_url() -> None:
+    draft = _draft(frontmatter={"title": "My Post", "date": "2026-08-01"})
+    run = _run(result={})
+    assert convert.resolve_run_post_url(run, draft) is None
+
+
+def test_resolve_run_post_url_is_none_when_no_date_can_be_derived_at_all() -> None:
+    draft = _draft(frontmatter={"title": "My Post"})
+    run = _run(started_at="not-a-timestamp", created_at="also-not-one")
+    assert convert.resolve_run_post_url(run, draft) is None
+
+
+def test_resolve_run_post_url_is_none_for_an_unsuccessful_run() -> None:
+    draft = _draft(frontmatter={"title": "My Post", "date": "2026-08-01"})
+    run = _run(status="building")
+    assert convert.resolve_run_post_url(run, draft) is None
+
+
+def test_resolve_run_post_url_never_modifies_the_stored_result() -> None:
+    draft = _draft(frontmatter={"title": "My Post"})
+    result = {"preview_url": "https://x/preview/my-post/"}
+    run = _run(result=result)
+    before = dict(result)
+    convert.resolve_run_post_url(run, draft)
+    assert result == before
+    assert run.result == before

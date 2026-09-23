@@ -335,9 +335,12 @@ def test_preview_and_status_carry_post_url_beside_preview_url(
     assert preview["post_url"] == "https://x/preview/drift-and-recovery/2026/08/drift-and-recovery/"
 
 
-def test_preview_and_status_fall_back_when_the_run_predates_post_url(
+def test_preview_and_status_derive_post_url_when_the_run_predates_it(
     client: TestClient, agent_token: str
 ) -> None:
+    """Issue #61: a run recorded before ADR 022 added `post_url` still lets
+    `status` and `preview` derive the post's own link, using the pinned
+    draft's own slug and date, rather than falling back to the root."""
     draft_id = new_draft(client, agent_token)
     save(client, agent_token, draft_id, 0)
     previewed = client.post(f"/v1/drafts/{draft_id}/actions/preview", headers=auth(agent_token))
@@ -353,13 +356,53 @@ def test_preview_and_status_fall_back_when_the_run_predates_post_url(
             "slug": "drift-and-recovery",
         },
     )
+    draft = store.get_draft(draft_id)
+    stamp = draft.frontmatter["date"][:7].replace("-", "/")
+    derived = f"https://x/preview/drift-and-recovery/{stamp}/drift-and-recovery/"
+
+    status = client.get(f"/v1/drafts/{draft_id}/status", headers=auth(agent_token)).json()
+    assert status["preview_url"] == "https://x/preview/drift-and-recovery/"
+    assert status["post_url"] == derived
+
+    preview = client.get(f"/v1/drafts/{draft_id}/preview", headers=auth(agent_token)).json()
+    assert preview["post_url"] == derived
+
+    stored_run = store.last_run(draft_id, kind="preview")
+    assert "post_url" not in (stored_run.result or {})
+
+
+def test_preview_and_status_fall_back_to_the_root_when_no_date_can_be_derived(
+    client: TestClient, agent_token: str
+) -> None:
+    """When even the run's own build timestamps are unusable, derivation
+    gives up cleanly and the caller falls back to the site root, rather
+    than guessing at today's date."""
+    draft_id = new_draft(client, agent_token)
+    save(client, agent_token, draft_id, 0)
+    previewed = client.post(f"/v1/drafts/{draft_id}/actions/preview", headers=auth(agent_token))
+    run_id = previewed.json()["run_id"]
+
+    store = client.app.state.services.store  # type: ignore[attr-defined]
+    store.finish_run(
+        run_id,
+        "test-builder",
+        succeeded=True,
+        result={
+            "preview_url": "https://x/preview/drift-and-recovery/",
+            "slug": "drift-and-recovery",
+        },
+    )
+    draft = store.get_draft(draft_id)
+    draft.frontmatter.pop("date", None)
+    store._write_json(store._draft_path(draft_id), draft.model_dump(mode="json"))
+    run = store.get_run(run_id)
+    run.started_at = "not-a-timestamp"
+    run.created_at = "also-not-a-timestamp"
+    store._write_json(store._run_path(run_id), run.model_dump(mode="json"))
 
     status = client.get(f"/v1/drafts/{draft_id}/status", headers=auth(agent_token)).json()
     assert status["preview_url"] == "https://x/preview/drift-and-recovery/"
     assert status["post_url"] is None
-
-    preview = client.get(f"/v1/drafts/{draft_id}/preview", headers=auth(agent_token)).json()
-    assert preview["post_url"] is None
 
 
 def test_slug_collision_fails_the_action_with_409(client: TestClient, agent_token: str) -> None:

@@ -189,7 +189,7 @@ def test_run_log_and_preview_list_render_stamps_as_local_time() -> None:
         "started_at": STARTED_STAMP,
         "finished_at": FINISHED_STAMP,
     }
-    log = tpl.run_log_page(run, "", banner=False)
+    log = tpl.run_log_page(run, "", None, banner=False)
     _assert_local(log, STARTED_STAMP, "started: 2020-07-08 04:10 CDT")
     _assert_local(log, FINISHED_STAMP, "finished: 2020-07-08 04:12 CDT")
 

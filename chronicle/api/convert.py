@@ -59,7 +59,7 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
-from .models import FRONTMATTER_ALLOWLIST, Draft
+from .models import FRONTMATTER_ALLOWLIST, Draft, Run
 
 POSTS_DIR = "content/posts"
 STATIC_IMAGES_DIR = "static/images"
@@ -117,12 +117,12 @@ class ConvertedPost:
     images: list[ImagePlacement]
 
 
-def post_date(frontmatter: dict[str, Any]) -> date:
-    """The date the filename and a generated `url` are built from.
+def _parsed_frontmatter_date(frontmatter: dict[str, Any]) -> date | None:
+    """`frontmatter["date"]` as a `date`, or None when absent or unparseable.
 
-    A post on main carries an ISO timestamp with an offset; a draft that has
-    never set one gets today in the service's own local zone, which is the
-    same rule spec section 5 gives for the publish date stamp.
+    No fallback here: this is the one place that tells a caller whether a
+    date was actually set, which `post_date` collapses to "today" and
+    `resolve_run_post_url` (issue #61) needs to keep separate.
     """
     raw = frontmatter.get("date")
     if isinstance(raw, str) and raw.strip():
@@ -134,7 +134,17 @@ def post_date(frontmatter: dict[str, Any]) -> date:
                 return date.fromisoformat(text[:10])
             except ValueError:
                 pass
-    return datetime.now().astimezone().date()
+    return None
+
+
+def post_date(frontmatter: dict[str, Any]) -> date:
+    """The date the filename and a generated `url` are built from.
+
+    A post on main carries an ISO timestamp with an offset; a draft that has
+    never set one gets today in the service's own local zone, which is the
+    same rule spec section 5 gives for the publish date stamp.
+    """
+    return _parsed_frontmatter_date(frontmatter) or datetime.now().astimezone().date()
 
 
 def post_filename(draft: Draft, slug: str) -> str:
@@ -192,8 +202,8 @@ def post_path(
     return f"{target}/{post_filename(draft, slug)}"
 
 
-def post_url(draft: Draft, slug: str) -> str:
-    existing = draft.frontmatter.get("url")
+def _post_url_from_frontmatter(frontmatter: dict[str, Any], slug: str) -> str:
+    existing = frontmatter.get("url")
     if isinstance(existing, str) and existing.strip():
         return existing.strip()
     # ADR 017: this `/YYYY/MM/slug/` default stays convention, not derived.
@@ -201,8 +211,12 @@ def post_url(draft: Draft, slug: str) -> str:
     # is nothing there to read this from; it is an observed pattern from
     # the real posts, and an author who wants something else sets `url`
     # by hand, which this function then leaves alone.
-    stamp = post_date(draft.frontmatter)
+    stamp = post_date(frontmatter)
     return f"/{stamp.year:04d}/{stamp.month:02d}/{slug}/"
+
+
+def post_url(draft: Draft, slug: str) -> str:
+    return _post_url_from_frontmatter(draft.frontmatter, slug)
 
 
 # A browser normalises a URL path's dot segments before it ever requests
@@ -253,6 +267,71 @@ def preview_post_url(preview_base: str, post_url_value: str) -> str:
     ]
     base = preview_base.rstrip("/")
     return f"{base}/{'/'.join(segments)}/" if segments else f"{base}/"
+
+
+def _run_build_date(started_at: str | None, created_at: str | None) -> date | None:
+    """The wall-clock date `started_at` (else `created_at`) landed on in
+    `PUBLISH_TZ`, or None when neither parses.
+
+    `Run` timestamps come from `now_stamp` (`datetime.now().astimezone()`),
+    which carries whatever offset the container's own clock runs in; in
+    production that is UTC, not America/Chicago, so a build made late in the
+    evening local time can already be tomorrow in the stored string. Taking
+    `.date()` off the raw offset would read that as the wrong day; converting
+    to `PUBLISH_TZ` first is what `stamp_publish_date` itself does.
+    """
+    raw = started_at or created_at
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=PUBLISH_TZ)
+    return parsed.astimezone(PUBLISH_TZ).date()
+
+
+def resolve_run_post_url(run: Run | None, draft: Draft | None) -> str | None:
+    """The post's own page for a preview run's result, or None (letting the
+    caller fall back to `preview_url`, the site root).
+
+    A run recorded since ADR 022 already carries a string `post_url`, which
+    wins outright. A run recorded before it (issue #61) has none, so this
+    derives the same link a fresh build would (`preview_post_url` over
+    `post_url`'s own frontmatter path logic), using the draft's own `date`
+    when it has one and, when it does not, the run's own build moment
+    (`started_at`, else `created_at`) instead of today: the build this run
+    actually produced used whatever date was live that day, and "today" at
+    read time would silently move the post's own link.
+
+    Never writes anything back: the derived date only ever lives in a copy
+    of the draft's frontmatter, passed through `post_url`'s logic locally.
+    Returns None, not a guess, when the run did not succeed, the result
+    carries neither url as a usable string, the draft is missing or has no
+    pinned slug, or no date can be derived at all.
+    """
+    if run is None or run.status != "succeeded":
+        return None
+    result = run.result or {}
+    post_url_value = result.get("post_url")
+    if isinstance(post_url_value, str) and post_url_value:
+        return post_url_value
+    preview_base = result.get("preview_url")
+    if not isinstance(preview_base, str) or not preview_base:
+        return None
+    if draft is None or not draft.slug:
+        return None
+    frontmatter = draft.frontmatter
+    if _parsed_frontmatter_date(frontmatter) is not None:
+        effective = frontmatter
+    else:
+        derived = _run_build_date(run.started_at, run.created_at)
+        if derived is None:
+            return None
+        effective = dict(frontmatter)
+        effective["date"] = derived.isoformat()
+    return preview_post_url(preview_base, _post_url_from_frontmatter(effective, draft.slug))
 
 
 def _last_segment(url: str) -> str | None:

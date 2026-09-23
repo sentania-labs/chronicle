@@ -107,7 +107,10 @@ def test_pr_body_links_the_post_first_and_the_preview_site_second(store: Store) 
     assert "https://x/preview/my-first-post/" in lines
 
 
-def test_pr_body_falls_back_to_the_site_root_when_the_run_predates_post_url(store: Store) -> None:
+def test_pr_body_derives_the_post_link_when_the_run_predates_post_url(store: Store) -> None:
+    """Issue #61: a preview run recorded before ADR 022 has no `post_url`,
+    but the approved draft is pinned with a slug and a date, so the PR body
+    still links the post itself rather than only the preview site's root."""
     draft, _ = store.create_draft("scott")
     store.save_draft(draft.id, "scott", 0, {"title": "My First Post"}, "Hello, world.\n")
     _, preview_run = store.act_on_draft(draft.id, "preview", "scott", True)
@@ -118,6 +121,40 @@ def test_pr_body_falls_back_to_the_site_root_when_the_run_predates_post_url(stor
         succeeded=True,
         result={"preview_url": "https://x/preview/my-first-post/", "slug": "my-first-post"},
     )
+    store.act_on_draft(draft.id, "submit", "scott", True)
+    draft, run = store.act_on_draft(draft.id, "approve", "scott", True)
+    assert run is not None
+    stamp = draft.frontmatter["date"][:7].replace("-", "/")
+    derived = f"https://x/preview/my-first-post/{stamp}/my-first-post/"
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    body = ops.pulls[watch.pr_number]["body"]
+    assert f"Preview: {derived}" in body
+    assert "https://x/preview/my-first-post/" in body
+
+
+def test_pr_body_falls_back_to_the_site_root_without_a_derivable_date(store: Store) -> None:
+    draft, _ = store.create_draft("scott")
+    store.save_draft(draft.id, "scott", 0, {"title": "My First Post"}, "Hello, world.\n")
+    _, preview_run = store.act_on_draft(draft.id, "preview", "scott", True)
+    assert preview_run is not None
+    store.finish_run(
+        preview_run.id,
+        "test-builder",
+        succeeded=True,
+        result={"preview_url": "https://x/preview/my-first-post/", "slug": "my-first-post"},
+    )
+    draft = store.get_draft(draft.id)
+    draft.frontmatter.pop("date", None)
+    store._write_json(store._draft_path(draft.id), draft.model_dump(mode="json"))
+    run = store.get_run(preview_run.id)
+    run.started_at = "not-a-timestamp"
+    run.created_at = "also-not-a-timestamp"
+    store._write_json(store._run_path(run.id), run.model_dump(mode="json"))
+
     store.act_on_draft(draft.id, "submit", "scott", True)
     draft, run = store.act_on_draft(draft.id, "approve", "scott", True)
     assert run is not None

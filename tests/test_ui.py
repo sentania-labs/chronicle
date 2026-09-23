@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image as PillowImage
 
+from chronicle.api import convert
 from chronicle.api.deps import Services
 from chronicle.api.models import DRAFT_STATUSES, Post
 from chronicle.api.ui_templates import image_url
@@ -829,21 +830,32 @@ def test_editor_save_with_a_cleared_date_field_keeps_the_pinned_stamp(
     assert services.store.get_draft(draft_id).frontmatter["date"] == stamped
 
 
-def test_editor_falls_back_to_the_site_root_when_no_post_url_recorded(
+def test_editor_derives_the_post_link_for_a_legacy_run_with_no_post_url(
     client: TestClient, services: Services
 ) -> None:
+    """Issue #61: a run recorded before ADR 022 has no `post_url` in its
+    stored result, but the draft it built is pinned with a date, so the
+    editor and board both derive the post's own link at read time rather
+    than falling back to the site root."""
     draft_id = make_draft(services, "previewed", title="Old run")
     draft = services.store.get_draft(draft_id)
     run = services.store._queue_run(draft_id, "preview")
     services.store.start_run(run.id, "builder-1", "0.164.0", False, built_version=draft.version_no)
     services.store.finish_run(run.id, "builder-1", True, {"preview_url": f"/preview/{draft.slug}/"})
+    stored_run = services.store.last_run(draft_id, kind="preview")
+    derived = convert.resolve_run_post_url(stored_run, draft)
+    assert derived is not None and derived != f"/preview/{draft.slug}/"
 
     response = client.get(f"/content/drafts/{draft_id}")
-    assert f'href="/preview/{draft.slug}/"' in response.text
+    assert f'href="{derived}"' in response.text
+    assert f'(<a href="/preview/{draft.slug}/">site</a>)' in response.text
 
     board = client.get("/content/drafts?status=previewed")
-    assert f'href="/preview/{draft.slug}/"' in board.text
-    assert "site</a>" not in board.text
+    assert f'href="{derived}"' in board.text
+    assert f'(<a href="/preview/{draft.slug}/">site</a>)' in board.text
+
+    stored_after = services.store.last_run(draft_id, kind="preview")
+    assert "post_url" not in (stored_after.result or {})
 
 
 def test_an_unpinned_draft_has_no_preview_link_at_all(
@@ -889,19 +901,37 @@ def test_preview_list_and_rebuild_and_run_log(client: TestClient, services: Serv
     assert rebuild.status_code == 200
 
 
-def test_preview_list_page_shows_no_site_link_without_a_distinct_post_url(
+def test_preview_list_page_derives_the_post_link_for_a_legacy_run(
     client: TestClient, services: Services
 ) -> None:
+    """Issue #61: `/content/previews` derives the same way the edit page and
+    board do, for a run with no stored `post_url`."""
     draft_id = make_draft(services, "previewed")
     draft = services.store.get_draft(draft_id)
     run = services.store._queue_run(draft_id, "preview")
     services.store.start_run(run.id, "builder-1", "0.164.0", False, built_version=draft.version_no)
     services.store.finish_run(run.id, "builder-1", True, {"preview_url": f"/preview/{draft.slug}/"})
+    stored_run = services.store.last_run(draft_id, kind="preview")
+    derived = convert.resolve_run_post_url(stored_run, draft)
+    assert derived is not None and derived != f"/preview/{draft.slug}/"
 
     listing = client.get("/content/previews")
     assert listing.status_code == 200
-    assert f'href="/preview/{draft.slug}/"' in listing.text
-    assert "site</a>" not in listing.text
+    assert f'href="{derived}"' in listing.text
+    assert f'(<a href="/preview/{draft.slug}/">site</a>)' in listing.text
+
+
+def test_preview_list_page_falls_back_to_the_site_root_without_a_pinned_slug(
+    client: TestClient, services: Services
+) -> None:
+    """A draft with no slug never had a successful preview run at all
+    (`_pin_slug` runs at first preview), so this exercises the store's own
+    guard rather than `resolve_run_post_url`'s: the listing only shows rows
+    for a run that actually succeeded, and every such row has a slug."""
+    draft_id = make_draft(services, "drafting")
+    listing = client.get("/content/previews")
+    assert listing.status_code == 200
+    assert draft_id not in listing.text
 
 
 def _base_run(**overrides: Any) -> dict[str, Any]:
@@ -931,7 +961,7 @@ def test_run_log_page_shows_queue_timeout_error_class_and_message() -> None:
             " (no GitHub target is configured, or the publisher is not running)",
         },
     )
-    html = tpl.run_log_page(run, "", banner=False)
+    html = tpl.run_log_page(run, "", None, banner=False)
     assert "publish_queue_timeout" in html
     assert "not picked up within 900 seconds" in html
 
@@ -940,7 +970,7 @@ def test_run_log_page_shows_error_class_alone_without_fabricating_a_message() ->
     from chronicle.api import ui_templates as tpl
 
     run = _base_run(status="failed", result={"error_class": "conversion_failed"})
-    html = tpl.run_log_page(run, "", banner=False)
+    html = tpl.run_log_page(run, "", None, banner=False)
     assert "conversion_failed" in html
     assert "None" not in html
 
@@ -949,7 +979,7 @@ def test_run_log_page_does_not_show_a_failure_for_a_successful_run() -> None:
     from chronicle.api import ui_templates as tpl
 
     run = _base_run(status="succeeded", result={"preview_url": "/preview/t/"})
-    html = tpl.run_log_page(run, "", banner=False)
+    html = tpl.run_log_page(run, "", None, banner=False)
     assert "notice error" not in html
 
 
@@ -964,7 +994,7 @@ def test_run_log_page_shows_a_successful_preview_runs_result() -> None:
             "wall_time_seconds": 12.345,
         },
     )
-    html = tpl.run_log_page(run, "", banner=False)
+    html = tpl.run_log_page(run, "", None, banner=False)
     assert 'href="/preview/a-slug/"' in html
     assert "/preview/a-slug/" in html
     assert "a-slug" in html
@@ -983,7 +1013,9 @@ def test_run_log_page_shows_the_post_url_first_and_the_site_second() -> None:
             "slug": "a-slug",
         },
     )
-    html = tpl.run_log_page(run, "", banner=False)
+    html = tpl.run_log_page(
+        run, "", "/preview/a-slug/2026/08/a-slug/", banner=False
+    )
     assert 'href="/preview/a-slug/2026/08/a-slug/"' in html
     assert 'href="/preview/a-slug/"' in html
     assert "notice error" not in html
@@ -993,7 +1025,7 @@ def test_run_log_page_falls_back_to_the_site_root_when_no_post_url_recorded() ->
     from chronicle.api import ui_templates as tpl
 
     run = _base_run(status="succeeded", result={"preview_url": "/preview/a-slug/"})
-    html = tpl.run_log_page(run, "", banner=False)
+    html = tpl.run_log_page(run, "", None, banner=False)
     assert 'href="/preview/a-slug/"' in html
 
 
@@ -1009,7 +1041,7 @@ def test_run_log_page_shows_a_successful_publish_runs_result() -> None:
             "commit_sha": "abcdef1234567890abcdef1234567890abcdef12",
         },
     )
-    html = tpl.run_log_page(run, "", banner=False)
+    html = tpl.run_log_page(run, "", None, banner=False)
     assert "post/a-slug" in html
     assert 'href="https://github.com/sentania-labs/blog/pull/7"' in html
     assert "PR #7" in html
@@ -1031,7 +1063,7 @@ def test_run_log_page_shows_a_successful_unpublish_runs_result() -> None:
             "commit_sha": "0123456789abcdef0123456789abcdef01234567",
         },
     )
-    html = tpl.run_log_page(run, "", banner=False)
+    html = tpl.run_log_page(run, "", None, banner=False)
     assert "post/other-slug" in html
     assert 'href="https://github.com/sentania-labs/blog/pull/9"' in html
     assert "PR #9" in html
@@ -1043,7 +1075,7 @@ def test_run_log_page_shows_a_successful_run_with_no_result_keys() -> None:
     from chronicle.api import ui_templates as tpl
 
     run = _base_run(status="succeeded", result={})
-    html = tpl.run_log_page(run, "", banner=False)
+    html = tpl.run_log_page(run, "", None, banner=False)
     assert "notice error" not in html
     assert "<ul>" not in html
 
@@ -1052,7 +1084,7 @@ def test_run_log_page_renders_a_queued_run_with_no_result() -> None:
     from chronicle.api import ui_templates as tpl
 
     run = _base_run()
-    html = tpl.run_log_page(run, "", banner=False)
+    html = tpl.run_log_page(run, "", None, banner=False)
     assert "notice error" not in html
 
 

@@ -19,6 +19,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
+from .. import convert
 from .. import ui_templates as tpl
 from ..deps import Consumer, Services
 from ..errors import ApiError
@@ -61,18 +62,6 @@ def _preview_url(run: Any) -> str | None:
     if run is None or run.status != "succeeded":
         return None
     url = (run.result or {}).get("preview_url")
-    return url if isinstance(url, str) else None
-
-
-def _post_url(run: Any) -> str | None:
-    """The post's own page inside the preview site, or None.
-
-    A run recorded before this field existed carries no `post_url`; every
-    caller falls back to `_preview_url` (the site root) rather than break.
-    """
-    if run is None or run.status != "succeeded":
-        return None
-    url = (run.result or {}).get("post_url")
     return url if isinstance(url, str) else None
 
 
@@ -334,7 +323,10 @@ def _board_row(
     last_author = versions[-1].author if versions else "-"
     last_preview = store.last_run(draft.id, kind="preview")
     run_info = (
-        {"preview_url": _preview_url(last_preview), "post_url": _post_url(last_preview)}
+        {
+            "preview_url": _preview_url(last_preview),
+            "post_url": convert.resolve_run_post_url(last_preview, draft),
+        }
         if last_preview
         else None
     )
@@ -456,7 +448,7 @@ def _editor_response(
     last_run = store.last_run(draft_id)
     preview_run = store.last_run(draft_id, kind="preview")
     preview_url = _preview_url(preview_run)
-    post_url = _post_url(preview_run)
+    post_url = convert.resolve_run_post_url(preview_run, draft)
     request_seq, answered_seq = store.index.revision_answer_seqs([draft_id]).get(
         draft_id, (None, None)
     )
@@ -865,7 +857,7 @@ def preview_list(request: Request, services: Services = Depends(get_services)) -
                 "draft_id": draft.id,
                 "title": draft.title or "(untitled)",
                 "preview_url": url,
-                "post_url": _post_url(run),
+                "post_url": convert.resolve_run_post_url(run, draft),
                 "built_at": run.finished_at,
                 "wall_seconds": _wall_seconds(run),
                 "toolchain_drift": run.toolchain_drift,
@@ -901,4 +893,11 @@ def run_log(
 ) -> HTMLResponse:
     run = services.store.get_run(run_id)
     log_text = services.store.run_log(run_id)
-    return HTMLResponse(tpl.run_log_page(_dump(run), log_text, banner=banner_enabled(request)))
+    try:
+        draft = services.store.get_draft(run.draft_id)
+    except ApiError:
+        draft = None
+    post_url = convert.resolve_run_post_url(run, draft)
+    return HTMLResponse(
+        tpl.run_log_page(_dump(run), log_text, post_url, banner=banner_enabled(request))
+    )
