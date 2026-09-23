@@ -36,8 +36,22 @@ def _handle_merged(store: Store, target: RepoTarget, watch: WatchEntry) -> None:
     draft = store.get_draft(watch.draft_id)
     if watch.kind == "unpublish" and draft.slug:
         store.remove_post(draft.slug, WATCHER_ACTOR)
+    # Retryable end to end (issue 60): if a step below already ran on an
+    # earlier tick and a later one then failed, the watch is still open and
+    # this whole handler runs again. `already_observed` still guards
+    # `record_publish_behind_draft` alone, preserving the invariant its own
+    # docstring (P3) relies on: it never runs once the draft already
+    # carries this merge's implied status. `observe_pr_outcome` no longer
+    # needs this guard (issue 60 finding 1): it is idempotent end to end on
+    # its own durable markers, so it is always called, and a retry that
+    # reaches it after an earlier attempt already wrote `draft.status` but
+    # failed before its event, commit, or index upsert landed completes
+    # exactly those missing steps instead of being skipped.
+    expected_status = "published" if watch.kind == "publish" else "unpublished"
+    already_observed = draft.status == expected_status
     if (
         watch.kind == "publish"
+        and not already_observed
         and watch.built_version is not None
         and draft.version_no > watch.built_version
     ):

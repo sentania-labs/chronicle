@@ -2053,6 +2053,36 @@ class Store:
         self.index.upsert_version(version)
         return draft
 
+    def _find_pr_event(self, draft_id: str, event: str, pr_number: int) -> Event | None:
+        """Scan the event log for an already-recorded `draft.pr_{event}`.
+
+        The durable marker `observe_pr_outcome` checks before writing a
+        second one on a retry (issue 60 finding 1): the log, not the index,
+        is the source of truth here for the same reason `_next_seq` reads
+        it directly (a comment just above explains why).
+        """
+        if not self.events_file.exists():
+            return None
+        wanted_type = f"draft.pr_{event}"
+        with self.events_file.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                payload = json.loads(line)
+                if (
+                    payload.get("type") == wanted_type
+                    and payload.get("draft_id") == draft_id
+                    and payload.get("pr_number") == pr_number
+                ):
+                    return Event.model_validate(payload)
+        return None
+
+    def _find_pr_closed_feedback(self, draft_id: str, pr_number: int) -> FeedbackEntry | None:
+        for entry in self.list_feedback(draft_id):
+            if entry.action == "pr_closed" and entry.pr_number == pr_number:
+                return entry
+        return None
+
     @locked
     def observe_pr_outcome(
         self, draft_id: str, event: str, pr_number: int, actor: str = "github"
@@ -2066,15 +2096,33 @@ class Store:
         gets a `github`-authored feedback entry, the same record shape a
         `request_revision` or `reject` writes, so it shows up in the
         draft's history the same way.
+
+        Idempotent end to end (issue 60 finding 1): a retry that reaches
+        this method again, whether an earlier attempt got as far as
+        writing `draft.status` or not, must still complete whichever of
+        the feedback entry, the event, the commit, and the index upsert
+        did not land the first time. `draft.status` alone cannot be that
+        check: it is this method's own first mutating step, so a bare
+        status comparison cannot tell a fully completed observation from
+        one that crashed right after it, and re-deriving the transition
+        through `resolve_watch` off an already-moved status is exactly the
+        ambiguity `_handle_merged`'s `already_observed` guard exists to
+        avoid (`WATCH_TRANSITIONS` has a second, unrelated entry keyed on
+        the post-transition status; round C4/issue 60 P1's finding). So
+        `to_status` is decided once, from the durable event record when
+        one already exists and from `resolve_watch` only when it does not,
+        and `draft.status` is written last, gated on whether it already
+        matches rather than on whether this call has run before.
         """
         draft = self.get_draft(draft_id)
-        transition = resolve_watch(draft.status, event)
-        from_status = draft.status
-        if transition is not None:
-            draft.status = transition.to_status
-            draft.updated_at = now_stamp()
-            self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
-        if event == "closed":
+        existing_event = self._find_pr_event(draft_id, event, pr_number)
+        if existing_event is not None:
+            to_status = existing_event.to_status or draft.status
+        else:
+            transition = resolve_watch(draft.status, event)
+            to_status = transition.to_status if transition is not None else draft.status
+
+        if event == "closed" and self._find_pr_closed_feedback(draft_id, pr_number) is None:
             # Spec section 9: the feedback entry is authored `github`, not
             # whatever process actor observed it (the watcher), the same
             # way a `github`-authored version (`record_github_version`) is
@@ -2087,15 +2135,25 @@ class Store:
                     action="pr_closed",
                     version_no=draft.version_no,
                     text=f"PR #{pr_number} was closed on GitHub without merging.",
+                    pr_number=pr_number,
                 )
             )
-        self._append_event(
-            type=f"draft.pr_{event}",
-            actor=actor,
-            draft_id=draft_id,
-            from_status=from_status,
-            to_status=draft.status,
-        )
+
+        if existing_event is None:
+            self._append_event(
+                type=f"draft.pr_{event}",
+                actor=actor,
+                draft_id=draft_id,
+                from_status=draft.status,
+                to_status=to_status,
+                pr_number=pr_number,
+            )
+
+        if draft.status != to_status:
+            draft.status = to_status
+            draft.updated_at = now_stamp()
+            self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
+
         self._commit(f"draft {draft_id}: PR #{pr_number} {event}", actor)
         self.index.upsert_draft(draft)
         return draft
@@ -2167,6 +2225,8 @@ class Store:
         detail: str,
         actor: str,
         main_sha: str | None = None,
+        built_version: int | None = None,
+        current_version: int | None = None,
     ) -> ReconcileFlag:
         """Split out so `record_publish_behind_draft` (already `@locked`) can
         reuse it, the same reason `_put_image_unlocked` exists."""
@@ -2178,6 +2238,8 @@ class Store:
             draft_id=draft_id,
             detail=detail,
             main_sha=main_sha,
+            built_version=built_version,
+            current_version=current_version,
         )
         self._write_json(self._flag_path(flag.id), flag.model_dump(mode="json"))
         self._append_event(
@@ -2213,13 +2275,52 @@ class Store:
         suggestion) plus a `chronicle`-authored feedback entry, without
         touching `draft.status` (the watcher's own WATCH_TRANSITIONS call
         still decides that).
+
+        A retry of `_handle_merged` after this call already landed but a
+        later step (`observe_pr_outcome`, `clear_watch`) failed reaches this
+        method again before `draft.status` has moved, so the same guard
+        `reconcile.py`'s `_already_flagged` uses for the other flag types
+        applies here too, keyed to the individual publish rather than any
+        open flag for the draft (issue 60 finding 2): an unresolved
+        `content_drift` flag already open for this draft, with the same
+        `built_version`/`current_version` pair this call carries, means
+        this exact merge was already recorded, and a second one would
+        double the flag and the feedback entry for one event. A *different*
+        pair (a later, distinct publish-behind merge for the same draft
+        while an earlier one's flag is still unresolved) is not the same
+        event and must still get its own flag, which matching on
+        `draft_id` alone used to suppress. Matched on `slug=None` as well,
+        because `reconcile.py`'s own `content_drift` flag for the same
+        draft always carries its `slug` (it only runs once the draft is
+        `published`, which this method's caller never is yet); without that
+        an old, still-unresolved reconcile flag from a previous publish
+        cycle would silently suppress a genuinely new one here. A flag
+        written before this field existed carries `built_version=None`,
+        which never equals this call's own (always-set) integer, so it is
+        left alone rather than mistaken for a match.
         """
+        already_flagged = any(
+            flag.type == "content_drift"
+            and flag.draft_id == draft_id
+            and flag.slug is None
+            and flag.built_version == built_version
+            and flag.current_version == current_version
+            for flag in self.list_flags(resolved=False)
+        )
+        if already_flagged:
+            return
         detail = (
             f"draft {draft_id} was revised to version {current_version} while its publish PR"
             f" was open; the PR that merged only carried version {built_version}"
         )
         self._create_flag_unlocked(
-            "content_drift", slug=None, draft_id=draft_id, detail=detail, actor=actor
+            "content_drift",
+            slug=None,
+            draft_id=draft_id,
+            detail=detail,
+            actor=actor,
+            built_version=built_version,
+            current_version=current_version,
         )
         self._append_feedback(
             FeedbackEntry(

@@ -164,6 +164,14 @@ class GitHubClient:
         return result
 
 
+def _ref_already_gone(response: httpx.Response) -> bool:
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("message") == "Reference does not exist"
+
+
 def _raise_for_status(response: httpx.Response, error_class: str) -> None:
     if response.status_code >= 400:
         raise GitHubApiError(
@@ -262,6 +270,12 @@ class _HttpRepoOps:
         if response.status_code == 404:
             # Already gone (a second unpublish, or Scott deleted it by hand):
             # the caller wanted it absent, and it is, so this is success.
+            return
+        if response.status_code == 422 and _ref_already_gone(response):
+            # GitHub answers a delete of a ref that is already gone with 422
+            # and message "Reference does not exist", not 404 (issue 60's
+            # live case). The caller wanted it absent, and it is, so this is
+            # success too. Any other 422 (a real conflict) still raises.
             return
         _raise_for_status(response, "delete_ref_failed")
 

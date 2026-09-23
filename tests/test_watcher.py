@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
+import httpx
 import pytest
 
 from chronicle.api import publisher, watcher
 from chronicle.api.admin_deps import AdminServices
 from chronicle.api.errors import ApiError
+from chronicle.api.github_client import TestRepoOps
 from chronicle.api.models import Post
 from chronicle.api.store import Store
 from tests.fakes import FakeRepoOps
@@ -177,6 +179,367 @@ def test_merge_with_no_revision_does_not_flag_published_behind_draft(store: Stor
 
     flags = [f for f in store.list_flags() if f.type == "content_drift"]
     assert flags == []
+
+
+def test_retry_after_observe_pr_outcome_failure_does_not_double_flag_drift(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`record_publish_behind_draft` runs and succeeds, then the next step
+    (`observe_pr_outcome`) fails before `draft.status` moves at all: a
+    retry reaches `record_publish_behind_draft` again with the same
+    unmoved status, so it must not create a second content_drift flag or a
+    second feedback entry for the same merge."""
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    store.record_github_version(draft.id, {"title": "A Post"}, "Revised body.\n", "test drift")
+
+    original_observe = store.observe_pr_outcome
+    calls = {"n": 0}
+
+    def flaky_observe(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated crash before observe_pr_outcome")
+        return original_observe(*args, **kwargs)
+
+    monkeypatch.setattr(store, "observe_pr_outcome", flaky_observe)
+
+    ops.merge(watch.pr_number)
+    with pytest.raises(RuntimeError):
+        watcher.check_one(store, target, watch)
+
+    assert store.get_draft(draft.id).status == "approved"
+    flags = [f for f in store.list_flags() if f.type == "content_drift" and f.draft_id == draft.id]
+    assert len(flags) == 1
+
+    outcome = watcher.check_one(store, target, watch)
+
+    assert outcome == "merged"
+    assert store.get_draft(draft.id).status == "published"
+    flags = [f for f in store.list_flags() if f.type == "content_drift" and f.draft_id == draft.id]
+    assert len(flags) == 1, "a retry must not double-record the content_drift flag"
+    feedback = [
+        entry for entry in store.list_feedback(draft.id) if entry.action == "published_behind_draft"
+    ]
+    assert len(feedback) == 1, "a retry must not double-record the feedback entry"
+
+
+def test_retry_after_index_upsert_failure_completes_observation_exactly_once(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue 60 finding 1: `observe_pr_outcome` writes the draft file, the
+    feedback entry, and the event before it ever reaches the commit and the
+    index upsert. If the index upsert (or the commit) raises, the draft
+    file already carries the transition's result, but SQLite does not yet:
+    `list_drafts` is index-backed, so it would keep showing the draft at
+    its old status forever unless the retry can still complete the index
+    upsert, and the retry must do that without appending a second event or
+    a second feedback entry for the one close."""
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    ops.close_unmerged(watch.pr_number)
+
+    original_upsert = store.index.upsert_draft
+    calls = {"n": 0}
+
+    def flaky_upsert(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated sqlite failure")
+        return original_upsert(*args, **kwargs)
+
+    monkeypatch.setattr(store.index, "upsert_draft", flaky_upsert)
+
+    with pytest.raises(RuntimeError):
+        watcher.check_one(store, target, watch)
+
+    assert store.get_draft(draft.id).status == "in_review", "the draft file already moved"
+    assert draft.id not in {d.id for d in store.list_drafts(status="in_review")}, (
+        "the index upsert failed, so SQLite must still lag the draft file"
+    )
+    assert store.get_watch(draft.id) is not None, "the watch stays open until fully observed"
+
+    outcome = watcher.check_one(store, target, watch)
+
+    assert outcome == "closed"
+    assert store.get_draft(draft.id).status == "in_review"
+    assert draft.id in {d.id for d in store.list_drafts(status="in_review")}, (
+        "the retry must complete the missed index upsert"
+    )
+    assert store.get_watch(draft.id) is None, "the watch clears only once fully observed"
+    events = [
+        e
+        for e in store.events_since(0)[0]
+        if e.draft_id == draft.id and e.type == "draft.pr_closed"
+    ]
+    assert len(events) == 1, "a retry must not append a second event for the same close"
+    feedback = [entry for entry in store.list_feedback(draft.id) if entry.action == "pr_closed"]
+    assert len(feedback) == 1, "a retry must not append a second feedback entry for the same close"
+
+
+def test_publish_behind_draft_flag_ignores_an_unrelated_slug_keyed_content_drift_flag(
+    store: Store,
+) -> None:
+    """A leftover, still-unresolved content_drift flag from reconcile's own
+    check (keyed by slug, a different cause entirely: main moved since the
+    last publish) must not suppress this draft's own publish-behind-draft
+    flag, which is keyed by draft_id with no slug."""
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+
+    store.create_flag(
+        "content_drift",
+        slug="some-other-cause",
+        draft_id=draft.id,
+        detail="an unrelated, still-open content_drift flag for this same draft",
+        actor="test",
+    )
+
+    store.record_github_version(draft.id, {"title": "A Post"}, "Revised body.\n", "test drift")
+    ops.merge(watch.pr_number)
+    outcome = watcher.check_one(store, target, watch)
+
+    assert outcome == "merged"
+    own_flags = [
+        f
+        for f in store.list_flags()
+        if f.type == "content_drift" and f.draft_id == draft.id and f.slug is None
+    ]
+    assert len(own_flags) == 1, "the unrelated slug-keyed flag must not suppress this one"
+
+
+def test_record_publish_behind_draft_dedupes_per_merge_not_per_draft(store: Store) -> None:
+    """Issue 60 finding 2: the old guard matched any open, slugless
+    content_drift flag for the draft, so a still-unresolved flag from an
+    earlier publish-behind cycle silently swallowed a later, distinct one
+    (a different built/current version pair): a merge carrying version 3
+    while the draft had already moved to version 4 got neither a flag nor
+    feedback of its own. Two distinct merges must each get their own flag;
+    a retry of the same merge must not."""
+    draft, _ = _approved_draft(store)
+
+    store.record_publish_behind_draft(draft.id, "test", built_version=1, current_version=2)
+    store.record_publish_behind_draft(draft.id, "test", built_version=3, current_version=4)
+
+    flags = [f for f in store.list_flags() if f.type == "content_drift" and f.draft_id == draft.id]
+    assert len(flags) == 2, "a distinct later publish-behind merge must get its own flag"
+    feedback = [
+        entry for entry in store.list_feedback(draft.id) if entry.action == "published_behind_draft"
+    ]
+    assert len(feedback) == 2
+
+    store.record_publish_behind_draft(draft.id, "test", built_version=1, current_version=2)
+
+    flags = [f for f in store.list_flags() if f.type == "content_drift" and f.draft_id == draft.id]
+    assert len(flags) == 2, "a retry of the same merge must not double its flag"
+
+
+def test_retry_after_refresh_failure_completes_on_the_next_tick(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue 60: the delete succeeds, refresh raises, the watch stays open;
+    a second check_one, with the ref now already gone, still completes."""
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    ops.merge(watch.pr_number)
+
+    calls = {"n": 0}
+
+    def flaky_refresh(*args: Any, **kwargs: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated refresh failure (stale index.lock)")
+
+    monkeypatch.setattr(watcher, "refresh_from_target", flaky_refresh)
+
+    with pytest.raises(RuntimeError):
+        watcher.check_one(store, target, watch)
+
+    assert store.get_draft(draft.id).status == "approved"
+    assert store.get_watch(draft.id) is not None
+    assert f"heads/{watch.branch}" not in ops.refs, "the branch delete already happened"
+
+    outcome = watcher.check_one(store, target, watch)
+
+    assert outcome == "merged"
+    assert store.get_draft(draft.id).status == "published"
+    assert store.get_watch(draft.id) is None
+    flags = [f for f in store.list_flags() if f.type == "content_drift" and f.draft_id == draft.id]
+    assert flags == [], "a retry must not double-record a content_drift flag"
+
+
+def test_publish_retry_after_clear_watch_failure_does_not_misapply_unpublish(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The critical retry hazard: WATCH_TRANSITIONS keys off the draft's
+    current status, and ("published", "merged") is the unpublish-kind
+    transition to "unpublished". If the first `_handle_merged` already
+    flipped a publish-kind watch's draft to "published" and then failed
+    before `clear_watch`, a naive retry would call `observe_pr_outcome`
+    again and misread the already-applied "published" status as that
+    unrelated entry, flipping a freshly published draft straight back to
+    unpublished."""
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    ops.merge(watch.pr_number)
+
+    original_clear_watch = store.clear_watch
+    calls = {"n": 0}
+
+    def flaky_clear_watch(*args: Any, **kwargs: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated crash before clear_watch")
+        return original_clear_watch(*args, **kwargs)
+
+    monkeypatch.setattr(store, "clear_watch", flaky_clear_watch)
+
+    with pytest.raises(RuntimeError):
+        watcher.check_one(store, target, watch)
+
+    assert store.get_draft(draft.id).status == "published"
+    assert store.get_watch(draft.id) is not None
+
+    outcome = watcher.check_one(store, target, watch)
+
+    assert outcome == "merged"
+    assert store.get_draft(draft.id).status == "published", (
+        "a retry must not flip an already-published draft to unpublished"
+    )
+    assert store.get_watch(draft.id) is None
+
+
+def test_delete_ref_on_a_branch_already_gone_does_not_block_the_retry(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real GitHubRepoOps path (issue 60): GitHub answers a delete of an
+    already-gone branch with 422 "Reference does not exist", not 404. The
+    first tick deletes the branch and then fails past that point; the
+    second tick's delete against the now-missing ref must not raise, so the
+    handler can finish."""
+    draft, run = _approved_draft(store)
+    deleted: dict[str, bool] = {"once": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/pulls/1"):
+            return httpx.Response(200, json={"number": 1, "merged": True, "state": "closed"})
+        if request.method == "DELETE":
+            if not deleted["once"]:
+                deleted["once"] = True
+                return httpx.Response(204)
+            return httpx.Response(422, json={"message": "Reference does not exist"})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    ops = TestRepoOps(
+        owner="o",
+        repo="r",
+        api_base="https://api.github.com",
+        transport=httpx.MockTransport(handler),
+        static_token="tok",
+    )
+    target = publisher.RepoTarget(
+        ops=ops, owner="o", repo="r", default_branch="main", token_provider=lambda: "tok"
+    )
+    from chronicle.api.models import WatchEntry
+
+    watch = WatchEntry(
+        draft_id=draft.id,
+        kind="publish",
+        branch="post/some-slug",
+        pr_number=1,
+        pr_url="https://github.com/o/r/pull/1",
+        created_at="2026-09-22T00:00:00Z",
+        built_version=draft.version_no,
+    )
+    store.record_watch(watch, "test")
+
+    calls = {"n": 0}
+
+    def flaky_refresh(*args: Any, **kwargs: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated refresh failure")
+
+    monkeypatch.setattr(watcher, "refresh_from_target", flaky_refresh)
+
+    with pytest.raises(RuntimeError):
+        watcher.check_one(store, target, watch)
+    assert store.get_watch(draft.id) is not None
+
+    outcome = watcher.check_one(store, target, watch)
+
+    assert outcome == "merged"
+    assert store.get_draft(draft.id).status == "published"
+    assert store.get_watch(draft.id) is None
+
+
+def test_unpublish_retry_after_a_partial_failure_still_completes(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """remove_post already ran and the draft already flipped to unpublished
+    when clear_watch itself failed; a retry must not re-remove the post or
+    misapply the merged-again transition, and must still clear the watch."""
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    ops.merge(watch.pr_number)
+    watcher.check_one(store, target, watch)
+    slug = store.get_draft(draft.id).slug
+    assert slug is not None
+    store.apply_digest(
+        "test",
+        [Post(slug=slug, path="content/posts/x.md", title="A Post", date="2026-01-01", sha="abc")],
+    )
+    assert store.get_post(slug) is not None
+
+    draft2, unpub_run = store.act_on_draft(draft.id, "unpublish", "scott", True)
+    assert unpub_run is not None
+    publisher.run_one(store, target, unpub_run)
+    watch2 = store.get_watch(draft.id)
+    assert watch2 is not None
+    ops.merge(watch2.pr_number)
+
+    original_clear_watch = store.clear_watch
+    calls = {"n": 0}
+
+    def flaky_clear_watch(*args: Any, **kwargs: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated crash before clear_watch")
+        return original_clear_watch(*args, **kwargs)
+
+    monkeypatch.setattr(store, "clear_watch", flaky_clear_watch)
+
+    with pytest.raises(RuntimeError):
+        watcher.check_one(store, target, watch2)
+
+    assert store.get_draft(draft.id).status == "unpublished"
+    with pytest.raises(ApiError):
+        store.get_post(slug)
+    assert store.get_watch(draft.id) is not None
+
+    outcome = watcher.check_one(store, target, watch2)
+
+    assert outcome == "merged"
+    assert store.get_watch(draft.id) is None
+    assert store.get_draft(draft.id).status == "unpublished"
 
 
 def test_backoff_grows_when_nothing_is_open_and_caps_at_the_maximum(

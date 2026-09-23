@@ -192,6 +192,11 @@ class FeedbackEntry(BaseModel):
     action: str
     version_no: int
     text: str
+    # Set only for a `pr_closed` entry (issue 60 finding 1): the durable
+    # marker `observe_pr_outcome` checks before writing a second one on a
+    # retry. None on every entry written before this field existed and on
+    # every other action, which never needs the check.
+    pr_number: int | None = None
 
 
 class Post(BaseModel):
@@ -301,6 +306,14 @@ class ReconcileFlag(BaseModel):
     slug: str | None = None
     draft_id: str | None = None
     detail: str = ""
+    # Set only on a `record_publish_behind_draft` flag (issue 60 finding
+    # 2): the merge-specific identity that dedupe keys on, so a distinct
+    # later publish-behind event (a different built/current version pair)
+    # is never suppressed by an earlier, still-unresolved one for the same
+    # draft. None on every flag written before this field existed and on
+    # every other flag type.
+    built_version: int | None = None
+    current_version: int | None = None
     # The main blob sha a `content_drift` flag was raised against, so
     # resolving it `ignore` can record exactly what was acknowledged
     # (`Store.resolve_flag`) rather than re-deriving it from `detail` text.
@@ -321,6 +334,11 @@ class Event(BaseModel):
     submission_id: str | None = None
     from_status: str | None = None
     to_status: str | None = None
+    # Set only on a `draft.pr_merged` or `draft.pr_closed` event (issue 60
+    # finding 1): the durable marker `observe_pr_outcome` checks before
+    # writing a second one on a retry. None on every event written before
+    # this field existed and on every other event type.
+    pr_number: int | None = None
 
 
 def render_submission_content(brief: str, materials: list[Material], image_ids: list[str]) -> str:
