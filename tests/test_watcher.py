@@ -317,6 +317,32 @@ def test_publish_behind_draft_flag_ignores_an_unrelated_slug_keyed_content_drift
     assert len(own_flags) == 1, "the unrelated slug-keyed flag must not suppress this one"
 
 
+def test_record_publish_behind_draft_dedupes_per_merge_not_per_draft(store: Store) -> None:
+    """Issue 60 finding 2: the old guard matched any open, slugless
+    content_drift flag for the draft, so a still-unresolved flag from an
+    earlier publish-behind cycle silently swallowed a later, distinct one
+    (a different built/current version pair): a merge carrying version 3
+    while the draft had already moved to version 4 got neither a flag nor
+    feedback of its own. Two distinct merges must each get their own flag;
+    a retry of the same merge must not."""
+    draft, _ = _approved_draft(store)
+
+    store.record_publish_behind_draft(draft.id, "test", built_version=1, current_version=2)
+    store.record_publish_behind_draft(draft.id, "test", built_version=3, current_version=4)
+
+    flags = [f for f in store.list_flags() if f.type == "content_drift" and f.draft_id == draft.id]
+    assert len(flags) == 2, "a distinct later publish-behind merge must get its own flag"
+    feedback = [
+        entry for entry in store.list_feedback(draft.id) if entry.action == "published_behind_draft"
+    ]
+    assert len(feedback) == 2
+
+    store.record_publish_behind_draft(draft.id, "test", built_version=1, current_version=2)
+
+    flags = [f for f in store.list_flags() if f.type == "content_drift" and f.draft_id == draft.id]
+    assert len(flags) == 2, "a retry of the same merge must not double its flag"
+
+
 def test_retry_after_refresh_failure_completes_on_the_next_tick(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:

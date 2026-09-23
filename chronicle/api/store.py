@@ -2225,6 +2225,8 @@ class Store:
         detail: str,
         actor: str,
         main_sha: str | None = None,
+        built_version: int | None = None,
+        current_version: int | None = None,
     ) -> ReconcileFlag:
         """Split out so `record_publish_behind_draft` (already `@locked`) can
         reuse it, the same reason `_put_image_unlocked` exists."""
@@ -2236,6 +2238,8 @@ class Store:
             draft_id=draft_id,
             detail=detail,
             main_sha=main_sha,
+            built_version=built_version,
+            current_version=current_version,
         )
         self._write_json(self._flag_path(flag.id), flag.model_dump(mode="json"))
         self._append_event(
@@ -2276,18 +2280,31 @@ class Store:
         later step (`observe_pr_outcome`, `clear_watch`) failed reaches this
         method again before `draft.status` has moved, so the same guard
         `reconcile.py`'s `_already_flagged` uses for the other flag types
-        applies here too: an unresolved `content_drift` flag already open
-        for this draft means the merge was already recorded, and a second
-        one would double the flag and the feedback entry for one event.
-        Matched on `slug=None` as well as `draft_id`, not `draft_id` alone,
+        applies here too, keyed to the individual publish rather than any
+        open flag for the draft (issue 60 finding 2): an unresolved
+        `content_drift` flag already open for this draft, with the same
+        `built_version`/`current_version` pair this call carries, means
+        this exact merge was already recorded, and a second one would
+        double the flag and the feedback entry for one event. A *different*
+        pair (a later, distinct publish-behind merge for the same draft
+        while an earlier one's flag is still unresolved) is not the same
+        event and must still get its own flag, which matching on
+        `draft_id` alone used to suppress. Matched on `slug=None` as well,
         because `reconcile.py`'s own `content_drift` flag for the same
         draft always carries its `slug` (it only runs once the draft is
         `published`, which this method's caller never is yet); without that
         an old, still-unresolved reconcile flag from a previous publish
-        cycle would silently suppress a genuinely new one here.
+        cycle would silently suppress a genuinely new one here. A flag
+        written before this field existed carries `built_version=None`,
+        which never equals this call's own (always-set) integer, so it is
+        left alone rather than mistaken for a match.
         """
         already_flagged = any(
-            flag.type == "content_drift" and flag.draft_id == draft_id and flag.slug is None
+            flag.type == "content_drift"
+            and flag.draft_id == draft_id
+            and flag.slug is None
+            and flag.built_version == built_version
+            and flag.current_version == current_version
             for flag in self.list_flags(resolved=False)
         )
         if already_flagged:
@@ -2297,7 +2314,13 @@ class Store:
             f" was open; the PR that merged only carried version {built_version}"
         )
         self._create_flag_unlocked(
-            "content_drift", slug=None, draft_id=draft_id, detail=detail, actor=actor
+            "content_drift",
+            slug=None,
+            draft_id=draft_id,
+            detail=detail,
+            actor=actor,
+            built_version=built_version,
+            current_version=current_version,
         )
         self._append_feedback(
             FeedbackEntry(

@@ -306,6 +306,14 @@ class ReconcileFlag(BaseModel):
     slug: str | None = None
     draft_id: str | None = None
     detail: str = ""
+    # Set only on a `record_publish_behind_draft` flag (issue 60 finding
+    # 2): the merge-specific identity that dedupe keys on, so a distinct
+    # later publish-behind event (a different built/current version pair)
+    # is never suppressed by an earlier, still-unresolved one for the same
+    # draft. None on every flag written before this field existed and on
+    # every other flag type.
+    built_version: int | None = None
+    current_version: int | None = None
     # The main blob sha a `content_drift` flag was raised against, so
     # resolving it `ignore` can record exactly what was acknowledged
     # (`Store.resolve_flag`) rather than re-deriving it from `detail` text.
