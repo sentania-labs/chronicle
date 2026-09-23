@@ -99,3 +99,42 @@ one is filled in.
 - A percent-encoded, scheme-carrying, or `..`-bearing frontmatter `url` still
   cannot make `preview_post_url` produce a link outside the preview site,
   the same posture ADR 015 already takes for `image_dir`.
+
+### Amended 2026-09-22 (issue 61): a legacy run derives its post link at read time
+
+Every run recorded before this ADR's `post_url` field existed has none, so
+every surface fell back to the site root for it, forever, since nothing
+here rewrites a stored run. `Store.resolve_run_post_url(run, draft)`
+closes that gap by deriving the link at read time instead: a stored
+`post_url` still wins outright, otherwise a pinned slug and the frontmatter
+of the version the run actually built (`run.built_version`, read from the
+store) rebuild the same link a fresh build would, through the same
+`preview_post_url`/`post_url` logic, never a second implementation. A save
+made after the run built can change a hand-set `date` or `url` on the
+draft's *current* frontmatter without touching what that run rendered; a
+Codex round on this same issue found the first version of this derivation
+reading the draft's current frontmatter regardless, which could point a
+legacy preview's link at a page that build never produced. `built_version`
+is None, or its version file is gone, only for a run older than version
+tracking itself, and only then does this fall back to the draft's current
+frontmatter. `convert.resolve_run_post_url` stays pure (no store access);
+it takes the already-resolved frontmatter as an argument, and `Store` is
+the one place every caller goes through instead of reading `run.built_version`
+itself.
+
+The one wrinkle is a draft pinned before this ADR's date stamp existed: it
+has a slug but no `date` at all. Falling back to today at read time would
+be wrong, since the build this run actually produced used whatever date
+was live the day it ran, and "today" would silently move the post's own
+link on every later read. So the missing-date case derives from the run's
+own build moment instead (`started_at`, else `created_at`), read in its own
+recorded offset, never converted to `PUBLISH_TZ`: a pre-v0.3.3 build's date
+came from `post_date`'s fallback, `datetime.now().astimezone().date()`,
+taken in whatever zone the builder process's own clock ran that day (UTC in
+production, since the images set no TZ), and the stored `started_at`/
+`created_at` (`now_stamp`, the same `datetime.now().astimezone()` call)
+carries that exact same offset. Reading `.date()` off it as recorded
+reproduces the build; converting to `PUBLISH_TZ` first would not, since the
+build never ran in Chicago's zone. Neither the run nor the draft is ever
+written to by this derivation; the computed date lives only in a local copy
+of the frontmatter passed through `post_url`'s own logic.

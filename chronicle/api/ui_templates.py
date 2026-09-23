@@ -1112,18 +1112,22 @@ def _format_wall_time(seconds: Any) -> str | None:
     return f"{int(minutes)}m {rest:.0f}s"
 
 
-def _success_result_html(result: dict[str, Any]) -> str:
+def _success_result_html(result: dict[str, Any], post_url: str | None) -> str:
     """A successful run's result shape varies by kind: preview runs carry
     `preview_url`, `slug` and `wall_time_seconds`; publish and unpublish runs
     carry `branch`, `pr_number`, `pr_url` and `commit_sha` (see publisher.py).
     This only ever renders the specific known keys it recognizes, each
     escaped, and silently skips whatever is missing. It never dumps the raw
     dict: an unrecognized key is exactly the kind of unvetted content this
-    page must not render."""
+    page must not render.
+
+    `post_url` is the caller's already-resolved link (`Store.
+    resolve_run_post_url`, issue #61): a run recorded before ADR 022 has none
+    in `result` itself, so the caller derives it from the built version's (or
+    the draft's) frontmatter before this function ever sees it."""
     rows = []
     preview_url = result.get("preview_url")
-    post_url = result.get("post_url")
-    # A run recorded before post_url existed falls back to the site root.
+    # A run with no derivable post link falls back to the site root.
     primary_url = post_url if isinstance(post_url, str) and post_url else preview_url
     if isinstance(primary_url, str) and primary_url:
         safe_url = escape(primary_url)
@@ -1165,7 +1169,7 @@ def _success_result_html(result: dict[str, Any]) -> str:
     return f"<ul>{''.join(rows)}</ul>"
 
 
-def run_log_page(run: dict[str, Any], log_text: str, *, banner: bool) -> str:
+def run_log_page(run: dict[str, Any], log_text: str, post_url: str | None, *, banner: bool) -> str:
     # A queued run has no result at all; a failed one's result carries
     # `error_class` and gets a notice; a successful one's result is
     # rendered by `_success_result_html`, which only knows specific keys.
@@ -1185,7 +1189,7 @@ def run_log_page(run: dict[str, Any], log_text: str, *, banner: bool) -> str:
             text = f"{text}: {message}"
         result_html = ui_chrome.notice(text, "error")
     elif run.get("status") == "succeeded":
-        result_html = _success_result_html(result)
+        result_html = _success_result_html(result, post_url)
     body = f"""
 <p class="muted">kind: {escape(run["kind"])} | status: {escape(run["status"])} |
 started: {escape(local_time(run.get("started_at")))} | finished: {escape(local_time(run.get("finished_at")))} |

@@ -288,11 +288,10 @@ def _publish(
 
     preview_run = store.last_run(draft.id, kind="preview")
     preview_url = None
-    post_url = None
     if preview_run is not None and preview_run.status == "succeeded":
         result = preview_run.result or {}
         preview_url = result.get("preview_url")
-        post_url = result.get("post_url")
+    post_url = store.resolve_run_post_url(preview_run, draft)
 
     watch = _open_or_update_pr(
         store,

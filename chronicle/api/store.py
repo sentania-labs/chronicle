@@ -894,6 +894,32 @@ class Store:
         draft = self.get_draft(draft_id)
         return [self.get_version(draft_id, n) for n in range(1, draft.version_no + 1)]
 
+    def resolve_run_post_url(self, run: Run | None, draft: Draft | None) -> str | None:
+        """`convert.resolve_run_post_url`, reading the frontmatter of the
+        version `run.built_version` actually built (issue #61's Codex round).
+
+        `convert.py` stays store-free on purpose, so this is the one place
+        every caller (the UI routes, the API status/preview routes, the
+        publisher) goes through instead of reading `run.built_version` itself.
+        A run whose result already carries a string `post_url` needs no
+        version at all, since `convert.resolve_run_post_url` returns it
+        outright; checking that here first is what keeps a board full of
+        current runs from taking one version read per card. A run with no
+        `built_version`, or whose version file is gone, falls back to the
+        draft's current frontmatter the same way `convert.py` always did.
+        """
+        built_frontmatter = None
+        if run is not None and run.built_version is not None:
+            result = run.result or {}
+            post_url_value = result.get("post_url")
+            if not (isinstance(post_url_value, str) and post_url_value):
+                try:
+                    version = self.get_version(run.draft_id, run.built_version)
+                except ApiError:
+                    version = None
+                built_frontmatter = version.frontmatter if version is not None else None
+        return convert.resolve_run_post_url(run, draft, built_frontmatter)
+
     def _content_at(self, draft_id: str, version_no: int) -> str:
         if version_no < 1:
             return ""

@@ -429,4 +429,95 @@ def test_apply_digest_refuses_to_write_a_post_record_with_a_bad_slug(store: Stor
     assert store.list_posts() == [store.get_post("fine")]
     assert not (store.repo_dir / "x.json").exists()
     assert not (store.posts_dir / "a").exists()
-    assert not (store.repo_dir / ".json").exists()
+
+
+# --- resolve_run_post_url (Codex round on issue #61: derive from the built
+# version, not a later save) ------------------------------------------------
+
+
+def test_resolve_run_post_url_uses_the_built_versions_frontmatter(store: Store) -> None:
+    """A save after the run built changes `url`; the live preview that run
+    already rendered must not move underneath it."""
+    draft, _ = store.create_draft("scott")
+    store.save_draft(draft.id, "scott", 0, {"title": "T", "url": "/2026/08/original/"}, "body")
+    store.act_on_draft(draft.id, "preview", "scott", True)
+    built = store.get_draft(draft.id)
+    run = store.last_run(draft.id, kind="preview")
+    assert run is not None
+    store.start_run(run.id, "builder-1", "0.164.0", False, built_version=built.version_no)
+    store.finish_run(run.id, "builder-1", True, {"preview_url": "https://x/preview/t/"})
+
+    store.save_draft(
+        draft.id, "scott", built.version_no, {"title": "T", "url": "/2026/09/changed/"}, "body"
+    )
+
+    stored_run = store.last_run(draft.id, kind="preview")
+    url = store.resolve_run_post_url(stored_run, store.get_draft(draft.id))
+    assert url == "https://x/preview/t/2026/08/original/"
+
+
+def test_resolve_run_post_url_falls_back_to_the_draft_when_built_version_is_none(
+    store: Store,
+) -> None:
+    draft, _ = store.create_draft("scott")
+    store.save_draft(draft.id, "scott", 0, {"title": "T", "url": "/current/"}, "body")
+    store.act_on_draft(draft.id, "preview", "scott", True)
+    run = store.last_run(draft.id, kind="preview")
+    assert run is not None
+    store.finish_run(run.id, "scott", True, {"preview_url": "https://x/preview/t/"})
+
+    stored_run = store.last_run(draft.id, kind="preview")
+    assert stored_run is not None and stored_run.built_version is None
+    url = store.resolve_run_post_url(stored_run, store.get_draft(draft.id))
+    assert url == "https://x/preview/t/current/"
+
+
+def test_resolve_run_post_url_falls_back_to_the_draft_when_the_built_version_is_missing(
+    store: Store,
+) -> None:
+    """A run's `built_version` can name a version older than version tracking
+    itself, or one otherwise no longer on disk; this must not raise, only
+    fall back the same way a run with no `built_version` at all does."""
+    draft, _ = store.create_draft("scott")
+    store.save_draft(draft.id, "scott", 0, {"title": "T", "url": "/current/"}, "body")
+    store.act_on_draft(draft.id, "preview", "scott", True)
+    run = store.last_run(draft.id, kind="preview")
+    assert run is not None
+    store.start_run(run.id, "builder-1", "0.164.0", False, built_version=99)
+    store.finish_run(run.id, "builder-1", True, {"preview_url": "https://x/preview/t/"})
+
+    stored_run = store.last_run(draft.id, kind="preview")
+    url = store.resolve_run_post_url(stored_run, store.get_draft(draft.id))
+    assert url == "https://x/preview/t/current/"
+
+
+def test_resolve_run_post_url_skips_the_version_read_when_the_run_already_has_one(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A board full of current runs (each already carrying a stored
+    `post_url`) must not take one version read per card."""
+    draft, _ = store.create_draft("scott")
+    store.save_draft(draft.id, "scott", 0, {"title": "T"}, "body")
+    store.act_on_draft(draft.id, "preview", "scott", True)
+    run = store.last_run(draft.id, kind="preview")
+    assert run is not None
+    store.start_run(run.id, "builder-1", "0.164.0", False, built_version=1)
+    store.finish_run(
+        run.id,
+        "builder-1",
+        True,
+        {"preview_url": "https://x/preview/t/", "post_url": "https://x/preview/t/somewhere/"},
+    )
+    stored_run = store.last_run(draft.id, kind="preview")
+
+    calls: list[tuple[str, int]] = []
+    original_get_version = Store.get_version
+
+    def spy(self: Store, draft_id: str, version_no: int):
+        calls.append((draft_id, version_no))
+        return original_get_version(self, draft_id, version_no)
+
+    monkeypatch.setattr(Store, "get_version", spy)
+    url = store.resolve_run_post_url(stored_run, store.get_draft(draft.id))
+    assert url == "https://x/preview/t/somewhere/"
+    assert calls == []

@@ -323,15 +323,36 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
 - **A preview run's `preview_url` is the site root; `post_url` is the post.**
   `convert.preview_post_url` builds the latter from the former and
   `convert.post_url`'s own output, never a second derivation of the date
-  path; a run recorded before this field existed carries no `post_url`, and
-  every surface that shows a preview link falls back to `preview_url`
-  instead of breaking. The date itself is pinned at the same moment as the
-  slug (`store._pin_slug`, ADR 022), not only at first publish, since the
-  filename and default `url` are both derived from it. `_pin_slug` never
-  runs a second time once `draft.slug` is set, so `Store.save_draft` carries
-  the stored date forward whenever a save on an already-pinned draft omits
-  it (an API caller that drops the key, or the editor's Date field cleared);
-  a hand-set different date still wins.
+  path. A run recorded before this field existed carries no `post_url` in
+  its stored result, but `Store.resolve_run_post_url` (issue #61, Codex
+  round) derives it at read time instead of leaving every such surface
+  pointed at the root: given the run and its draft, a stored `post_url`
+  wins outright, otherwise this reads the frontmatter of the version the
+  run actually built (`run.built_version`, via `Store.get_version`) and
+  passes it to the pure `convert.resolve_run_post_url`, which builds a
+  pinned slug plus that frontmatter's own date (or, when it has none, the
+  run's own `started_at`/`created_at` read in its own recorded offset,
+  never converted to `PUBLISH_TZ`, since a pre-v0.3.3 build took its date
+  from the builder process's own local zone, which is exactly what that
+  offset already records) into the same link a fresh build would. Reading
+  the draft's *current* frontmatter instead, as the first version of this
+  derivation did, could point a legacy preview's link at a page a later
+  save's changed `date` or `url` never actually built; only a run with no
+  `built_version`, or whose version file is gone, falls back to the
+  draft's current frontmatter. Every surface that shows a preview link (the
+  edit page, the board card, the run page, `/content/previews`, `GET
+  /v1/drafts/{id}/status` and `/preview`, the publish PR body) calls
+  `Store.resolve_run_post_url` rather than growing its own copy, and it
+  never writes anything back to the run, the draft, or any version. It
+  still falls back to `preview_url` (the site root) when no derivation is
+  possible: no slug, no `preview_url`, or no date at all. The date itself
+  is pinned at the same moment as the slug (`store._pin_slug`, ADR 022), not
+  only at first
+  publish, since the filename and default `url` are both derived from it.
+  `_pin_slug` never runs a second time once `draft.slug` is set, so
+  `Store.save_draft` carries the stored date forward whenever a save on an
+  already-pinned draft omits it (an API caller that drops the key, or the
+  editor's Date field cleared); a hand-set different date still wins.
 - **`chronicle/backup.py`'s restore swap keeps the displaced tree until
   reindex succeeds, and `_safe_member` runs before any extraction.** A tar
   member with an absolute path, a `..` segment, or a symlink is refused
