@@ -291,7 +291,7 @@ def _publish(
     if preview_run is not None and preview_run.status == "succeeded":
         result = preview_run.result or {}
         preview_url = result.get("preview_url")
-    post_url = convert.resolve_run_post_url(preview_run, draft)
+    post_url = store.resolve_run_post_url(preview_run, draft)
 
     watch = _open_or_update_pr(
         store,

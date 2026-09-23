@@ -19,7 +19,6 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
-from .. import convert
 from .. import ui_templates as tpl
 from ..deps import Consumer, Services
 from ..errors import ApiError
@@ -325,7 +324,7 @@ def _board_row(
     run_info = (
         {
             "preview_url": _preview_url(last_preview),
-            "post_url": convert.resolve_run_post_url(last_preview, draft),
+            "post_url": store.resolve_run_post_url(last_preview, draft),
         }
         if last_preview
         else None
@@ -448,7 +447,7 @@ def _editor_response(
     last_run = store.last_run(draft_id)
     preview_run = store.last_run(draft_id, kind="preview")
     preview_url = _preview_url(preview_run)
-    post_url = convert.resolve_run_post_url(preview_run, draft)
+    post_url = store.resolve_run_post_url(preview_run, draft)
     request_seq, answered_seq = store.index.revision_answer_seqs([draft_id]).get(
         draft_id, (None, None)
     )
@@ -857,7 +856,7 @@ def preview_list(request: Request, services: Services = Depends(get_services)) -
                 "draft_id": draft.id,
                 "title": draft.title or "(untitled)",
                 "preview_url": url,
-                "post_url": convert.resolve_run_post_url(run, draft),
+                "post_url": store.resolve_run_post_url(run, draft),
                 "built_at": run.finished_at,
                 "wall_seconds": _wall_seconds(run),
                 "toolchain_drift": run.toolchain_drift,
@@ -897,7 +896,7 @@ def run_log(
         draft = services.store.get_draft(run.draft_id)
     except ApiError:
         draft = None
-    post_url = convert.resolve_run_post_url(run, draft)
+    post_url = services.store.resolve_run_post_url(run, draft)
     return HTMLResponse(
         tpl.run_log_page(_dump(run), log_text, post_url, banner=banner_enabled(request))
     )

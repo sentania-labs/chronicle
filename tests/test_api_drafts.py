@@ -405,6 +405,50 @@ def test_preview_and_status_fall_back_to_the_root_when_no_date_can_be_derived(
     assert status["post_url"] is None
 
 
+def test_status_and_preview_derive_from_the_built_version_not_a_later_save(
+    client: TestClient, agent_token: str
+) -> None:
+    """Codex round on issue #61: derivation must read the frontmatter of the
+    version `run.built_version` actually built, not the draft's current one.
+    A save after the run built can change a hand-set `url`; the live preview
+    that run already rendered must not move underneath it."""
+    draft_id = new_draft(client, agent_token)
+    save(
+        client,
+        agent_token,
+        draft_id,
+        0,
+        frontmatter={**FRONTMATTER, "url": "/2026/08/original/"},
+    )
+    previewed = client.post(f"/v1/drafts/{draft_id}/actions/preview", headers=auth(agent_token))
+    run_id = previewed.json()["run_id"]
+
+    store = client.app.state.services.store  # type: ignore[attr-defined]
+    built = store.get_draft(draft_id)
+    store.start_run(run_id, "test-builder", "0.164.0", False, built_version=built.version_no)
+    store.finish_run(
+        run_id,
+        "test-builder",
+        succeeded=True,
+        result={"preview_url": "https://x/preview/drift-and-recovery/"},
+    )
+
+    save(
+        client,
+        agent_token,
+        draft_id,
+        built.version_no,
+        frontmatter={**FRONTMATTER, "url": "/2026/09/changed/"},
+    )
+
+    expected = "https://x/preview/drift-and-recovery/2026/08/original/"
+    status = client.get(f"/v1/drafts/{draft_id}/status", headers=auth(agent_token)).json()
+    assert status["post_url"] == expected
+
+    preview = client.get(f"/v1/drafts/{draft_id}/preview", headers=auth(agent_token)).json()
+    assert preview["post_url"] == expected
+
+
 def test_slug_collision_fails_the_action_with_409(client: TestClient, agent_token: str) -> None:
     first = new_draft(client, agent_token)
     save(client, agent_token, first, 0)

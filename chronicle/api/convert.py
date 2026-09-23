@@ -297,24 +297,38 @@ def _run_build_date(started_at: str | None, created_at: str | None) -> date | No
     return parsed.date()
 
 
-def resolve_run_post_url(run: Run | None, draft: Draft | None) -> str | None:
+def resolve_run_post_url(
+    run: Run | None,
+    draft: Draft | None,
+    built_frontmatter: dict[str, Any] | None = None,
+) -> str | None:
     """The post's own page for a preview run's result, or None (letting the
     caller fall back to `preview_url`, the site root).
 
     A run recorded since ADR 022 already carries a string `post_url`, which
     wins outright. A run recorded before it (issue #61) has none, so this
     derives the same link a fresh build would (`preview_post_url` over
-    `post_url`'s own frontmatter path logic), using the draft's own `date`
-    when it has one and, when it does not, the run's own build moment
-    (`started_at`, else `created_at`) instead of today: the build this run
-    actually produced used whatever date was live that day, and "today" at
-    read time would silently move the post's own link.
+    `post_url`'s own frontmatter path logic), using `built_frontmatter`'s
+    `date` and `url` when the caller has them and, when it does not, the
+    draft's own current frontmatter instead.
 
-    Never writes anything back: the derived date only ever lives in a copy
-    of the draft's frontmatter, passed through `post_url`'s logic locally.
-    Returns None, not a guess, when the run did not succeed, the result
-    carries neither url as a usable string, the draft is missing or has no
-    pinned slug, or no date can be derived at all.
+    `built_frontmatter` is the frontmatter of the version the run actually
+    converted (`run.built_version`), which the caller reads from the store
+    (this module stays store-free on purpose, see its module docstring); a
+    save made after the run built can change a hand-set `date` or `url` on
+    the draft's *current* frontmatter, and reading that instead of the
+    version the run built would derive a link the live preview never
+    produced (issue #61's Codex round). When it carries no parseable date
+    either, this falls back to the run's own build moment (`started_at`,
+    else `created_at`) instead of today: the build this run actually
+    produced used whatever date was live that day, and "today" at read time
+    would silently move the post's own link.
+
+    Never writes anything back: the derived date only ever lives in a local
+    copy of a frontmatter mapping, passed through `post_url`'s logic
+    locally. Returns None, not a guess, when the run did not succeed, the
+    result carries neither url as a usable string, the draft is missing or
+    has no pinned slug, or no date can be derived at all.
     """
     if run is None or run.status != "succeeded":
         return None
@@ -327,7 +341,7 @@ def resolve_run_post_url(run: Run | None, draft: Draft | None) -> str | None:
         return None
     if draft is None or not draft.slug:
         return None
-    frontmatter = draft.frontmatter
+    frontmatter = built_frontmatter if built_frontmatter is not None else draft.frontmatter
     if _parsed_frontmatter_date(frontmatter) is not None:
         effective = frontmatter
     else:

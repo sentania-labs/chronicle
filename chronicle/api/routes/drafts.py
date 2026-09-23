@@ -12,7 +12,6 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from .. import convert
 from ..deps import Consumer, Services, get_services, require_consumer
 from ..errors import ApiError
 from ..models import Draft
@@ -158,7 +157,7 @@ def get_status(draft_id: str, services: Services = Depends(get_services)) -> dic
         "slug": draft.slug,
         "last_run": last_run.model_dump(mode="json") if last_run else None,
         "preview_url": _preview_url(last_preview_run),
-        "post_url": convert.resolve_run_post_url(last_preview_run, draft),
+        "post_url": services.store.resolve_run_post_url(last_preview_run, draft),
         # Set once a publish or unpublish run has actually recorded a
         # result (Store.record_publish_result); null before that, not a
         # guessed value.
@@ -179,7 +178,7 @@ def get_preview(draft_id: str, services: Services = Depends(get_services)) -> di
     last_preview_run = services.store.last_run(draft.id, kind="preview")
     return {
         "preview_url": _preview_url(last_preview_run),
-        "post_url": convert.resolve_run_post_url(last_preview_run, draft),
+        "post_url": services.store.resolve_run_post_url(last_preview_run, draft),
         "last_run": last_preview_run.model_dump(mode="json") if last_preview_run else None,
     }
 

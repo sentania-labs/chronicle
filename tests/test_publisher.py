@@ -136,6 +136,52 @@ def test_pr_body_derives_the_post_link_when_the_run_predates_post_url(store: Sto
     assert "https://x/preview/my-first-post/" in body
 
 
+def test_pr_body_derives_the_post_link_from_the_built_version_not_a_later_save(
+    store: Store,
+) -> None:
+    """Codex round on issue #61: a save made after the preview run built,
+    changing the hand-set url, must not move the link the PR body shows;
+    it has to reflect the version the run actually rendered."""
+    draft, _ = store.create_draft("scott")
+    store.save_draft(
+        draft.id,
+        "scott",
+        0,
+        {"title": "My First Post", "url": "/2026/08/original/"},
+        "Hello, world.\n",
+    )
+    _, preview_run = store.act_on_draft(draft.id, "preview", "scott", True)
+    assert preview_run is not None
+    built = store.get_draft(draft.id)
+    store.start_run(
+        preview_run.id, "test-builder", "0.164.0", False, built_version=built.version_no
+    )
+    store.finish_run(
+        preview_run.id,
+        "test-builder",
+        succeeded=True,
+        result={"preview_url": "https://x/preview/my-first-post/"},
+    )
+
+    store.save_draft(
+        draft.id,
+        "scott",
+        built.version_no,
+        {"title": "My First Post", "url": "/2026/09/changed/"},
+        "Hello, world.\n",
+    )
+    store.act_on_draft(draft.id, "submit", "scott", True)
+    draft, run = store.act_on_draft(draft.id, "approve", "scott", True)
+    assert run is not None
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    body = ops.pulls[watch.pr_number]["body"]
+    assert "Preview: https://x/preview/my-first-post/2026/08/original/" in body
+
+
 def test_pr_body_falls_back_to_the_site_root_without_a_derivable_date(store: Store) -> None:
     draft, _ = store.create_draft("scott")
     store.save_draft(draft.id, "scott", 0, {"title": "My First Post"}, "Hello, world.\n")

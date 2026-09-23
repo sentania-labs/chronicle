@@ -710,3 +710,21 @@ def test_resolve_run_post_url_never_modifies_the_stored_result() -> None:
     convert.resolve_run_post_url(run, draft)
     assert result == before
     assert run.result == before
+
+
+def test_resolve_run_post_url_prefers_built_frontmatter_over_the_current_draft() -> None:
+    """A save after the run built can change the draft's hand-set `date` or
+    `url`; the link must still reflect what the run actually rendered."""
+    draft = _draft(frontmatter={"title": "My Post", "url": "/changed/"})
+    run = _run()
+    url = convert.resolve_run_post_url(
+        run, draft, built_frontmatter={"title": "My Post", "url": "/original/"}
+    )
+    assert url == "https://x/preview/my-post/original/"
+
+
+def test_resolve_run_post_url_falls_back_to_the_draft_when_built_frontmatter_is_none() -> None:
+    draft = _draft(frontmatter={"title": "My Post", "url": "/current/"})
+    run = _run()
+    url = convert.resolve_run_post_url(run, draft, built_frontmatter=None)
+    assert url == "https://x/preview/my-post/current/"

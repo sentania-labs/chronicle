@@ -1121,10 +1121,10 @@ def _success_result_html(result: dict[str, Any], post_url: str | None) -> str:
     dict: an unrecognized key is exactly the kind of unvetted content this
     page must not render.
 
-    `post_url` is the caller's already-resolved link (`convert.
+    `post_url` is the caller's already-resolved link (`Store.
     resolve_run_post_url`, issue #61): a run recorded before ADR 022 has none
-    in `result` itself, so the caller derives it from the draft before this
-    function ever sees it."""
+    in `result` itself, so the caller derives it from the built version's (or
+    the draft's) frontmatter before this function ever sees it."""
     rows = []
     preview_url = result.get("preview_url")
     # A run with no derivable post link falls back to the site root.

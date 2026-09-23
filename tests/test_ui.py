@@ -859,6 +859,39 @@ def test_editor_derives_the_post_link_for_a_legacy_run_with_no_post_url(
     assert "post_url" not in (stored_after.result or {})
 
 
+def test_editor_and_board_derive_the_post_link_from_the_built_version_not_a_later_save(
+    client: TestClient, services: Services
+) -> None:
+    """Codex round on issue #61: a save after the run built changes the
+    hand-set url; the edit page and board must still show the link the
+    build actually rendered, not one derived from the current draft."""
+    store = services.store
+    draft_id = make_draft(services, "previewed", title="Old run")
+    draft = store.get_draft(draft_id)
+    store.save_draft(
+        draft_id, "scott", draft.version_no, {"title": "Old run", "url": "/2026/08/original/"}, "b"
+    )
+    built = store.get_draft(draft_id)
+    run = store._queue_run(draft_id, "preview")
+    store.start_run(run.id, "builder-1", "0.164.0", False, built_version=built.version_no)
+    store.finish_run(run.id, "builder-1", True, {"preview_url": f"/preview/{built.slug}/"})
+
+    store.save_draft(
+        draft_id,
+        "scott",
+        built.version_no,
+        {"title": "Old run", "url": "/2026/09/changed/"},
+        "b",
+    )
+
+    expected = f"/preview/{built.slug}/2026/08/original/"
+    response = client.get(f"/content/drafts/{draft_id}")
+    assert f'href="{expected}"' in response.text
+
+    board = client.get("/content/drafts?status=previewed")
+    assert f'href="{expected}"' in board.text
+
+
 def test_an_unpinned_draft_has_no_preview_link_at_all(
     client: TestClient, services: Services
 ) -> None:
