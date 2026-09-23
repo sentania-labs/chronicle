@@ -2213,7 +2213,27 @@ class Store:
         suggestion) plus a `chronicle`-authored feedback entry, without
         touching `draft.status` (the watcher's own WATCH_TRANSITIONS call
         still decides that).
+
+        A retry of `_handle_merged` after this call already landed but a
+        later step (`observe_pr_outcome`, `clear_watch`) failed reaches this
+        method again before `draft.status` has moved, so the same guard
+        `reconcile.py`'s `_already_flagged` uses for the other flag types
+        applies here too: an unresolved `content_drift` flag already open
+        for this draft means the merge was already recorded, and a second
+        one would double the flag and the feedback entry for one event.
+        Matched on `slug=None` as well as `draft_id`, not `draft_id` alone,
+        because `reconcile.py`'s own `content_drift` flag for the same
+        draft always carries its `slug` (it only runs once the draft is
+        `published`, which this method's caller never is yet); without that
+        an old, still-unresolved reconcile flag from a previous publish
+        cycle would silently suppress a genuinely new one here.
         """
+        already_flagged = any(
+            flag.type == "content_drift" and flag.draft_id == draft_id and flag.slug is None
+            for flag in self.list_flags(resolved=False)
+        )
+        if already_flagged:
+            return
         detail = (
             f"draft {draft_id} was revised to version {current_version} while its publish PR"
             f" was open; the PR that merged only carried version {built_version}"

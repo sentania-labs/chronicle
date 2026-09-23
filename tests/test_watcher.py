@@ -181,6 +181,86 @@ def test_merge_with_no_revision_does_not_flag_published_behind_draft(store: Stor
     assert flags == []
 
 
+def test_retry_after_observe_pr_outcome_failure_does_not_double_flag_drift(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`record_publish_behind_draft` runs and succeeds, then the next step
+    (`observe_pr_outcome`) fails before `draft.status` moves at all: a
+    retry reaches `record_publish_behind_draft` again with the same
+    unmoved status, so it must not create a second content_drift flag or a
+    second feedback entry for the same merge."""
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    store.record_github_version(draft.id, {"title": "A Post"}, "Revised body.\n", "test drift")
+
+    original_observe = store.observe_pr_outcome
+    calls = {"n": 0}
+
+    def flaky_observe(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated crash before observe_pr_outcome")
+        return original_observe(*args, **kwargs)
+
+    monkeypatch.setattr(store, "observe_pr_outcome", flaky_observe)
+
+    ops.merge(watch.pr_number)
+    with pytest.raises(RuntimeError):
+        watcher.check_one(store, target, watch)
+
+    assert store.get_draft(draft.id).status == "approved"
+    flags = [f for f in store.list_flags() if f.type == "content_drift" and f.draft_id == draft.id]
+    assert len(flags) == 1
+
+    outcome = watcher.check_one(store, target, watch)
+
+    assert outcome == "merged"
+    assert store.get_draft(draft.id).status == "published"
+    flags = [f for f in store.list_flags() if f.type == "content_drift" and f.draft_id == draft.id]
+    assert len(flags) == 1, "a retry must not double-record the content_drift flag"
+    feedback = [
+        entry for entry in store.list_feedback(draft.id) if entry.action == "published_behind_draft"
+    ]
+    assert len(feedback) == 1, "a retry must not double-record the feedback entry"
+
+
+def test_publish_behind_draft_flag_ignores_an_unrelated_slug_keyed_content_drift_flag(
+    store: Store,
+) -> None:
+    """A leftover, still-unresolved content_drift flag from reconcile's own
+    check (keyed by slug, a different cause entirely: main moved since the
+    last publish) must not suppress this draft's own publish-behind-draft
+    flag, which is keyed by draft_id with no slug."""
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+
+    store.create_flag(
+        "content_drift",
+        slug="some-other-cause",
+        draft_id=draft.id,
+        detail="an unrelated, still-open content_drift flag for this same draft",
+        actor="test",
+    )
+
+    store.record_github_version(draft.id, {"title": "A Post"}, "Revised body.\n", "test drift")
+    ops.merge(watch.pr_number)
+    outcome = watcher.check_one(store, target, watch)
+
+    assert outcome == "merged"
+    own_flags = [
+        f
+        for f in store.list_flags()
+        if f.type == "content_drift" and f.draft_id == draft.id and f.slug is None
+    ]
+    assert len(own_flags) == 1, "the unrelated slug-keyed flag must not suppress this one"
+
+
 def test_retry_after_refresh_failure_completes_on_the_next_tick(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
