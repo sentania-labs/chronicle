@@ -227,6 +227,62 @@ def test_retry_after_observe_pr_outcome_failure_does_not_double_flag_drift(
     assert len(feedback) == 1, "a retry must not double-record the feedback entry"
 
 
+def test_retry_after_index_upsert_failure_completes_observation_exactly_once(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue 60 finding 1: `observe_pr_outcome` writes the draft file, the
+    feedback entry, and the event before it ever reaches the commit and the
+    index upsert. If the index upsert (or the commit) raises, the draft
+    file already carries the transition's result, but SQLite does not yet:
+    `list_drafts` is index-backed, so it would keep showing the draft at
+    its old status forever unless the retry can still complete the index
+    upsert, and the retry must do that without appending a second event or
+    a second feedback entry for the one close."""
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    ops.close_unmerged(watch.pr_number)
+
+    original_upsert = store.index.upsert_draft
+    calls = {"n": 0}
+
+    def flaky_upsert(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated sqlite failure")
+        return original_upsert(*args, **kwargs)
+
+    monkeypatch.setattr(store.index, "upsert_draft", flaky_upsert)
+
+    with pytest.raises(RuntimeError):
+        watcher.check_one(store, target, watch)
+
+    assert store.get_draft(draft.id).status == "in_review", "the draft file already moved"
+    assert draft.id not in {d.id for d in store.list_drafts(status="in_review")}, (
+        "the index upsert failed, so SQLite must still lag the draft file"
+    )
+    assert store.get_watch(draft.id) is not None, "the watch stays open until fully observed"
+
+    outcome = watcher.check_one(store, target, watch)
+
+    assert outcome == "closed"
+    assert store.get_draft(draft.id).status == "in_review"
+    assert draft.id in {d.id for d in store.list_drafts(status="in_review")}, (
+        "the retry must complete the missed index upsert"
+    )
+    assert store.get_watch(draft.id) is None, "the watch clears only once fully observed"
+    events = [
+        e
+        for e in store.events_since(0)[0]
+        if e.draft_id == draft.id and e.type == "draft.pr_closed"
+    ]
+    assert len(events) == 1, "a retry must not append a second event for the same close"
+    feedback = [entry for entry in store.list_feedback(draft.id) if entry.action == "pr_closed"]
+    assert len(feedback) == 1, "a retry must not append a second feedback entry for the same close"
+
+
 def test_publish_behind_draft_flag_ignores_an_unrelated_slug_keyed_content_drift_flag(
     store: Store,
 ) -> None:

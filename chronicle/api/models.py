@@ -192,6 +192,11 @@ class FeedbackEntry(BaseModel):
     action: str
     version_no: int
     text: str
+    # Set only for a `pr_closed` entry (issue 60 finding 1): the durable
+    # marker `observe_pr_outcome` checks before writing a second one on a
+    # retry. None on every entry written before this field existed and on
+    # every other action, which never needs the check.
+    pr_number: int | None = None
 
 
 class Post(BaseModel):
@@ -321,6 +326,11 @@ class Event(BaseModel):
     submission_id: str | None = None
     from_status: str | None = None
     to_status: str | None = None
+    # Set only on a `draft.pr_merged` or `draft.pr_closed` event (issue 60
+    # finding 1): the durable marker `observe_pr_outcome` checks before
+    # writing a second one on a retry. None on every event written before
+    # this field existed and on every other event type.
+    pr_number: int | None = None
 
 
 def render_submission_content(brief: str, materials: list[Material], image_ids: list[str]) -> str:
