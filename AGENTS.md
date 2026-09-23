@@ -328,9 +328,11 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   it at read time instead of leaving every such surface pointed at the
   root: given the run and its draft, a stored `post_url` wins outright,
   otherwise a pinned slug plus the draft's own date (or, when the draft has
-  none, the run's own `started_at`/`created_at` converted to `PUBLISH_TZ`,
-  never the raw offset a UTC container clock would carry) rebuilds the same
-  link a fresh build would. Every surface that shows a preview link (the
+  none, the run's own `started_at`/`created_at` read in its own recorded
+  offset, never converted to `PUBLISH_TZ`, since a pre-v0.3.3 build took its
+  date from the builder process's own local zone, which is exactly what that
+  offset already records) rebuilds the same link a fresh build would. Every
+  surface that shows a preview link (the
   edit page, the board card, the run page, `/content/previews`, `GET
   /v1/drafts/{id}/status` and `/preview`, the publish PR body) calls this
   one function rather than growing its own copy, and it never writes

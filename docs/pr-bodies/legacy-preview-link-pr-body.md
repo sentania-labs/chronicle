@@ -14,8 +14,10 @@ instead, through one function (`convert.resolve_run_post_url`): given a
 run and its draft, a stored `post_url` still wins outright; otherwise a
 pinned slug plus the draft's own date rebuilds the same link a fresh build
 would, and when the draft has no date either (pinned before ADR 022), the
-run's own build timestamp, converted explicitly to America/Chicago, stands
-in for it. Nothing is rewritten: not the run, not the draft. A draft still
+run's own build timestamp, read in its own recorded offset (never converted
+to America/Chicago, since a pre-v0.3.3 build's date came from the builder
+process's own local zone, which the timestamp's offset already records),
+stands in for it. Nothing is rewritten: not the run, not the draft. A draft still
 has no preview link at all until its first successful preview run, exactly
 as before.
 
@@ -69,9 +71,10 @@ timestamp read as UTC by mistake, a malformed timestamp, a draft deleted
 after the run, a draft whose slug changed, extra store reads on the board
 page per card, and the PR body. No findings required a code change: the
 derivation reuses the existing `preview_post_url` hardening for a hand-set
-url, every render site already escapes its output, the UTC trap is the
-specific failure mode the fix closes (covered by a test with a build made
-late evening America/Chicago that is already the next UTC day), a
+url, every render site already escapes its output, reading the stamp in
+its own recorded offset is what reproduces a pre-v0.3.3 build's date
+(covered by a test with a build stamped just past a UTC month boundary,
+still the prior month in America/Chicago), a
 malformed timestamp is caught and falls back cleanly, every board/editor
 call site already holds the draft object it needs with no new reads, and
 the run-log route is the only new read, once per page view. The tests that

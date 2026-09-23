@@ -20,11 +20,17 @@ angles the dispatch named, plus a few that fell out of reading the code.
   the value in `escape()` before writing it into an `href`; nothing here
   bypasses that.
 - **A run timestamp in UTC read as the date by mistake.** This is the
-  failure mode the fix exists to close. `_run_build_date` converts
-  explicitly to `PUBLISH_TZ` rather than taking `.date()` off the raw
-  offset; `test_resolve_run_post_url_uses_the_runs_own_build_date_when_the_draft_has_none`
-  covers a build at 23:30 America/Chicago that is already the next UTC day
-  and asserts the Chicago date wins.
+  failure mode the fix exists to close. `_run_build_date` reads `.date()`
+  off the stamp's own recorded offset, never converted to `PUBLISH_TZ`,
+  since a pre-v0.3.3 build's date came from the builder process's own local
+  zone (in practice UTC, since the images set no TZ), which the stored
+  offset already records;
+  `test_resolve_run_post_url_uses_the_runs_own_build_date_when_the_draft_has_none`
+  covers a build stamped just past a UTC month boundary and asserts the
+  recorded-offset date wins, not a Chicago-converted one.
+  - **Adolin verification: build date converted to PUBLISH_TZ does not match
+    what post_date used at build time; fixed to use the stamp's recorded
+    offset.**
 - **A malformed run timestamp.** `_run_build_date` catches `ValueError` from
   `datetime.fromisoformat` and returns None, which `resolve_run_post_url`
   treats as "no date derivable" and falls back to the root. Covered by

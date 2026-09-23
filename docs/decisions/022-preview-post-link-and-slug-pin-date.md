@@ -115,11 +115,14 @@ has a slug but no `date` at all. Falling back to today at read time would
 be wrong, since the build this run actually produced used whatever date
 was live the day it ran, and "today" would silently move the post's own
 link on every later read. So the missing-date case derives from the run's
-own build moment instead (`started_at`, else `created_at`), converted to
-`PUBLISH_TZ` explicitly: those timestamps come from `now_stamp`, which
-carries whatever offset the container's clock runs in (UTC in production),
-so a build made late in the evening America/Chicago time can already be
-tomorrow in the stored string, and taking `.date()` off the raw offset
-would read the wrong day. Neither the run nor the draft is ever written to
-by this derivation; the computed date lives only in a local copy of the
-frontmatter passed through `post_url`'s own logic.
+own build moment instead (`started_at`, else `created_at`), read in its own
+recorded offset, never converted to `PUBLISH_TZ`: a pre-v0.3.3 build's date
+came from `post_date`'s fallback, `datetime.now().astimezone().date()`,
+taken in whatever zone the builder process's own clock ran that day (UTC in
+production, since the images set no TZ), and the stored `started_at`/
+`created_at` (`now_stamp`, the same `datetime.now().astimezone()` call)
+carries that exact same offset. Reading `.date()` off it as recorded
+reproduces the build; converting to `PUBLISH_TZ` first would not, since the
+build never ran in Chicago's zone. Neither the run nor the draft is ever
+written to by this derivation; the computed date lives only in a local copy
+of the frontmatter passed through `post_url`'s own logic.
