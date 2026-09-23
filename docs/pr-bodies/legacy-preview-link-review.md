@@ -85,3 +85,6 @@ to assert the new derive-first behavior instead of being left to fail
 and one straightforward genuine-fallback test was added at each layer for
 the case derivation still cannot produce a link (no derivable date at all,
 or no pinned slug).
+
+Codex round: derivation read the current draft instead of the built
+version; fixed to read run.built_version's archived frontmatter.

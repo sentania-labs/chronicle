@@ -104,11 +104,23 @@ one is filled in.
 
 Every run recorded before this ADR's `post_url` field existed has none, so
 every surface fell back to the site root for it, forever, since nothing
-here rewrites a stored run. `convert.resolve_run_post_url(run, draft)`
+here rewrites a stored run. `Store.resolve_run_post_url(run, draft)`
 closes that gap by deriving the link at read time instead: a stored
-`post_url` still wins outright, otherwise a pinned slug and the draft's own
-`date` rebuild the same link a fresh build would, through the same
-`preview_post_url`/`post_url` logic, never a second implementation.
+`post_url` still wins outright, otherwise a pinned slug and the frontmatter
+of the version the run actually built (`run.built_version`, read from the
+store) rebuild the same link a fresh build would, through the same
+`preview_post_url`/`post_url` logic, never a second implementation. A save
+made after the run built can change a hand-set `date` or `url` on the
+draft's *current* frontmatter without touching what that run rendered; a
+Codex round on this same issue found the first version of this derivation
+reading the draft's current frontmatter regardless, which could point a
+legacy preview's link at a page that build never produced. `built_version`
+is None, or its version file is gone, only for a run older than version
+tracking itself, and only then does this fall back to the draft's current
+frontmatter. `convert.resolve_run_post_url` stays pure (no store access);
+it takes the already-resolved frontmatter as an argument, and `Store` is
+the one place every caller goes through instead of reading `run.built_version`
+itself.
 
 The one wrinkle is a draft pinned before this ADR's date stamp existed: it
 has a slug but no `date` at all. Falling back to today at read time would
