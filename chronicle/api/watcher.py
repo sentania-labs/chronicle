@@ -36,8 +36,21 @@ def _handle_merged(store: Store, target: RepoTarget, watch: WatchEntry) -> None:
     draft = store.get_draft(watch.draft_id)
     if watch.kind == "unpublish" and draft.slug:
         store.remove_post(draft.slug, WATCHER_ACTOR)
+    # Retryable end to end (issue 60): if a step below already ran on an
+    # earlier tick and a later one then failed, the watch is still open and
+    # this whole handler runs again. `draft.status` already reflects a prior
+    # success, but only the from_status the first attempt saw is in
+    # WATCH_TRANSITIONS (`resolve_watch`), not the to_status a retry now
+    # finds, so checking draft.status against what a "publish" or
+    # "unpublish" watch's merge always produces (stable across a retry, unlike
+    # the from_status) is what stops a second `observe_pr_outcome` call from
+    # reading the already-applied "published" state as the unrelated
+    # ("published", "merged") -> "unpublished" entry in that table.
+    expected_status = "published" if watch.kind == "publish" else "unpublished"
+    already_observed = draft.status == expected_status
     if (
         watch.kind == "publish"
+        and not already_observed
         and watch.built_version is not None
         and draft.version_no > watch.built_version
     ):
@@ -53,7 +66,8 @@ def _handle_merged(store: Store, target: RepoTarget, watch: WatchEntry) -> None:
             built_version=watch.built_version,
             current_version=draft.version_no,
         )
-    store.observe_pr_outcome(watch.draft_id, "merged", watch.pr_number, actor=WATCHER_ACTOR)
+    if not already_observed:
+        store.observe_pr_outcome(watch.draft_id, "merged", watch.pr_number, actor=WATCHER_ACTOR)
     store.clear_watch(watch.draft_id, WATCHER_ACTOR, f"PR #{watch.pr_number} merged")
 
 

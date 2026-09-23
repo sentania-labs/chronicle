@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
+import httpx
 import pytest
 
 from chronicle.api import publisher, watcher
 from chronicle.api.admin_deps import AdminServices
 from chronicle.api.errors import ApiError
+from chronicle.api.github_client import TestRepoOps
 from chronicle.api.models import Post
 from chronicle.api.store import Store
 from tests.fakes import FakeRepoOps
@@ -177,6 +179,161 @@ def test_merge_with_no_revision_does_not_flag_published_behind_draft(store: Stor
 
     flags = [f for f in store.list_flags() if f.type == "content_drift"]
     assert flags == []
+
+
+def test_retry_after_refresh_failure_completes_on_the_next_tick(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue 60: the delete succeeds, refresh raises, the watch stays open;
+    a second check_one, with the ref now already gone, still completes."""
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    ops.merge(watch.pr_number)
+
+    calls = {"n": 0}
+
+    def flaky_refresh(*args: Any, **kwargs: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated refresh failure (stale index.lock)")
+
+    monkeypatch.setattr(watcher, "refresh_from_target", flaky_refresh)
+
+    with pytest.raises(RuntimeError):
+        watcher.check_one(store, target, watch)
+
+    assert store.get_draft(draft.id).status == "approved"
+    assert store.get_watch(draft.id) is not None
+    assert f"heads/{watch.branch}" not in ops.refs, "the branch delete already happened"
+
+    outcome = watcher.check_one(store, target, watch)
+
+    assert outcome == "merged"
+    assert store.get_draft(draft.id).status == "published"
+    assert store.get_watch(draft.id) is None
+    flags = [f for f in store.list_flags() if f.type == "content_drift" and f.draft_id == draft.id]
+    assert flags == [], "a retry must not double-record a content_drift flag"
+
+
+def test_delete_ref_on_a_branch_already_gone_does_not_block_the_retry(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real GitHubRepoOps path (issue 60): GitHub answers a delete of an
+    already-gone branch with 422 "Reference does not exist", not 404. The
+    first tick deletes the branch and then fails past that point; the
+    second tick's delete against the now-missing ref must not raise, so the
+    handler can finish."""
+    draft, run = _approved_draft(store)
+    deleted: dict[str, bool] = {"once": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith(f"/pulls/1"):
+            return httpx.Response(200, json={"number": 1, "merged": True, "state": "closed"})
+        if request.method == "DELETE":
+            if not deleted["once"]:
+                deleted["once"] = True
+                return httpx.Response(204)
+            return httpx.Response(422, json={"message": "Reference does not exist"})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    ops = TestRepoOps(
+        owner="o",
+        repo="r",
+        api_base="https://api.github.com",
+        transport=httpx.MockTransport(handler),
+        static_token="tok",
+    )
+    target = publisher.RepoTarget(
+        ops=ops, owner="o", repo="r", default_branch="main", token_provider=lambda: "tok"
+    )
+    from chronicle.api.models import WatchEntry
+
+    watch = WatchEntry(
+        draft_id=draft.id,
+        kind="publish",
+        branch="post/some-slug",
+        pr_number=1,
+        pr_url="https://github.com/o/r/pull/1",
+        created_at="2026-09-22T00:00:00Z",
+        built_version=draft.version_no,
+    )
+    store.record_watch(watch, "test")
+
+    calls = {"n": 0}
+
+    def flaky_refresh(*args: Any, **kwargs: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated refresh failure")
+
+    monkeypatch.setattr(watcher, "refresh_from_target", flaky_refresh)
+
+    with pytest.raises(RuntimeError):
+        watcher.check_one(store, target, watch)
+    assert store.get_watch(draft.id) is not None
+
+    outcome = watcher.check_one(store, target, watch)
+
+    assert outcome == "merged"
+    assert store.get_draft(draft.id).status == "published"
+    assert store.get_watch(draft.id) is None
+
+
+def test_unpublish_retry_after_a_partial_failure_still_completes(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """remove_post already ran and the draft already flipped to unpublished
+    when clear_watch itself failed; a retry must not re-remove the post or
+    misapply the merged-again transition, and must still clear the watch."""
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    ops.merge(watch.pr_number)
+    watcher.check_one(store, target, watch)
+    slug = store.get_draft(draft.id).slug
+    assert slug is not None
+    store.apply_digest(
+        "test",
+        [Post(slug=slug, path="content/posts/x.md", title="A Post", date="2026-01-01", sha="abc")],
+    )
+    assert store.get_post(slug) is not None
+
+    draft2, unpub_run = store.act_on_draft(draft.id, "unpublish", "scott", True)
+    assert unpub_run is not None
+    publisher.run_one(store, target, unpub_run)
+    watch2 = store.get_watch(draft.id)
+    assert watch2 is not None
+    ops.merge(watch2.pr_number)
+
+    original_clear_watch = store.clear_watch
+    calls = {"n": 0}
+
+    def flaky_clear_watch(*args: Any, **kwargs: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated crash before clear_watch")
+        return original_clear_watch(*args, **kwargs)
+
+    monkeypatch.setattr(store, "clear_watch", flaky_clear_watch)
+
+    with pytest.raises(RuntimeError):
+        watcher.check_one(store, target, watch2)
+
+    assert store.get_draft(draft.id).status == "unpublished"
+    with pytest.raises(ApiError):
+        store.get_post(slug)
+    assert store.get_watch(draft.id) is not None
+
+    outcome = watcher.check_one(store, target, watch2)
+
+    assert outcome == "merged"
+    assert store.get_watch(draft.id) is None
+    assert store.get_draft(draft.id).status == "unpublished"
 
 
 def test_backoff_grows_when_nothing_is_open_and_caps_at_the_maximum(
