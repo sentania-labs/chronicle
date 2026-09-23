@@ -218,6 +218,50 @@ def test_retry_after_refresh_failure_completes_on_the_next_tick(
     assert flags == [], "a retry must not double-record a content_drift flag"
 
 
+def test_publish_retry_after_clear_watch_failure_does_not_misapply_unpublish(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The critical retry hazard: WATCH_TRANSITIONS keys off the draft's
+    current status, and ("published", "merged") is the unpublish-kind
+    transition to "unpublished". If the first `_handle_merged` already
+    flipped a publish-kind watch's draft to "published" and then failed
+    before `clear_watch`, a naive retry would call `observe_pr_outcome`
+    again and misread the already-applied "published" status as that
+    unrelated entry, flipping a freshly published draft straight back to
+    unpublished."""
+    draft, run = _approved_draft(store)
+    target, ops = _target()
+    publisher.run_one(store, target, run)
+    watch = store.get_watch(draft.id)
+    assert watch is not None
+    ops.merge(watch.pr_number)
+
+    original_clear_watch = store.clear_watch
+    calls = {"n": 0}
+
+    def flaky_clear_watch(*args: Any, **kwargs: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated crash before clear_watch")
+        return original_clear_watch(*args, **kwargs)
+
+    monkeypatch.setattr(store, "clear_watch", flaky_clear_watch)
+
+    with pytest.raises(RuntimeError):
+        watcher.check_one(store, target, watch)
+
+    assert store.get_draft(draft.id).status == "published"
+    assert store.get_watch(draft.id) is not None
+
+    outcome = watcher.check_one(store, target, watch)
+
+    assert outcome == "merged"
+    assert store.get_draft(draft.id).status == "published", (
+        "a retry must not flip an already-published draft to unpublished"
+    )
+    assert store.get_watch(draft.id) is None
+
+
 def test_delete_ref_on_a_branch_already_gone_does_not_block_the_retry(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
