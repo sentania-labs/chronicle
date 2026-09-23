@@ -150,10 +150,12 @@ def test_pr_body_falls_back_to_the_site_root_without_a_derivable_date(store: Sto
     draft = store.get_draft(draft.id)
     draft.frontmatter.pop("date", None)
     store._write_json(store._draft_path(draft.id), draft.model_dump(mode="json"))
-    run = store.get_run(preview_run.id)
-    run.started_at = "not-a-timestamp"
-    run.created_at = "also-not-a-timestamp"
-    store._write_json(store._run_path(run.id), run.model_dump(mode="json"))
+    stored_preview_run = store.get_run(preview_run.id)
+    stored_preview_run.started_at = "not-a-timestamp"
+    stored_preview_run.created_at = "also-not-a-timestamp"
+    store._write_json(
+        store._run_path(stored_preview_run.id), stored_preview_run.model_dump(mode="json")
+    )
 
     store.act_on_draft(draft.id, "submit", "scott", True)
     draft, run = store.act_on_draft(draft.id, "approve", "scott", True)

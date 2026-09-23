@@ -855,6 +855,7 @@ def test_editor_derives_the_post_link_for_a_legacy_run_with_no_post_url(
     assert f'(<a href="/preview/{draft.slug}/">site</a>)' in board.text
 
     stored_after = services.store.last_run(draft_id, kind="preview")
+    assert stored_after is not None
     assert "post_url" not in (stored_after.result or {})
 
 
@@ -1013,9 +1014,7 @@ def test_run_log_page_shows_the_post_url_first_and_the_site_second() -> None:
             "slug": "a-slug",
         },
     )
-    html = tpl.run_log_page(
-        run, "", "/preview/a-slug/2026/08/a-slug/", banner=False
-    )
+    html = tpl.run_log_page(run, "", "/preview/a-slug/2026/08/a-slug/", banner=False)
     assert 'href="/preview/a-slug/2026/08/a-slug/"' in html
     assert 'href="/preview/a-slug/"' in html
     assert "notice error" not in html

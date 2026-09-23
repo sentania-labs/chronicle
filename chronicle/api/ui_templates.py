@@ -1169,9 +1169,7 @@ def _success_result_html(result: dict[str, Any], post_url: str | None) -> str:
     return f"<ul>{''.join(rows)}</ul>"
 
 
-def run_log_page(
-    run: dict[str, Any], log_text: str, post_url: str | None, *, banner: bool
-) -> str:
+def run_log_page(run: dict[str, Any], log_text: str, post_url: str | None, *, banner: bool) -> str:
     # A queued run has no result at all; a failed one's result carries
     # `error_class` and gets a notice; a successful one's result is
     # rendered by `_success_result_html`, which only knows specific keys.
