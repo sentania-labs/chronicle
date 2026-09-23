@@ -123,3 +123,118 @@ rather than folded into this diff.
 Green after every fix in this pass. Final run: 1031 passed (unit test
 count from the full suite, `chronicle/`'s own watcher- and client-level
 tests included).
+
+## Codex round (PR #62)
+
+A second review pass, this time from Codex against the open PR, found two
+more real gaps in `observe_pr_outcome` and `record_publish_behind_draft`.
+Both fixed on this branch, each with a test that fails against 3e1e9d6
+(this PR's head before this round) and passes after.
+
+### Codex finding 1 (P2): a retry after the draft file write but before the commit or index upsert left SQLite permanently stale
+
+`observe_pr_outcome` wrote the draft file's new status first, then the
+`pr_closed` feedback entry, then the event, then the commit and the index
+upsert. If it raised from `_append_event`, `_commit`, or
+`index.upsert_draft`, the watch stayed open (nothing had cleared it) and
+the next tick called the method again, but the old code decided whether
+to do anything at all by comparing `draft.status` against
+`resolve_watch`'s table, which only understands a `from_status` a first
+successful call has already moved past. In practice this meant a second
+call after a status-only partial write silently skipped every remaining
+step, including the index upsert, so `list_drafts` and the UI (both
+SQLite-backed) showed the draft stuck at its old status forever while the
+draft file itself already carried the new one, and the watch could never
+be retried again to fix it since a caller checking `already_observed`
+the same way `_handle_merged` does would see the file's new status and
+conclude there was nothing left to do.
+
+Verified live: added
+`test_retry_after_index_upsert_failure_completes_observation_exactly_once`,
+which fails the index upsert once via monkeypatch on a close-without-merge
+watch. Before the fix, `store.get_draft(draft.id).status` moved to
+`in_review` on the first (raising) call but `list_drafts(status="in_review")`
+never found it, even after a clean retry, because the retry's own
+`draft.status == to_status` shortcut (there was none in the old code; the
+old code's guard was in the caller) meant nothing re-ran the missing
+steps. Fails at `assert len(events) == 1` on 3e1e9d6 (asserting `2 == 1`,
+the old always-append-event path re-appending on the retry) once the test
+is run against that commit, confirming both the staleness and a
+double-append hazard in the same call.
+
+**Disposition: fixed.** `observe_pr_outcome` now decides `to_status` from
+a durable, already-written event (`_find_pr_event`, keyed on
+`draft_id`/event/`pr_number`) when one exists, and from `resolve_watch`
+only when it does not; the feedback entry and the event are each written
+only if their own durable marker (`pr_number` on each) is not already on
+disk; and the commit plus the index upsert always run, gated only on
+whether `draft.status` already equals the decided `to_status` for the
+file write. A retry after any partial failure completes exactly the
+missing steps and appends nothing twice. `_handle_merged`'s
+`already_observed` guard now gates only `record_publish_behind_draft`
+(the invariant its own P1 fix still needs); `observe_pr_outcome` is
+always called, since it is now safe to call on an already-fully-applied
+merge.
+
+Adversarial re-check: does a retry ever double-write? The event and
+feedback writes are each gated on a positive existence check
+(`_find_pr_event`/`_find_pr_closed_feedback` returning `None`), not on
+`draft.status`, so a retry that finds the marker present skips the write
+regardless of what `draft.status` says; the draft-file write and the
+index upsert are both naturally idempotent (writing the same status
+twice, or upserting the same row twice, changes nothing). A three-way
+race between two overlapping calls is not possible here: the method is
+`@locked`. This also closes the PR body's earlier scope note about
+`_handle_closed` sharing the same duplication hazard on a `clear_watch`
+failure: `observe_pr_outcome` being idempotent on its own now makes a
+second call from any caller, including `_handle_closed`, safe, with no
+change to `_handle_closed` itself needed.
+
+### Codex finding 2 (P2): publish-behind dedup matched any open flag for the draft, not the specific merge
+
+`record_publish_behind_draft`'s guard matched a still-open,
+slugless `content_drift` flag on `draft_id` and `slug is None` alone. A
+draft revised and republished while an earlier publish-behind flag from a
+prior cycle was still unresolved (admin has not gotten to it) would have
+a second, genuinely different merge (a different `built_version`/
+`current_version` pair, since the draft moved on) silently produce
+neither a new flag nor a new feedback entry, because the old flag alone
+was enough to short-circuit the guard.
+
+Verified live: added
+`test_record_publish_behind_draft_dedupes_per_merge_not_per_draft`, which
+calls the method twice with two different `built_version`/
+`current_version` pairs for the same draft, then a third time repeating
+the first pair. Against 3e1e9d6, the second, distinct call produces no
+second flag: `assert len(flags) == 2` fails as `1 == 2` right after the
+two distinct calls.
+
+**Disposition: fixed.** `ReconcileFlag` now carries `built_version` and
+`current_version`, set only by `record_publish_behind_draft` via
+`_create_flag_unlocked`. The dedup guard adds both fields to its match,
+so only a flag from the *same* merge (identical pair) short-circuits a
+retry; a distinct pair for the same draft is not suppressed. A flag
+written before these fields existed loads with `built_version=None`,
+which never equals a live call's always-set integer, so an old flag from
+before this round is left alone rather than mistaken for a match, and a
+retry of the same merge still dedupes to one flag
+(`test_record_publish_behind_draft_dedupes_per_merge_not_per_draft`'s
+third call).
+
+Adversarial re-check: does an old flag on disk (no `built_version` field)
+ever get treated as a match for a live call? No: Pydantic loads a missing
+field as the model default (`None`), and `None == built_version` is only
+true if the live call itself passed `None`, which
+`record_publish_behind_draft`'s only caller (`watcher.py`'s
+`_handle_merged`) never does (`watch.built_version` is required for the
+call to happen at all, per the existing `is not None` guard). Does this
+change the meaning of an already-open flag from before this round for an
+admin resolving it on the status page? No: `built_version`/
+`current_version` are additive fields read only by this dedup check and
+never rendered or otherwise consulted.
+
+## make check (Codex round)
+
+`CHRONICLE_REQUIRE_TEST_TOOLS=1 make check` green: lint, format, mypy, the
+full unit suite (1035 passed, including the two new tests above), and
+prose check.

@@ -44,12 +44,16 @@ verified (a failing test against the pre-fix code, then the fix) is in
 
 ## Blast radius
 
-Two files in the api's watcher and GitHub client path
-(`chronicle/api/watcher.py`, `chronicle/api/github_client.py`), plus one
-guard in `chronicle/api/store.py` (`record_publish_behind_draft`, keeping
-it from double-recording a flag on the same kind of retry). No route, no
-schema, no migration, no change to what an admin or a consumer token can
-do. The publisher and reconciler are untouched.
+The api's watcher and GitHub client path (`chronicle/api/watcher.py`,
+`chronicle/api/github_client.py`), plus `chronicle/api/store.py`
+(`observe_pr_outcome`, `record_publish_behind_draft`, and
+`_create_flag_unlocked`, keeping each idempotent against a retry) and
+three new optional fields on existing models
+(`FeedbackEntry.pr_number`, `Event.pr_number`,
+`ReconcileFlag.built_version`/`current_version`) that a record written
+before this PR simply loads as `None`. No route, no schema migration, no
+change to what an admin or a consumer token can do. The publisher and
+reconciler are untouched.
 
 ## Recovery if this is wrong
 
@@ -84,9 +88,24 @@ A sibling lane (issue #61) is touching `chronicle/api/convert.py`,
 `chronicle/api/ui_templates.py` in parallel. None of those files were
 touched here.
 
-`_handle_closed` (the close-without-merge path) has the same shape of
-retry gap as one of the findings below, minor (a duplicate feedback entry
-and event on a retry after `clear_watch` fails, not a status
-mis-transition), noticed during the review but out of this issue's stated
-scope (`_handle_merged` specifically). Left as a note for a follow-up
-issue rather than folded into this diff.
+## Codex round
+
+A Codex review of this open PR found two more real gaps, both fixed on
+this branch: `observe_pr_outcome` could leave SQLite permanently behind
+the draft file after a retry (a durable per-PR marker on the event and
+feedback entry now makes it idempotent end to end, and this also closes
+the `_handle_closed` note below), and `record_publish_behind_draft`
+deduplicated on any open flag for the draft rather than the specific
+merge (the flag now carries the `built_version`/`current_version` pair it
+was raised for, and the guard matches on that pair). Full detail,
+including each fix's own adversarial re-check, is in
+[watcher-missing-ref-review.md](watcher-missing-ref-review.md)'s "Codex
+round" section.
+
+`_handle_closed` (the close-without-merge path) was noticed during the
+first review pass to have the same shape of retry gap as one of the
+findings above (a duplicate feedback entry and event on a retry after
+`clear_watch` fails). Making `observe_pr_outcome` idempotent end to end in
+the Codex round closes this too, since a second call from any caller,
+`_handle_closed` included, is now always safe; no separate change to
+`_handle_closed` was needed.
