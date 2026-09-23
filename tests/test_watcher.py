@@ -274,7 +274,7 @@ def test_delete_ref_on_a_branch_already_gone_does_not_block_the_retry(
     deleted: dict[str, bool] = {"once": False}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET" and request.url.path.endswith(f"/pulls/1"):
+        if request.method == "GET" and request.url.path.endswith("/pulls/1"):
             return httpx.Response(200, json={"number": 1, "merged": True, "state": "closed"})
         if request.method == "DELETE":
             if not deleted["once"]:
