@@ -36,8 +36,11 @@ wide) driven against a running `docker compose` stack, not curl. Taken on
 - Opened the edit page in headless Chrome: "Last built preview" pointed at
   `http://localhost:8094/preview/legacy-preview-link-check/2026/09/legacy-preview-link-check/`,
   with `(site)` linking the root separately, derived from the run's own
-  `started_at` (`2026-09-23T02:08:00+00:00` UTC, i.e. 21:08 CDT) converted
-  to `PUBLISH_TZ` rather than the raw UTC date. Clicked it: landed on
+  `started_at` (`2026-09-23T02:08:00+00:00`), read in its own recorded
+  offset (UTC) rather than converted to `PUBLISH_TZ`. That recorded-offset
+  date is 2026-09-23, so `/2026/09/` is unchanged either way; this run
+  does not exercise the month-boundary case a UTC-to-Chicago conversion
+  would have gotten wrong. Clicked it: landed on
   `http://localhost:8094/preview/legacy-preview-link-check/2026/09/legacy-preview-link-check/`
   with `document.title` "Legacy Preview Link Check · Clouds and Unicorns"
   and `<h1>` "Legacy Preview Link Check", the post itself, not the site's
