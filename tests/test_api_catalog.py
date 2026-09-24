@@ -48,14 +48,10 @@ def test_events_are_cursor_based(client: TestClient, agent_token: str) -> None:
     ).json() == {"events": [], "next_cursor": 3}
 
 
-def test_claim_release_and_image_attach_detach_all_write_events(
-    client: TestClient, agent_token: str
-) -> None:
+def test_image_attach_detach_write_events(client: TestClient, agent_token: str) -> None:
     from .conftest import png_bytes
 
     draft_id = client.post("/v1/drafts", json={}, headers=auth(agent_token)).json()["id"]
-    client.post(f"/v1/drafts/{draft_id}/claim", headers=auth(agent_token))
-    client.post(f"/v1/drafts/{draft_id}/release", headers=auth(agent_token))
 
     image_id = client.post(
         "/v1/images",
@@ -73,8 +69,6 @@ def test_claim_release_and_image_attach_detach_all_write_events(
     types = [event["type"] for event in events]
     assert types == [
         "draft.created",
-        "draft.claim",
-        "draft.release",
         "draft.image_attach",
         "draft.image_detach",
     ]

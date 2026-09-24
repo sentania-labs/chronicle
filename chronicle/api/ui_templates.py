@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import quote
 
 from . import ui_chrome
+from .editor_lease import HEARTBEAT_SECONDS
 from .pagination import Page
 from .ui_actions import DISABLED, Offer, offers_for
 from .ui_chrome import badge
@@ -363,6 +364,7 @@ def _draft_card(
     run_info: dict[str, Any] | None,
     flags: list[dict[str, Any]],
     came_back: bool,
+    editing: str | None = None,
 ) -> str:
     published = draft.get("published") or {}
     pr_link = (
@@ -386,8 +388,8 @@ def _draft_card(
         if primary_url
         else "-"
     )
-    claim = draft.get("claim")
-    claim_text = f"held by {escape(claim['author'])}" if claim else "unclaimed"
+    # A live editor lease (issue #64): someone has this draft open right now.
+    editing_badge = badge(f"editing: {editing}", "warn") if editing else ""
     return f"""
 <div class="lat-card card">
 <div class="chr-card-head">
@@ -395,9 +397,10 @@ def _draft_card(
 {badge(status_label(draft["status"]), status_tone(draft["status"]))}
 {_detail_badges(status_details(draft["status"], came_back=came_back))}
 {_flag_badges(flags)}
+{editing_badge}
 </div>
 <p class="muted">slug: {escape(draft["slug"] or "-")} |
-author: {escape(last_author)} | updated: {escape(local_time(draft["updated_at"]))} | claim: {claim_text}</p>
+author: {escape(last_author)} | updated: {escape(local_time(draft["updated_at"]))}</p>
 <p class="muted">PR: {pr_link} | preview: {preview_link}</p>
 </div>
 """
@@ -406,7 +409,12 @@ author: {escape(last_author)} | updated: {escape(local_time(draft["updated_at"])
 def _cards(rows: list[dict[str, Any]]) -> str:
     return "".join(
         _draft_card(
-            row["draft"], row["last_author"], row["run_info"], row["flags"], row["came_back"]
+            row["draft"],
+            row["last_author"],
+            row["run_info"],
+            row["flags"],
+            row["came_back"],
+            row.get("editing"),
         )
         for row in rows
     )
@@ -462,7 +470,7 @@ def drafts_board_page(
 # The edit form is `<form id="edit-form">` and everything that belongs to it
 # but sits beside the editor (the frontmatter panel in the sidebar, the sticky
 # Save button) joins it with `form="edit-form"`. The sidebar's own forms
-# (claim, detach, upload) cannot nest inside it, so the sidebar is a sibling.
+# (detach, upload) cannot nest inside it, so the sidebar is a sibling.
 EDIT_FORM_ID = "edit-form"
 
 
@@ -698,19 +706,6 @@ def _post_info(
     preview_url: str | None,
     post_url: str | None = None,
 ) -> str:
-    claim = draft.get("claim")
-    if claim:
-        claim_html = (
-            f"<p>Claimed by {escape(claim['author'])} since {escape(local_time(claim['since']))}. "
-            f'<form class="inline" method="post" action="/content/drafts/{escape(draft["id"])}/release">'
-            '<button type="submit" class="lat-btn">Release claim</button></form></p>'
-        )
-    else:
-        claim_html = (
-            "<p>Unclaimed. "
-            f'<form class="inline" method="post" action="/content/drafts/{escape(draft["id"])}/claim">'
-            '<button type="submit" class="lat-btn">Claim</button></form></p>'
-        )
     # The post's own page is the primary link; a run recorded before
     # post_url existed falls back to the preview site's root.
     primary_url = post_url or preview_url
@@ -727,7 +722,7 @@ def _post_info(
     )
     return (
         '<section id="post-info" data-refresh class="lat-card panel">'
-        f"{claim_html}{preview_link}{_run_status(last_run)}</section>"
+        f"{preview_link}{_run_status(last_run)}</section>"
     )
 
 
@@ -822,7 +817,9 @@ def _image_upload_form(draft_id: str, images: list[dict[str, Any]]) -> str:
 </form>"""
 
 
-def _save_control(publish_run_active: bool, publish_pr_open: bool) -> str:
+def _save_control(
+    publish_run_active: bool, publish_pr_open: bool, locked_by: str | None = None
+) -> str:
     """The Save button, or the reason it is not offered. `Store.save_draft`
     refuses while a publish run is queued or building and while a publish PR is
     open (both 409), so the button is disabled with the reason beside it rather
@@ -830,7 +827,9 @@ def _save_control(publish_run_active: bool, publish_pr_open: bool) -> str:
     an upload or a save keeps it true; `data-locked` carries the reason for
     `editor.js`, which must refuse Ctrl+S the same way."""
     reason = (
-        "A publish run is in progress, so saving is refused until it finishes."
+        f"{locked_by} has this draft open, so saving is refused until they close it."
+        if locked_by
+        else "A publish run is in progress, so saving is refused until it finishes."
         if publish_run_active
         else "A publish pull request is open, so saving is refused until it merges or closes."
         if publish_pr_open
@@ -864,10 +863,21 @@ def editor_page(
     publish_pr_open: bool = False,
     publish_run_active: bool = False,
     unpublish_pr_open: bool = False,
+    locked_by: str | None = None,
+    locked_since: str | None = None,
     notice: str | None = None,
     notice_kind: str = "error",
 ) -> str:
     draft_id = escape(draft["id"])
+    # Another identity has this draft open (issue #64): the page is
+    # read-only until their lease lapses; `editor.js`'s heartbeat reloads it.
+    lock_notice = (
+        f'<p id="lock-notice" class="notice conflict {ui_chrome.banner_class("warn")}">'
+        f"Being edited by {escape(locked_by)} since {escape(local_time(locked_since))}. "
+        "Saving opens when they close it.</p>"
+        if locked_by
+        else ""
+    )
     pr_open_notice = (
         f'<p id="pr-open-notice" data-refresh class="notice conflict {ui_chrome.banner_class("warn")}">This post has an open '
         "publish pull request; saving is refused until it merges or closes.</p>"
@@ -896,16 +906,17 @@ def editor_page(
     image_dir_value = draft.get("image_dir")
     image_dir_attr = f' data-image-dir="{escape(image_dir_value)}"' if image_dir_value else ""
     body = f"""
-<div id="editor-app" data-draft-id="{draft_id}" data-version="{draft["version_no"]}"{image_dir_attr}>
+<div id="editor-app" data-draft-id="{draft_id}" data-version="{draft["version_no"]}"{image_dir_attr} data-lease-seconds="{HEARTBEAT_SECONDS}"{' data-read-only="1"' if locked_by else ""}>
 <div id="backup-banner" class="backup-banner {ui_chrome.banner_class("warn")}" role="alert" hidden>
 <span id="backup-banner-text"></span>
 <button type="button" id="backup-restore" class="lat-btn">Restore</button>
 <button type="button" id="backup-discard" class="lat-btn lat-btn--ghost">Discard</button>
 </div>
+{lock_notice}
 {pr_open_notice}
 <div class="editor-bar" id="editor-bar">
 {_status_pill(draft["status"], details)}
-{_save_control(publish_run_active, publish_pr_open)}
+{_save_control(publish_run_active, publish_pr_open, locked_by)}
 <span id="save-state" class="save-state" data-state="idle" role="status" aria-live="polite">No unsaved changes</span>
 <span id="upload-state" class="upload-state" role="status" aria-live="polite"></span>
 </div>

@@ -1126,7 +1126,7 @@ def test_run_log_page_renders_a_queued_run_with_no_result() -> None:
 def test_cross_origin_post_is_refused(client: TestClient, services: Services) -> None:
     draft_id = make_draft(services, "drafting")
     response = client.post(
-        f"/content/drafts/{draft_id}/claim", headers={"Origin": "https://evil.example"}
+        f"/content/drafts/{draft_id}/lease", headers={"Origin": "https://evil.example"}
     )
     assert response.status_code == 403
 
@@ -1139,7 +1139,7 @@ def test_null_origin_post_is_refused(client: TestClient, services: Services) -> 
     cross-origin sandboxed iframe submit every state-changing form here.
     """
     draft_id = make_draft(services, "drafting")
-    response = client.post(f"/content/drafts/{draft_id}/claim", headers={"Origin": "null"})
+    response = client.post(f"/content/drafts/{draft_id}/lease", headers={"Origin": "null"})
     assert response.status_code == 403
 
 
@@ -1149,14 +1149,14 @@ def test_empty_origin_post_is_refused(client: TestClient, services: Services) ->
     it; a follow-up review found the same class of bug the null-origin fix
     addressed, one layer earlier. Present-but-empty is always refused."""
     draft_id = make_draft(services, "drafting")
-    response = client.post(f"/content/drafts/{draft_id}/claim", headers={"Origin": ""})
+    response = client.post(f"/content/drafts/{draft_id}/lease", headers={"Origin": ""})
     assert response.status_code == 403
 
 
 def test_garbage_origin_post_is_refused(client: TestClient, services: Services) -> None:
     draft_id = make_draft(services, "drafting")
     response = client.post(
-        f"/content/drafts/{draft_id}/claim", headers={"Origin": "not a url at all"}
+        f"/content/drafts/{draft_id}/lease", headers={"Origin": "not a url at all"}
     )
     assert response.status_code == 403
 
@@ -1169,7 +1169,7 @@ def test_empty_origin_with_good_referer_is_still_refused(
     signal."""
     draft_id = make_draft(services, "drafting")
     response = client.post(
-        f"/content/drafts/{draft_id}/claim",
+        f"/content/drafts/{draft_id}/lease",
         headers={"Origin": "", "Referer": "http://testserver/content/drafts"},
     )
     assert response.status_code == 403
@@ -1178,18 +1178,18 @@ def test_empty_origin_with_good_referer_is_still_refused(
 def test_absent_origin_with_good_referer_is_allowed(client: TestClient, services: Services) -> None:
     draft_id = make_draft(services, "drafting")
     response = client.post(
-        f"/content/drafts/{draft_id}/claim",
+        f"/content/drafts/{draft_id}/lease",
         headers={"Referer": "http://testserver/content/drafts"},
     )
     assert response.status_code == 200
-    assert response.url.path == f"/content/drafts/{draft_id}"
+    assert response.json()["mine"] is True
 
 
 def test_absent_origin_and_referer_is_allowed(client: TestClient, services: Services) -> None:
     draft_id = make_draft(services, "drafting")
-    response = client.post(f"/content/drafts/{draft_id}/claim")
+    response = client.post(f"/content/drafts/{draft_id}/lease")
     assert response.status_code == 200
-    assert response.url.path == f"/content/drafts/{draft_id}"
+    assert response.json()["mine"] is True
 
 
 def test_rebuild_failure_notice_is_escaped(client: TestClient) -> None:

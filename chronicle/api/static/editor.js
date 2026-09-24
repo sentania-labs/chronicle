@@ -298,6 +298,14 @@ function saveStateText(state, detail) {
 // The panel holds plain textareas (ADR 021). Nothing here parses, renders or
 // sends their text: the only thing a Copy button does is hand the field's
 // value to the clipboard, and say so next to the button.
+// The editor lock's heartbeat answer (issue #64): a read-only page (someone
+// else had the draft) reloads once the lease is ours, so Save comes back;
+// a page that already holds it has nothing to do.
+function leaseAction(readOnly, answer) {
+  if (!answer) return "none";
+  return readOnly && answer.mine ? "reload" : "none";
+}
+
 function copyStateText(outcome) {
   return outcome === "copied"
     ? "Copied"
@@ -1060,6 +1068,27 @@ function copyStateText(outcome) {
       uploadAll(event.dataTransfer.files, null);
     }
   });
+  // Keep this page's editor lease alive while it is open, and hand it back
+  // when the page goes away. A lease the page never releases (a crash, a
+  // sleeping laptop) lapses on its own on the server.
+  var leaseData = (app && app.dataset) || {};
+  if (leaseData.draftId && typeof fetch !== "undefined" && typeof setInterval !== "undefined") {
+    var leaseUrl = "/content/drafts/" + encodeURIComponent(leaseData.draftId) + "/lease";
+    var readOnly = leaseData.readOnly === "1";
+    var every = (parseInt(leaseData.leaseSeconds, 10) || 30) * 1000;
+    setInterval(function () {
+      fetch(leaseUrl, { method: "POST", credentials: "same-origin" })
+        .then(function (response) { return response.ok ? response.json() : null; })
+        .then(function (answer) {
+          if (leaseAction(readOnly, answer) === "reload") window.location.reload();
+        })
+        .catch(function () {});
+    }, every);
+    if (typeof window !== "undefined" && window.addEventListener) window.addEventListener("pagehide", function () {
+      if (!readOnly && navigator.sendBeacon) navigator.sendBeacon(leaseUrl + "/release");
+    });
+  }
+
   document.addEventListener("submit", function (event) {
     if (event.target && event.target.id === "image-form" && typeof fetch !== "undefined") {
       event.preventDefault();
@@ -1087,5 +1116,6 @@ if (typeof module !== "undefined" && module.exports) {
     saveStateText: saveStateText,
     copyStateText: copyStateText,
     featureImageSrc: featureImageSrc,
+    leaseAction: leaseAction,
   };
 }

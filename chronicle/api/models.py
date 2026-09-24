@@ -155,6 +155,9 @@ class Draft(BaseModel):
     source_submission: str | None = None
     source_post: dict[str, str] | None = None
     images: list[DraftImage] = []
+    # The old advisory claim, no longer written or shown (issue #64 replaced
+    # it with the editor lock, ADR 025). Kept so a record that carries one
+    # still loads; nothing reads it.
     claim: Claim | None = None
     # What the last successful publish or unpublish run actually wrote
     # (branch, PR number and URL, the commit sha, the post's path and url,

@@ -79,7 +79,8 @@ the image store. An index is derived from the files and rebuildable.
 - `source_submission` (optional), `source_post` (set when imported from main).
 - `images[]`: manifest of `{image_id, filename, role}` with role `inline`
   or `feature`.
-- `claim`: `{author, since}` while an author is actively working, else none.
+- No claim field: who has a draft open is the editor lock's runtime state
+  (ADR 025), never stored on the draft.
 
 **Version**
 
@@ -163,13 +164,15 @@ The UI uses the same API through a session (see section 11).
   (imports a published post from main into a draft).
 - `GET /v1/drafts?status=...`
 - `GET /v1/drafts/{id}` returns content, current version number, images,
-  status, claim.
+  status, and `editing` (`{holder, since, expires_at}` while the draft is
+  open in the editor, else null).
 - `PUT /v1/drafts/{id}` requires `base_version`. Returns 409 with the
   current version and a diff summary if `base_version` is stale. Never
   overwrites silently. Accepts an optional `message`.
-- `POST /v1/drafts/{id}/claim` and `/release`. A claim is advisory: a save
-  by someone else still succeeds if `base_version` matches, but the response
-  and the UI show who holds the claim.
+- While a draft is open in the editor (a lease renewed every 30 seconds,
+  lapsing 2 minutes after the last renewal), a `PUT` by any other identity
+  returns 423 `draft_being_edited` with the holder, since, and expiry (ADR
+  025). The advisory `claim`/`release` endpoints are gone.
 - `GET /v1/drafts/{id}/versions` and `GET /v1/drafts/{id}/versions/{n}`
 - `GET /v1/drafts/{id}/changes?since={n}` returns the diffs and feedback
   entries after version `n`, by author. This is ghostwriter's first call
@@ -211,8 +214,8 @@ The UI uses the same API through a session (see section 11).
 Served at the root of the instance's hostname. Three tabs.
 
 - **Content**: submissions queue, drafts by status, the editor (markdown
-  with frontmatter fields, image attach, save with conflict handling, claim
-  indicator), and the action buttons Scott needs: request revision with
+  with frontmatter fields, image attach, save with conflict handling, the
+  editor lock), and the action buttons Scott needs: request revision with
   feedback, reject, approve, unpublish, restore. There is no import tab: digest
   already records every post on main, so a manual import would front
   something that has already happened. Importing a published post into a

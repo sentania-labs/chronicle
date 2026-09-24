@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 const require = createRequire(import.meta.url);
-const { pageTitles, sameState, backupVerdict, backupWriteAction, makeBackupStore, conflictBackupAction, backupMessage, uploadOutcome, lookupImageSrc, dirFilenameSrc, saveStateText, featureImageSrc, copyStateText } =
+const { pageTitles, sameState, backupVerdict, backupWriteAction, makeBackupStore, conflictBackupAction, backupMessage, uploadOutcome, lookupImageSrc, dirFilenameSrc, saveStateText, featureImageSrc, copyStateText, leaseAction } =
   require("../chronicle/api/static/editor.js");
 
 test("sameState compares the body and every field, missing and empty alike", () => {
@@ -493,4 +493,12 @@ test("the copy confirmation says what happened, and never throws on a browser wi
   assert.equal(copyStateText("copied"), "Copied");
   assert.equal(copyStateText("unavailable"), "Copy not available, select the text and copy manually");
   assert.equal(copyStateText(undefined), "Copy not available, select the text and copy manually");
+});
+
+test("the lease heartbeat reloads a read-only page only once the lease is ours", () => {
+  // Issue #64: someone else had the draft; their lease lapsed and ours began.
+  assert.equal(leaseAction(true, { mine: true, holder: "editor" }), "reload");
+  assert.equal(leaseAction(true, { mine: false, holder: "ghostwriter" }), "none");
+  assert.equal(leaseAction(false, { mine: true, holder: "editor" }), "none");
+  assert.equal(leaseAction(true, null), "none");
 });

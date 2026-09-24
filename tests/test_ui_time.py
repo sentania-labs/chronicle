@@ -147,13 +147,12 @@ def test_board_card_renders_updated_as_local_time(services: Services) -> None:
     _assert_local(html, BOARD_STAMP, "updated: 2020-01-01 21:04 CST")
 
 
-def test_editor_renders_feedback_versions_run_and_claim_as_local_time(
+def test_editor_renders_feedback_versions_run_and_lock_as_local_time(
     services: Services,
 ) -> None:
     from chronicle.api import ui_templates as tpl
 
     draft = _draft_dict(services)
-    draft["claim"] = {"author": "scott", "since": CLAIM_STAMP}
     versions = [{"version_no": 1, "author": "scott", "created_at": VERSION_STAMP, "message": ""}]
     feedback = [
         {
@@ -172,7 +171,16 @@ def test_editor_renders_feedback_versions_run_and_claim_as_local_time(
         "started_at": None,
         "finished_at": None,
     }
-    html = tpl.editor_page(draft, versions, feedback, run, None, banner=False)
+    html = tpl.editor_page(
+        draft,
+        versions,
+        feedback,
+        run,
+        None,
+        banner=False,
+        locked_by="ghostwriter",
+        locked_since=CLAIM_STAMP,
+    )
     _assert_local(html, CLAIM_STAMP, "since 2020-05-06 02:08 CDT")
     _assert_local(html, VERSION_STAMP, "<td>2020-03-03 23:06 CST</td>")
     _assert_local(html, FEEDBACK_STAMP, "at 2020-02-02 22:05 CST")

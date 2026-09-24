@@ -1,4 +1,4 @@
-"""Drafts: create, read, save with conflict detection, claim, act (spec section 6).
+"""Drafts: create, read, save with conflict detection and the editor lock, act (spec section 6).
 
 `PUT` is the only write that can lose someone's work, so it refuses to guess:
 a stale `base_version` returns 409 with the current version and a unified
@@ -74,7 +74,12 @@ def list_drafts(
 
 @router.get("/{draft_id}")
 def get_draft(draft_id: str, services: Services = Depends(get_services)) -> dict[str, Any]:
-    return _dump(services.store.get_draft(draft_id))
+    body = _dump(services.store.get_draft(draft_id))
+    # Who has it open in the editor right now, if anyone (issue #64): a save
+    # from any other identity is refused with 423 until this lapses.
+    lease = services.leases.current(draft_id)
+    body["editing"] = lease.as_dict() if lease else None
+    return body
 
 
 @router.put("/{draft_id}")
@@ -84,6 +89,7 @@ def save_draft(
     consumer: Consumer = Depends(require_consumer),
     services: Services = Depends(get_services),
 ) -> dict[str, Any]:
+    services.leases.check_save(draft_id, consumer.name)
     draft = services.store.save_draft(
         draft_id,
         consumer.name,
@@ -94,24 +100,6 @@ def save_draft(
         announcements=payload.announcements,
     )
     return _dump(draft)
-
-
-@router.post("/{draft_id}/claim")
-def claim_draft(
-    draft_id: str,
-    consumer: Consumer = Depends(require_consumer),
-    services: Services = Depends(get_services),
-) -> dict[str, Any]:
-    return _dump(services.store.set_claim(draft_id, consumer.name, held=True))
-
-
-@router.post("/{draft_id}/release")
-def release_draft(
-    draft_id: str,
-    consumer: Consumer = Depends(require_consumer),
-    services: Services = Depends(get_services),
-) -> dict[str, Any]:
-    return _dump(services.store.set_claim(draft_id, consumer.name, held=False))
 
 
 @router.get("/{draft_id}/versions")

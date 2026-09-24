@@ -26,6 +26,7 @@ from ..images import MAX_IMAGE_BYTES, alt_text_for, safe_upload_filename
 from ..models import ANNOUNCEMENT_CHANNELS, Draft, Material, Submission
 from ..pagination import Page, paginate
 from ..store import Store
+from ..tokens import UI_COMMIT_AUTHOR as UI_ACTOR_NAME
 from ..ui_actions import staged_refusal
 from ..ui_deps import banner_enabled, check_same_origin, get_services, require_ui_consumer
 from ..ui_status import came_back_from_review, parse_status_filter
@@ -341,6 +342,7 @@ def _board_row(
         "came_back": came_back_from_review(
             draft.status, request_seq=request_seq, answered_seq=answered_seq
         ),
+        "editing": _editing(services, draft.id),
     }
 
 
@@ -431,6 +433,12 @@ def _offer_state(store: Store, draft: Draft, preview_run: Any) -> dict[str, bool
     }
 
 
+def _editing(services: Services, draft_id: str) -> str | None:
+    """Who has the draft open in the editor right now, for the board."""
+    lease = services.leases.current(draft_id)
+    return lease.holder if lease else None
+
+
 def _editor_response(
     services: Services,
     draft_id: str,
@@ -442,6 +450,10 @@ def _editor_response(
 ) -> HTMLResponse:
     store = services.store
     draft = store.get_draft(draft_id)
+    # Rendering the edit page is opening it (issue #64): take or renew the
+    # viewer's lease. Another identity's live lease makes the page read-only.
+    lease = services.leases.touch(draft_id, UI_ACTOR_NAME)
+    locked_by = None if lease.holder == UI_ACTOR_NAME else lease
     versions = [_dump(v) for v in store.list_versions(draft_id)]
     feedback = [_dump(f) for f in store.list_feedback(draft_id)]
     last_run = store.last_run(draft_id)
@@ -464,10 +476,40 @@ def _editor_response(
         banner=banner,
         came_back=came_back,
         **_offer_state(store, draft, preview_run),
+        locked_by=locked_by.holder if locked_by else None,
+        locked_since=locked_by.since.isoformat() if locked_by else None,
         notice=notice,
         notice_kind=notice_kind,
     )
     return HTMLResponse(html, status_code=status_code)
+
+
+@router.post("/content/drafts/{draft_id}/lease")
+def draft_lease_heartbeat(
+    draft_id: str,
+    _origin: None = Depends(check_same_origin),
+    consumer: Consumer = Depends(require_ui_consumer),
+    services: Services = Depends(get_services),
+) -> JSONResponse:
+    """The open edit page's heartbeat (every `HEARTBEAT_SECONDS`). Renews this
+    viewer's lease, or reports whose it is; `mine` turning true is the page's
+    cue to reload out of read-only."""
+    services.store.get_draft(draft_id)  # 404 for a draft that does not exist
+    lease = services.leases.touch(draft_id, consumer.name)
+    return JSONResponse({"mine": lease.holder == consumer.name, **lease.as_dict()})
+
+
+@router.post("/content/drafts/{draft_id}/lease/release")
+def draft_lease_release(
+    draft_id: str,
+    _origin: None = Depends(check_same_origin),
+    consumer: Consumer = Depends(require_ui_consumer),
+    services: Services = Depends(get_services),
+) -> JSONResponse:
+    """Best-effort release when the page closes (`sendBeacon`); a lease the
+    page never releases simply lapses."""
+    services.leases.release(draft_id, consumer.name)
+    return JSONResponse({"released": True})
 
 
 @router.get("/content/drafts/{draft_id}", response_class=HTMLResponse)
@@ -589,6 +631,7 @@ async def draft_save(
     body_text = _crlf_to_lf(form.get("body", ""))
     announcements = _build_announcements(form)
     try:
+        services.leases.check_save(draft_id, consumer.name)
         services.store.save_draft(
             draft_id,
             consumer.name,
@@ -647,28 +690,6 @@ async def draft_save(
     return _editor_response(
         services, draft_id, banner=banner_enabled(request), notice="saved", notice_kind="ok"
     )
-
-
-@router.post("/content/drafts/{draft_id}/claim")
-def draft_claim(
-    draft_id: str,
-    _origin: None = Depends(check_same_origin),
-    consumer: Consumer = Depends(require_ui_consumer),
-    services: Services = Depends(get_services),
-) -> RedirectResponse:
-    services.store.set_claim(draft_id, consumer.name, held=True)
-    return RedirectResponse(f"/content/drafts/{draft_id}", status_code=303)
-
-
-@router.post("/content/drafts/{draft_id}/release")
-def draft_release(
-    draft_id: str,
-    _origin: None = Depends(check_same_origin),
-    consumer: Consumer = Depends(require_ui_consumer),
-    services: Services = Depends(get_services),
-) -> RedirectResponse:
-    services.store.set_claim(draft_id, consumer.name, held=False)
-    return RedirectResponse(f"/content/drafts/{draft_id}", status_code=303)
 
 
 @router.post("/content/drafts/{draft_id}/actions/{action}", response_class=HTMLResponse)

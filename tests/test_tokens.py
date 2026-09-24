@@ -289,8 +289,8 @@ def test_ui_disabled_across_restart_via_admin_page_and_re_enable_via_admin_page(
     assert "Re-enable UI" in revoked.text
 
     TokenStore(data_dir / "state").ensure_ui_token()  # simulated restart
-    claim = admin_client.post("/content/drafts/does-not-exist/claim")
-    assert claim.status_code == 503
+    refused = admin_client.post("/content/drafts/does-not-exist/lease")
+    assert refused.status_code == 503
 
     reenabled = admin_client.post("/admin/tokens/ui/reenable")
     assert reenabled.status_code == 200
