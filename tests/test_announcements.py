@@ -20,7 +20,7 @@ from chronicle.api import convert
 from chronicle.api.deps import Services
 from chronicle.api.errors import ApiError
 from chronicle.api.models import Draft, Version, now_stamp
-from chronicle.api.store import Store
+from chronicle.api.store import Store, text_fingerprint
 
 from .conftest import auth
 
@@ -543,7 +543,14 @@ def _previewed_fresh_draft(store: Store) -> str:
     assert run is not None
     built = store.get_draft(draft.id)
     assert built.slug is not None and "date" in built.frontmatter
-    store.start_run(run.id, "builder-1", "0.164.0", False, built_version=built.version_no)
+    store.start_run(
+        run.id,
+        "builder-1",
+        "0.164.0",
+        False,
+        built_version=built.version_no,
+        built_text=text_fingerprint(built.frontmatter, built.body),
+    )
     store.finish_run(run.id, "builder-1", True, {"preview_url": f"/preview/{built.slug}/"})
     assert store.get_draft(draft.id).status == "previewed"
     return draft.id
@@ -591,21 +598,30 @@ def test_a_text_save_after_announcements_still_makes_the_preview_stale(
 
 
 def test_a_build_that_saw_an_announcement_only_save_land_is_not_stale(store: Store) -> None:
-    # The builder and the editor must agree: `finish_run` uses the same
-    # text check as the editor's "Preview first".
+    # The builder reads the draft, then calls `start_run`; an
+    # announcement-only save can land on either side of that call. Either
+    # way the build converted the current text, and `finish_run` must agree
+    # with the editor's "Preview first" that it is current.
     draft, _warnings = store.create_draft("ghostwriter")
     store.save_draft(draft.id, "ghostwriter", 0, {"title": "Fresh Post"}, "body")
     _draft, run = store.act_on_draft(draft.id, "preview", "editor", True)
     assert run is not None
-    built = store.get_draft(draft.id)
-    store.start_run(run.id, "builder-1", "0.164.0", False, built_version=built.version_no)
+    snapshot = store.get_draft(draft.id)  # what the builder read and converts
     store.save_draft(
         draft.id,
         "ghostwriter",
-        built.version_no,
-        built.frontmatter,
-        built.body,
+        snapshot.version_no,
+        snapshot.frontmatter,
+        snapshot.body,
         announcements=THREE,
+    )
+    store.start_run(
+        run.id,
+        "builder-1",
+        "0.164.0",
+        False,
+        built_version=snapshot.version_no,
+        built_text=text_fingerprint(snapshot.frontmatter, snapshot.body),
     )
     finished, _moved = store.finish_run(run.id, "builder-1", True, {"preview_url": "/preview/x/"})
     assert not (finished.result or {}).get("stale")

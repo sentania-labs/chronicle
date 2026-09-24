@@ -1644,12 +1644,14 @@ class Store:
         hugo_version: str,
         toolchain_drift: bool,
         built_version: int | None = None,
+        built_text: str | None = None,
     ) -> Run:
         """Move a claimed run to `building` and stamp who is building it.
 
         `built_version` records the draft's `version_no` at the moment the
-        builder read it for this build, so `finish_run` can tell a build
-        that is still current from one the draft has since moved past.
+        builder read it for this build, and `built_text` the
+        `text_fingerprint` of that same snapshot, so `finish_run` can tell a
+        build that is still current from one the draft has since moved past.
         """
         run = self.get_run(run_id)
         run.status = "building"
@@ -1659,15 +1661,7 @@ class Store:
         run.hugo_version = hugo_version
         run.toolchain_drift = toolchain_drift
         run.built_version = built_version
-        # Fingerprint the text only when the draft is still at the version
-        # the builder read; otherwise leave it unset so `preview_is_current`
-        # falls back to the version check, which already calls this stale.
-        current = self.get_draft(run.draft_id)
-        run.built_text = (
-            text_fingerprint(current.frontmatter, current.body)
-            if built_version is not None and current.version_no == built_version
-            else None
-        )
+        run.built_text = built_text
         run.log_path = str(self.log_path_for(run_id).relative_to(self.data_dir))
         self._write_json(self._run_path(run_id), run.model_dump(mode="json"))
         self._append_event(
