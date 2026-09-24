@@ -287,7 +287,14 @@ class Store:
                         before[event.get("draft_id") or ""] = event.get("from_status") or ""
         moved: list[str] = []
         for draft_id in ids:
-            draft = self.get_draft(draft_id)
+            # The index is only a cache (ADR 006): a stale row naming a draft
+            # whose file is gone must not stop `Store.open`, or the api and
+            # `chronicle reindex` (the tool that repairs the index) could
+            # never start. The file decides; a row it contradicts is skipped.
+            try:
+                draft = self.get_draft(draft_id)
+            except ApiError:
+                continue
             if draft.status != "previewed":
                 continue
             target = before.get(draft_id, "")

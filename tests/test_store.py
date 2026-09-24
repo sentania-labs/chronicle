@@ -619,6 +619,27 @@ def test_a_blank_event_line_does_not_stop_the_migration(store: Store, data_dir: 
         reopened.close()
 
 
+def test_a_stale_previewed_index_row_does_not_stop_the_store_opening(
+    store: Store, data_dir: Path
+) -> None:
+    # The index is a cache: a row left at `previewed` for a draft whose file
+    # is gone must not stop `Store.open`, or `chronicle reindex` (the repair)
+    # could never run.
+    draft, _ = store.create_draft("ghostwriter")
+    store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
+    _force_previewed(store, draft.id)
+    (store.drafts_dir / draft.id / "draft.json").unlink()
+    store.close()
+
+    reopened = Store.open(data_dir)
+    try:
+        assert reopened.migrate_previewed() == []
+        reopened.reindex()
+        assert reopened.list_drafts("previewed") == []
+    finally:
+        reopened.close()
+
+
 def test_opening_the_store_migrates_a_previewed_draft(store: Store, data_dir: Path) -> None:
     draft, _ = store.create_draft("ghostwriter")
     store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")

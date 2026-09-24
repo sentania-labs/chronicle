@@ -39,5 +39,7 @@ both.
 ## Consequences
 
 - An API consumer that waited for `status == "previewed"` must read
-  `has_current_preview` (or `preview_url`) instead.
+  `has_current_preview` instead. `preview_url` is not a substitute: it keeps
+  naming the last successful build after a text save makes that build
+  stale.
 - The spec's lifecycle (section 5) no longer has a `previewed` branch.
