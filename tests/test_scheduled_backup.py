@@ -133,7 +133,7 @@ def test_a_local_run_lands_a_restorable_bundle_and_prunes_to_retention(
     assert status["last_pruned"] == old[:2]
     assert status["last_location"] == str(target / bundles[-1])
     assert status["last_size_bytes"] == (target / bundles[-1]).stat().st_size
-    assert not list((state / "backup-tmp").glob("*.tar.gz"))  # the temp copy is gone
+    assert not list(state.joinpath(*scheduled_backup.TMP_DIR_PARTS).glob("*.tar.gz"))
 
     with tarfile.open(target / bundles[-1]) as tar:
         names = tar.getnames()
@@ -367,3 +367,59 @@ def test_the_status_shows_the_last_failure_with_its_error(data_dir: Path) -> Non
     scheduled_backup.save_settings(state, BackupSettings(enabled=True, local_path="/b"))
     summary = scheduled_backup_summary(_admin(data_dir))
     assert summary["last_error"] == "OSError: x"
+
+
+# --- Review round ------------------------------------------------------------
+
+
+def test_a_foreign_origin_cannot_change_the_schedule_or_start_a_run(
+    admin_client: TestClient, data_dir: Path
+) -> None:
+    evil = {"origin": "https://evil.example"}
+    form = {"enabled": "1", "target": "s3", "s3_endpoint": "https://evil.example"}
+    assert admin_client.post("/admin/backup/schedule", data=form, headers=evil).status_code == 403
+    assert admin_client.post("/admin/backup/run", headers=evil).status_code == 403
+    assert admin_client.post("/admin/backup/test", headers=evil).status_code == 403
+    assert not scheduled_backup.load_settings(data_dir / "state").enabled
+
+
+def test_a_run_waits_while_a_restore_holds_the_lock(data_dir: Path) -> None:
+    state, key = _state(data_dir)
+    with scheduled_backup.run_lock():
+        assert scheduled_backup.run_once(data_dir, state, key) is None
+
+
+def test_a_bundle_left_by_a_run_that_died_is_swept(
+    data_dir: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    state, key = _state(data_dir)
+    tmp = state.joinpath(*scheduled_backup.TMP_DIR_PARTS)
+    tmp.mkdir(parents=True)
+    (tmp / "chronicle-backup-20200101T000000Z.tar.gz").write_bytes(b"abandoned")
+    target = tmp_path_factory.mktemp("sweep")
+    (target / ".chronicle-backup-20200101T000000Z.tar.gz.partial").write_bytes(b"half")
+    settings = BackupSettings(target="local", local_path=str(target))
+    scheduled_backup.run_once(data_dir, state, key, settings=settings)
+    assert not (tmp / "chronicle-backup-20200101T000000Z.tar.gz").exists()
+    assert not list(target.glob(".*.partial"))
+
+
+def test_a_timestamp_from_the_future_runs_and_warns_instead_of_going_quiet() -> None:
+    settings = BackupSettings(enabled=True, updated_at="2026-09-01T00:00:00+00:00")
+    future = {
+        "last_attempt_at": "2027-09-24T03:00:00+00:00",
+        "last_success_at": "2027-09-24T03:00:00+00:00",
+    }
+    now = _local(2026, 9, 24, 12, 0)
+    assert scheduled_backup.is_due(settings, future, now)
+    assert scheduled_backup.is_overdue(settings, future, now)
+
+
+def test_s3_settings_refuse_userinfo_and_dot_segments(tmp_path: Path) -> None:
+    key = crypto.load_or_create_instance_key(tmp_path)
+    base = _s3_settings(key)
+    assert scheduled_backup.settings_problems(base, tmp_path) == []
+    userinfo = base.model_copy(update={"s3_endpoint": "https://u:p@nas.lan"})
+    dots = base.model_copy(update={"s3_prefix": "a/../b"})
+    assert scheduled_backup.settings_problems(userinfo, tmp_path)
+    assert scheduled_backup.settings_problems(dots, tmp_path)

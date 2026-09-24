@@ -114,3 +114,34 @@ def test_an_error_names_the_status_and_code_but_never_the_secret() -> None:
         _client("https://nas.lan", handler).delete("k")
     assert "403 SignatureDoesNotMatch" in str(caught.value)
     assert "SECRET" not in str(caught.value)
+
+
+def test_the_signed_host_matches_what_httpx_sends_for_a_default_port() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(204)
+
+    _client("https://nas.lan:443", handler).delete("k")
+    signed = seen[0].headers["authorization"]
+    assert seen[0].headers["host"] == "nas.lan"
+    assert "SignedHeaders=host;" in signed
+
+
+def test_a_dotted_bucket_on_aws_is_addressed_path_style() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(204)
+
+    location = s3.S3Location(
+        endpoint="https://s3.us-east-1.amazonaws.com",
+        bucket="my.backups",
+        region="us-east-1",
+        access_key_id="AKID",
+        secret_access_key="x",
+    )
+    s3.S3Client(location, transport=httpx.MockTransport(handler)).delete("k")
+    assert str(seen[0].url) == "https://s3.us-east-1.amazonaws.com/my.backups/k"

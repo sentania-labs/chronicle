@@ -29,9 +29,12 @@ import re
 import secrets
 import shutil
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -63,8 +66,17 @@ INTERVAL_CHOICES: dict[int, str] = {
 }
 TIME_OF_DAY = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
-# One run at a time, whether the loop or an admin's "Run now" started it.
+# One run at a time, whether the loop or an admin's "Run now" started it; a
+# restore takes it too, so no run reads the tree mid-swap.
 _RUN_LOCK = threading.Lock()
+TMP_DIR_PARTS = ("backup-tmp", "scheduled")
+
+
+@contextmanager
+def run_lock() -> Iterator[None]:
+    """Wait for any running backup, and hold off new ones, for the block."""
+    with _RUN_LOCK:
+        yield
 
 
 class BackupSettings(BaseModel):
@@ -129,8 +141,15 @@ def settings_problems(settings: BackupSettings, data_dir: Path) -> list[str]:
     elif settings.target == "s3":
         if not settings.s3_endpoint.startswith(("https://", "http://")):
             problems.append("S3 endpoint must be an http(s) URL")
+        endpoint = urlsplit(settings.s3_endpoint.strip())
+        if endpoint.username or endpoint.password:
+            problems.append("put S3 credentials in their own fields, not the endpoint URL")
+        if endpoint.query or endpoint.fragment:
+            problems.append("the S3 endpoint must not carry a query or fragment")
         if not settings.s3_bucket.strip():
             problems.append("S3 bucket is required")
+        if any(part in (".", "..") for part in settings.s3_prefix.split("/")):
+            problems.append("the S3 prefix must not contain . or .. segments")
         if not settings.s3_region.strip():
             problems.append("S3 region is required")
         if not settings.s3_access_key_id.strip() or not settings.s3_secret_enc:
@@ -176,6 +195,10 @@ class LocalTarget:
 
     def put(self, bundle: Path) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
+        # A copy an earlier run left half-written (a full disk, a restart)
+        # would otherwise sit here forever under its own unique name.
+        for stale in self.directory.glob(".chronicle-backup-*.tar.gz.partial"):
+            stale.unlink(missing_ok=True)
         partial = self.directory / f".{bundle.name}.partial"
         shutil.copyfile(bundle, partial)
         os.replace(partial, self.directory / bundle.name)
@@ -311,6 +334,10 @@ def is_due(settings: BackupSettings, status: dict[str, Any], now: dt.datetime) -
     since = _parse(status.get("last_attempt_at")) or _parse(settings.updated_at)
     if since is None:
         return False
+    if since > now:
+        # Stamped while the clock ran ahead (then corrected): waiting for the
+        # wall clock to catch up would silently skip every run until then.
+        return True
     return now >= next_due(since, settings.interval_hours, settings.time_of_day)
 
 
@@ -322,6 +349,8 @@ def is_overdue(settings: BackupSettings, status: dict[str, Any], now: dt.datetim
     since = _parse(status.get("last_success_at")) or _parse(settings.updated_at)
     if since is None:
         return False
+    if since > now:
+        return True  # a clock problem worth a look, not a reason to go quiet
     return now - since > dt.timedelta(hours=2 * settings.interval_hours)
 
 
@@ -357,8 +386,14 @@ def run_once(
             problems = settings_problems(settings, data_dir)
             if problems:
                 raise ValueError("; ".join(problems))
-            tmp_dir = state_dir / "backup-tmp"
+            # Its own directory, not backup-tmp itself, where a manual
+            # download may be streaming a bundle of the same name pattern.
+            # Anything left here was abandoned by a run that died (only one
+            # runs at a time), so it is swept before the next one starts.
+            tmp_dir = state_dir.joinpath(*TMP_DIR_PARTS)
             tmp_dir.mkdir(parents=True, exist_ok=True)
+            for stale in tmp_dir.glob("*.tar.gz"):
+                stale.unlink(missing_ok=True)
             bundle = backup_mod.create_backup(data_dir, tmp_dir)
             target = build_target(settings, instance_key, transport)
             target.put(bundle)

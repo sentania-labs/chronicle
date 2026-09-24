@@ -124,11 +124,21 @@ class S3Client:
     def __init__(self, location: S3Location, transport: httpx.BaseTransport | None = None):
         self.location = location
         parts = urlsplit(location.endpoint.rstrip("/"))
-        if parts.scheme not in ("http", "https") or not parts.netloc:
+        if parts.scheme not in ("http", "https") or not parts.hostname:
             raise S3Error(f"endpoint {location.endpoint!r} is not an http(s) URL")
+        if parts.username or parts.password:
+            raise S3Error("the endpoint URL must not carry credentials")
         self._scheme = parts.scheme
-        self._virtual = parts.hostname is not None and parts.hostname.endswith("amazonaws.com")
-        self._host = f"{location.bucket}.{parts.netloc}" if self._virtual else parts.netloc
+        # The Host header httpx sends: no userinfo, and no port when it is the
+        # scheme's default. Signing anything else fails SignatureDoesNotMatch.
+        default_port = 443 if parts.scheme == "https" else 80
+        netloc = parts.hostname
+        if parts.port and parts.port != default_port:
+            netloc = f"{netloc}:{parts.port}"
+        # Virtual-host style only on AWS, and never for a dotted bucket, whose
+        # name would break the *.s3.amazonaws.com certificate over https.
+        self._virtual = parts.hostname.endswith("amazonaws.com") and "." not in location.bucket
+        self._host = f"{location.bucket}.{netloc}" if self._virtual else netloc
         self._base_path = parts.path.rstrip("/")
         self._http = httpx.Client(timeout=TIMEOUT_SECONDS, transport=transport)
 

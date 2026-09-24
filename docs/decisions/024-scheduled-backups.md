@@ -51,3 +51,13 @@ chose to support both an S3 bucket and a local directory, picked on `/admin`
 - After restoring onto a new instance, the schedule has to be entered again:
   it is deliberately not in the bundle.
 - A bundle is uploaded to S3 in a single PUT, which S3 caps at 5 GB.
+- Retention counts every `chronicle-backup-*` bundle at the target, so two
+  instances must never share one directory or prefix: each would prune the
+  other's bundles.
+- The three schedule POSTs are same-origin only (`ui_deps.check_same_origin`)
+  on top of the admin session: the target decides where a copy of the whole
+  data directory goes. A restore waits for a running backup
+  (`scheduled_backup.run_lock`) so no torn bundle is shipped mid-swap.
+- "Test target" reaches whatever endpoint an admin enters, internal addresses
+  included; it shows only the status and S3 error code, never a body, and the
+  page is admin-only.

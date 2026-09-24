@@ -50,6 +50,7 @@ from ..github_client import GitHubApiError, build_manifest, manifest_target_url
 from ..models import RECONCILE_RESOLUTIONS
 from ..reconcile import run_once_logged as run_reconcile
 from ..tokens import RESERVED_TOKEN_NAMES
+from ..ui_deps import check_same_origin
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 api_router = APIRouter(prefix="/admin/api", tags=["admin-api"])
@@ -658,9 +659,14 @@ def _int_field(form: dict[str, str], name: str, default: int) -> int:
 
 @router.post("/backup/schedule", response_class=HTMLResponse)
 async def backup_schedule_save(
-    request: Request, admin: AdminServices = Depends(require_admin_session_html)
+    request: Request,
+    _origin: None = Depends(check_same_origin),
+    admin: AdminServices = Depends(require_admin_session_html),
 ) -> HTMLResponse:
-    """Save the scheduled-backup settings (issue #68). A blank secret keeps
+    """Save the scheduled-backup settings (issue #68). Same-origin only: the
+    target decides where a copy of the whole data directory goes, so a
+    same-site page riding the admin cookie must not be able to change it and
+    then press Run now (ADR 024). A blank secret keeps
     the saved one; a new one is encrypted with the instance key before it
     touches disk, and is never echoed back or logged."""
     form = await _form(request)
@@ -695,6 +701,7 @@ async def backup_schedule_save(
 
 @router.post("/backup/test", response_class=HTMLResponse)
 def backup_schedule_test(
+    _origin: None = Depends(check_same_origin),
     admin: AdminServices = Depends(require_admin_session_html),
 ) -> HTMLResponse:
     """Write and delete a small probe at the saved target."""
@@ -709,6 +716,7 @@ def backup_schedule_test(
 
 @router.post("/backup/run", response_class=HTMLResponse)
 def backup_schedule_run(
+    _origin: None = Depends(check_same_origin),
     admin: AdminServices = Depends(require_admin_session_html),
 ) -> HTMLResponse:
     """Start one scheduled-style backup now, in the background: a bundle can
@@ -863,7 +871,11 @@ def backup_restore(
     # would otherwise land in the pre-restore tree this same call deletes.
     main_module.quiesce_for_restore(request.app)
     try:
-        report = backup_mod.restore_backup(data_dir, staged_path)
+        # A scheduled or "Run now" backup still reading the tree would ship a
+        # torn bundle that counts toward retention; wait for it to finish,
+        # and hold off any other until the swap is done (ADR 024).
+        with scheduled_backup.run_lock():
+            report = backup_mod.restore_backup(data_dir, staged_path)
     except backup_mod.BackupError as exc:
         return HTMLResponse(
             tpl.backup_page(last_backup=_read_last_backup(admin), notice=str(exc)), status_code=400
