@@ -265,3 +265,39 @@ def test_the_watcher_prefers_the_base_url_this_merge_just_read(
     draft_id = _merge_a_publish(store, {"x": "{link}"})
     draft = store.get_draft(draft_id)
     assert draft.announcements["x"].startswith("https://new.example/")
+
+
+def test_a_fresh_read_without_a_baseurl_does_not_revive_the_saved_one(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_state(store.data_dir, {"source": "hugo_config", "baseurl": "https://old.example/"})
+    removed = digest.HugoConventions(
+        contentdir="content",
+        staticdir="static",
+        mainsections=(),
+        taxonomies={},
+        environment="production",
+        source="hugo_config",
+        baseurl=None,
+    )
+    monkeypatch.setattr(watcher, "refresh_from_target", lambda *a, **k: removed)
+    draft_id = _merge_a_publish(store, {"x": "{link}"})
+    assert store.get_draft(draft_id).announcements == {"x": "{link}"}
+
+
+def test_a_fallback_read_uses_the_saved_baseurl(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_state(store.data_dir, {"source": "hugo_config", "baseurl": "https://saved.example/"})
+    fallback = digest.HugoConventions(
+        contentdir="content/posts",
+        staticdir="static",
+        mainsections=(),
+        taxonomies={},
+        environment="production",
+        source="fallback",
+        fallback_reason="hugo missing",
+    )
+    monkeypatch.setattr(watcher, "refresh_from_target", lambda *a, **k: fallback)
+    draft_id = _merge_a_publish(store, {"x": "{link}"})
+    assert store.get_draft(draft_id).announcements["x"].startswith("https://saved.example/")

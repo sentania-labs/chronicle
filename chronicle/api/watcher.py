@@ -71,24 +71,29 @@ def _handle_merged(store: Store, target: RepoTarget, watch: WatchEntry) -> None:
         )
     store.observe_pr_outcome(watch.draft_id, "merged", watch.pr_number, actor=WATCHER_ACTOR)
     if watch.kind == "publish":
-        _fill_announcement_links(store, watch.draft_id, getattr(conventions, "baseurl", None))
+        _fill_announcement_links(store, watch.draft_id, conventions)
     store.clear_watch(watch.draft_id, WATCHER_ACTOR, f"PR #{watch.pr_number} merged")
 
 
-def _fill_announcement_links(store: Store, draft_id: str, base_url: str | None) -> None:
+def _fill_announcement_links(store: Store, draft_id: str, conventions: Any) -> None:
     """Put the post's public link into its announcements (issue #71).
 
     The base is the site's own production `baseURL` as this merge's refresh
-    just read it, or, when that read had none, what the last digest that
-    wrote toolchain state read; the path is the url the publish run
-    recorded. A site with no absolute `baseURL` leaves the announcements
+    just read it. Only a refresh that could not read the config at all (a
+    fallback read, or none) falls back to the last saved digest state: a
+    real read that found no usable `baseURL` means the site removed it, and
+    an old one must not be revived (Codex round). The path is the url the
+    publish run recorded. A site with no absolute `baseURL` leaves the announcements
     alone. A failure here is logged, never raised: the merge is real and the
     watch must still clear, and the fill is only a convenience.
     """
     try:
         draft = store.get_draft(draft_id)
         post_url = (draft.published or {}).get("url")
-        base = base_url or digest_mod.read_base_url_from_state(store.data_dir)
+        if getattr(conventions, "source", None) == "hugo_config":
+            base = conventions.baseurl
+        else:
+            base = digest_mod.read_base_url_from_state(store.data_dir)
         if not isinstance(post_url, str) or not base:
             return
         store.fill_announcement_links(draft_id, announce.public_link(base, post_url), WATCHER_ACTOR)
