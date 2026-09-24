@@ -14,6 +14,8 @@ import logging
 import threading
 from typing import Any
 
+from . import announce
+from . import digest as digest_mod
 from .admin_deps import AdminServices
 from .digest_runner import refresh_from_target
 from .github_client import GitHubApiError
@@ -68,7 +70,31 @@ def _handle_merged(store: Store, target: RepoTarget, watch: WatchEntry) -> None:
             current_version=draft.version_no,
         )
     store.observe_pr_outcome(watch.draft_id, "merged", watch.pr_number, actor=WATCHER_ACTOR)
+    if watch.kind == "publish":
+        _fill_announcement_links(store, watch.draft_id)
     store.clear_watch(watch.draft_id, WATCHER_ACTOR, f"PR #{watch.pr_number} merged")
+
+
+def _fill_announcement_links(store: Store, draft_id: str) -> None:
+    """Put the post's public link into its announcements (issue #71).
+
+    The base is the site's own production `baseURL`, as the digest that
+    `refresh_from_target` just ran read it; the path is the url the publish
+    run recorded. A site with no absolute `baseURL` leaves the announcements
+    alone. A failure here is logged, never raised: the merge is real and the
+    watch must still clear, and the fill is only a convenience.
+    """
+    try:
+        draft = store.get_draft(draft_id)
+        post_url = (draft.published or {}).get("url")
+        base_url = digest_mod.read_base_url_from_state(store.data_dir)
+        if draft.status != "published" or not isinstance(post_url, str) or not base_url:
+            return
+        store.fill_announcement_links(
+            draft_id, announce.public_link(base_url, post_url), WATCHER_ACTOR
+        )
+    except Exception:
+        log.exception("filling the published link into draft %s announcements failed", draft_id)
 
 
 def _handle_closed(store: Store, watch: WatchEntry) -> None:
