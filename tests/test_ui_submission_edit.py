@@ -355,9 +355,9 @@ def test_the_list_shows_only_new_and_claimed_by_default(
     claimed = _submit(client, agent_token, "brief-claimed")
     services.store.act_on_submission(claimed, "claim", "ghostwriter")
     drafted = _submit(client, agent_token, "brief-drafted")
-    assert client.post(f"/content/submissions/{drafted}/draft").status_code in (200, 303)
+    assert client.post(f"/content/submissions/{drafted}/draft").status_code == 200
     discarded = _submit(client, agent_token, "brief-discarded")
-    assert client.post(f"/content/submissions/{discarded}/discard").status_code in (200, 303)
+    assert client.post(f"/content/submissions/{discarded}/discard").status_code == 200
 
     listing = client.get("/content/submissions").text
     assert "brief-new" in listing and "brief-claimed" in listing
@@ -394,3 +394,19 @@ def test_the_api_list_still_returns_every_status(client: TestClient, agent_token
     client.post(f"/content/submissions/{submission_id}/discard")
     listed = client.get("/v1/submissions", headers=auth(agent_token)).json()["submissions"]
     assert submission_id in {item["id"] for item in listed}
+
+
+def test_show_all_survives_pagination(
+    client: TestClient, agent_token: str, services: Services
+) -> None:
+    from chronicle.api.pagination import PAGE_SIZE
+
+    for n in range(PAGE_SIZE + 1):
+        submission_id = _submit(client, agent_token, f"brief-{n}")
+        services.store.act_on_submission(submission_id, "discard", "ghostwriter")
+    everything = client.get("/content/submissions?show=all").text
+    assert 'href="/content/submissions?page=2&show=all"' in everything
+    # Nothing open: the default view is empty but still offers the toggle.
+    default = client.get("/content/submissions").text
+    assert "<td colspan=7>none</td>" in default
+    assert f"Show all ({PAGE_SIZE + 1} drafted or discarded)" in default
