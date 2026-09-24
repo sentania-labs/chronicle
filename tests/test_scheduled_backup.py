@@ -423,3 +423,35 @@ def test_s3_settings_refuse_userinfo_and_dot_segments(tmp_path: Path) -> None:
     dots = base.model_copy(update={"s3_prefix": "a/../b"})
     assert scheduled_backup.settings_problems(userinfo, tmp_path)
     assert scheduled_backup.settings_problems(dots, tmp_path)
+
+
+# --- Codex round -------------------------------------------------------------
+
+
+def test_a_malformed_endpoint_is_a_validation_problem_not_a_crash(tmp_path: Path) -> None:
+    key = crypto.load_or_create_instance_key(tmp_path)
+    for endpoint in ("http://[", "https://nas.lan:notaport"):
+        settings = _s3_settings(key).model_copy(update={"s3_endpoint": endpoint})
+        assert "the S3 endpoint is not a valid URL" in scheduled_backup.settings_problems(
+            settings, tmp_path
+        )
+
+
+def test_run_now_while_a_run_holds_the_lock_is_a_conflict_not_a_false_start(
+    admin_client: TestClient, data_dir: Path
+) -> None:
+    with scheduled_backup.run_lock():
+        response = admin_client.post("/admin/backup/run")
+    assert response.status_code == 409
+    assert "already running" in response.text
+    assert "last_attempt_at" not in scheduled_backup.load_status(data_dir / "state")
+
+
+def test_run_now_reserves_the_lock_before_it_answers(data_dir: Path) -> None:
+    state, key = _state(data_dir)
+    assert scheduled_backup.start_run_now(data_dir, state, key)
+    # The first reservation is held until its thread finishes; a second
+    # request in the meantime is refused, never silently dropped.
+    with scheduled_backup.run_lock():
+        pass
+    assert "last_attempt_at" in scheduled_backup.load_status(state)

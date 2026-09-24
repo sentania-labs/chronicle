@@ -721,12 +721,12 @@ def backup_schedule_run(
 ) -> HTMLResponse:
     """Start one scheduled-style backup now, in the background: a bundle can
     take longer than a request should. Its outcome shows on this page."""
-    threading.Thread(
-        target=scheduled_backup.run_once,
-        args=(_data_dir(admin), admin.state_dir, admin.instance_key),
-        name="chronicle-backup-now",
-        daemon=True,
-    ).start()
+    if not scheduled_backup.start_run_now(_data_dir(admin), admin.state_dir, admin.instance_key):
+        return _backup_page(
+            admin,
+            notice="A backup (or a restore) is already running; try again when it finishes.",
+            status_code=409,
+        )
     return _backup_page(
         admin,
         notice="Backup started; reload this page to see its outcome.",

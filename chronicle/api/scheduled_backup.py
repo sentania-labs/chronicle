@@ -141,7 +141,11 @@ def settings_problems(settings: BackupSettings, data_dir: Path) -> list[str]:
     elif settings.target == "s3":
         if not settings.s3_endpoint.startswith(("https://", "http://")):
             problems.append("S3 endpoint must be an http(s) URL")
-        endpoint = urlsplit(settings.s3_endpoint.strip())
+        try:
+            endpoint = urlsplit(settings.s3_endpoint.strip())
+            endpoint.port  # noqa: B018 - raises on a malformed port
+        except ValueError:
+            return [*problems, "the S3 endpoint is not a valid URL"]
         if endpoint.username or endpoint.password:
             problems.append("put S3 credentials in their own fields, not the endpoint URL")
         if endpoint.query or endpoint.fragment:
@@ -376,49 +380,77 @@ def run_once(
     if not _RUN_LOCK.acquire(blocking=False):
         return None
     try:
-        settings = settings or load_settings(state_dir)
-        status = load_status(state_dir)
-        started = _now()
-        status["last_attempt_at"] = started.isoformat(timespec="seconds")
-        bundle: Path | None = None
-        target: Target | None = None
-        try:
-            problems = settings_problems(settings, data_dir)
-            if problems:
-                raise ValueError("; ".join(problems))
-            # Its own directory, not backup-tmp itself, where a manual
-            # download may be streaming a bundle of the same name pattern.
-            # Anything left here was abandoned by a run that died (only one
-            # runs at a time), so it is swept before the next one starts.
-            tmp_dir = state_dir.joinpath(*TMP_DIR_PARTS)
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            for stale in tmp_dir.glob("*.tar.gz"):
-                stale.unlink(missing_ok=True)
-            bundle = backup_mod.create_backup(data_dir, tmp_dir)
-            target = build_target(settings, instance_key, transport)
-            target.put(bundle)
-            pruned = prune(target, settings.retention)
-            status.update(
-                last_success_at=_now().isoformat(timespec="seconds"),
-                last_size_bytes=bundle.stat().st_size,
-                last_location=target.describe(bundle.name),
-                last_pruned=pruned,
-            )
-        except Exception as exc:  # recorded, never raised: the loop keeps going
-            log.exception("scheduled backup failed")
-            status.update(
-                last_failure_at=_now().isoformat(timespec="seconds"),
-                last_error=f"{type(exc).__name__}: {exc}",
-            )
-        finally:
-            if target is not None:
-                target.close()
-            if bundle is not None:
-                bundle.unlink(missing_ok=True)
-        _save_status(state_dir, status)
-        return status
+        return _run_locked(data_dir, state_dir, instance_key, settings, transport)
     finally:
         _RUN_LOCK.release()
+
+
+def start_run_now(data_dir: Path, state_dir: Path, instance_key: bytes) -> bool:
+    """Reserve the run lock now and run in the background; False, and nothing
+    started, when a run (or a restore) already holds it. The reservation is
+    taken before returning so "started" is never reported for a run that
+    would then find the lock taken and quietly do nothing."""
+    if not _RUN_LOCK.acquire(blocking=False):
+        return False
+
+    def work() -> None:
+        try:
+            _run_locked(data_dir, state_dir, instance_key, None, None)
+        finally:
+            _RUN_LOCK.release()
+
+    threading.Thread(target=work, name="chronicle-backup-now", daemon=True).start()
+    return True
+
+
+def _run_locked(
+    data_dir: Path,
+    state_dir: Path,
+    instance_key: bytes,
+    settings: BackupSettings | None,
+    transport: httpx.BaseTransport | None,
+) -> dict[str, Any]:
+    settings = settings or load_settings(state_dir)
+    status = load_status(state_dir)
+    started = _now()
+    status["last_attempt_at"] = started.isoformat(timespec="seconds")
+    bundle: Path | None = None
+    target: Target | None = None
+    try:
+        problems = settings_problems(settings, data_dir)
+        if problems:
+            raise ValueError("; ".join(problems))
+        # Its own directory, not backup-tmp itself, where a manual
+        # download may be streaming a bundle of the same name pattern.
+        # Anything left here was abandoned by a run that died (only one
+        # runs at a time), so it is swept before the next one starts.
+        tmp_dir = state_dir.joinpath(*TMP_DIR_PARTS)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        for stale in tmp_dir.glob("*.tar.gz"):
+            stale.unlink(missing_ok=True)
+        bundle = backup_mod.create_backup(data_dir, tmp_dir)
+        target = build_target(settings, instance_key, transport)
+        target.put(bundle)
+        pruned = prune(target, settings.retention)
+        status.update(
+            last_success_at=_now().isoformat(timespec="seconds"),
+            last_size_bytes=bundle.stat().st_size,
+            last_location=target.describe(bundle.name),
+            last_pruned=pruned,
+        )
+    except Exception as exc:  # recorded, never raised: the loop keeps going
+        log.exception("scheduled backup failed")
+        status.update(
+            last_failure_at=_now().isoformat(timespec="seconds"),
+            last_error=f"{type(exc).__name__}: {exc}",
+        )
+    finally:
+        if target is not None:
+            target.close()
+        if bundle is not None:
+            bundle.unlink(missing_ok=True)
+    _save_status(state_dir, status)
+    return status
 
 
 def test_target(
