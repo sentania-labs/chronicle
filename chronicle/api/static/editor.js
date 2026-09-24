@@ -1076,7 +1076,9 @@ function copyStateText(outcome) {
     // Each open page holds under its own token, so closing one tab, or the
     // old page's pagehide landing after the next page's first beat, releases
     // only this page's hold.
-    var pageToken = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    // The server minted this page's token (and, for a real page load, already
+    // took the lease under it); a page without one makes its own.
+    var pageToken = leaseData.leasePage || Math.random().toString(36).slice(2) + Date.now().toString(36);
     var leaseUrl = "/content/drafts/" + encodeURIComponent(leaseData.draftId) + "/lease";
     var readOnly = leaseData.readOnly === "1";
     var every = (parseInt(leaseData.leaseSeconds, 10) || 30) * 1000;

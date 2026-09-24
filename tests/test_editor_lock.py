@@ -4,6 +4,7 @@ saved by anyone else, and leases lapse on their own."""
 from __future__ import annotations
 
 import datetime as dt
+import re
 from typing import Any
 
 import pytest
@@ -105,12 +106,17 @@ def _draft(client: TestClient, token: str) -> str:
     return draft_id
 
 
-def _open(client: TestClient, draft_id: str, page: str = "pageAAAA1111") -> Any:
-    """What an open edit page does: render, then its first heartbeat."""
-    assert client.get(f"/content/drafts/{draft_id}").status_code == 200
-    beat = client.post(f"/content/drafts/{draft_id}/lease?page={page}")
-    assert beat.status_code == 200
-    return beat.json()
+def _open(client: TestClient, draft_id: str) -> str:
+    """What an open edit page does: load (which takes the lease under the
+    token the server mints), then its first heartbeat under that token."""
+    page = client.get(f"/content/drafts/{draft_id}")
+    assert page.status_code == 200
+    match = re.search(r'data-lease-page="([0-9a-f]+)"', page.text)
+    assert match is not None
+    token = match.group(1)
+    beat = client.post(f"/content/drafts/{draft_id}/lease?page={token}")
+    assert beat.status_code == 200 and beat.json()["mine"] is True
+    return token
 
 
 def _api_save(client: TestClient, token: str, draft_id: str, base: int) -> Any:
@@ -203,8 +209,8 @@ def test_the_heartbeat_reports_the_holder_and_hands_over_once_it_lapses(
 def test_closing_the_page_releases_the_lease(client: TestClient, agent_token: str) -> None:
     _clocked(client)
     draft_id = _draft(client, agent_token)
-    _open(client, draft_id)
-    release = client.post(f"/content/drafts/{draft_id}/lease/release?page=pageAAAA1111")
+    token = _open(client, draft_id)
+    release = client.post(f"/content/drafts/{draft_id}/lease/release?page={token}")
     assert release.status_code == 200
     assert _api_save(client, agent_token, draft_id, 1).status_code == 200
 
@@ -227,27 +233,81 @@ def test_the_claim_ui_is_gone(client: TestClient, agent_token: str) -> None:
 # --- Review round ---------------------------------------------------------------
 
 
-def test_rendering_the_page_alone_takes_no_lease(client: TestClient, agent_token: str) -> None:
-    # A prefetch or a cross-site GET must not hold a draft: only the page's
-    # own same-origin heartbeat does.
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Sec-Fetch-Dest": "image", "Sec-Fetch-Site": "cross-site"},  # <img> on another site
+        {"Sec-Fetch-Dest": "document", "Sec-Fetch-Site": "cross-site"},  # a link elsewhere
+        {"Sec-Fetch-Dest": "document", "Sec-Purpose": "prefetch"},
+        {"Sec-Fetch-Dest": "empty", "Sec-Fetch-Site": "same-origin"},  # editor.js refetch
+    ],
+)
+def test_a_fetch_that_is_not_someone_opening_the_page_takes_no_lease(
+    client: TestClient, agent_token: str, headers: dict[str, str]
+) -> None:
     _clocked(client)
     draft_id = _draft(client, agent_token)
-    client.get(f"/content/drafts/{draft_id}")
+    assert client.get(f"/content/drafts/{draft_id}", headers=headers).status_code == 200
     assert _leases(client).current(draft_id) is None
     assert _api_save(client, agent_token, draft_id, 1).status_code == 200
 
 
-def test_closing_one_of_two_open_pages_keeps_the_lock(client: TestClient, agent_token: str) -> None:
-    # Two tabs, or a navigation whose old page's pagehide lands after the
-    # next page's first beat: only the closing page's hold goes.
+def test_loading_the_page_takes_the_lease_before_any_script_runs(
+    client: TestClient, agent_token: str
+) -> None:
     _clocked(client)
     draft_id = _draft(client, agent_token)
-    _open(client, draft_id, page="pageAAAA1111")
-    _open(client, draft_id, page="pageBBBB2222")
-    client.post(f"/content/drafts/{draft_id}/lease/release?page=pageAAAA1111")
+    same_origin = {"Sec-Fetch-Dest": "document", "Sec-Fetch-Site": "same-origin"}
+    client.get(f"/content/drafts/{draft_id}", headers=same_origin)
     assert _api_save(client, agent_token, draft_id, 1).status_code == 423
-    client.post(f"/content/drafts/{draft_id}/lease/release?page=pageBBBB2222")
+
+
+def test_closing_one_of_two_open_pages_keeps_the_lock(client: TestClient, agent_token: str) -> None:
+    # Two tabs, or a navigation whose old page's pagehide lands after the
+    # next page loaded: only the closing page's hold goes.
+    _clocked(client)
+    draft_id = _draft(client, agent_token)
+    first = _open(client, draft_id)
+    second = _open(client, draft_id)
+    client.post(f"/content/drafts/{draft_id}/lease/release?page={first}")
+    assert _api_save(client, agent_token, draft_id, 1).status_code == 423
+    client.post(f"/content/drafts/{draft_id}/lease/release?page={second}")
     assert _api_save(client, agent_token, draft_id, 1).status_code == 200
+
+
+def test_a_legacy_claim_on_disk_is_not_shown(client: TestClient, agent_token: str) -> None:
+    import json as json_mod
+
+    draft_id = _draft(client, agent_token)
+    services = client.app.state.services  # type: ignore[attr-defined]
+    path = services.store.drafts_dir / draft_id / "draft.json"
+    record = json_mod.loads(path.read_text(encoding="utf-8"))
+    record["claim"] = {"author": "ghostwriter", "since": "2026-09-01T00:00:00+00:00"}
+    path.write_text(json_mod.dumps(record), encoding="utf-8")
+    shown = client.get(f"/v1/drafts/{draft_id}", headers=auth(agent_token)).json()
+    assert shown["claim"] is None
+
+
+def test_a_heartbeat_waits_for_an_admitted_save_to_land(
+    client: TestClient, agent_token: str
+) -> None:
+    # The check and the write are one step: a lease cannot be granted in
+    # between (Codex round).
+    import threading
+
+    leases = EditorLeases(Clock())
+    granted = threading.Event()
+    with leases.writing("d1", "ghostwriter"):
+
+        def beat() -> None:
+            leases.touch("d1", "editor", "pageAAAA1111")
+            granted.set()
+
+        worker = threading.Thread(target=beat)
+        worker.start()
+        assert not granted.wait(0.2)
+    assert granted.wait(2)
+    worker.join()
 
 
 def test_a_page_that_stops_beating_lapses_while_another_keeps_it(
@@ -255,9 +315,9 @@ def test_a_page_that_stops_beating_lapses_while_another_keeps_it(
 ) -> None:
     clock = _clocked(client)
     draft_id = _draft(client, agent_token)
-    _open(client, draft_id, page="pageAAAA1111")
+    _open(client, draft_id)
     clock.advance(90)
-    _open(client, draft_id, page="pageBBBB2222")
+    _open(client, draft_id)
     clock.advance(60)  # A's last beat is 150s old, B's is 60s
     assert _leases(client).current(draft_id) is not None
     clock.advance(LEASE_SECONDS)

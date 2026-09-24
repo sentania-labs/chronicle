@@ -13,10 +13,13 @@ working in the UI while the ghostwriter saves the same draft through the API.
 ## Decision
 
 - **Lease.** An open edit page holds a lease for the viewing identity: the
-  consumer name the domain records (`editor` for the UI). `editor.js` beats
-  once on load and every 30 seconds after, under a random per-page token,
-  through a same-origin POST; rendering the page takes nothing itself, so a
-  prefetch or a cross-site GET cannot hold a draft. The lease lives while any
+  consumer name the domain records (`editor` for the UI). A top-level,
+  same-origin load of the page takes it at render, under a page token the
+  server mints, so the editor is protected before (or without) script; the
+  browser's Fetch Metadata headers keep an `<img>` or link on another site,
+  a prefetch, and the editor's own background refetch from taking one.
+  `editor.js` then beats once on load and every 30 seconds under the same
+  token, through a same-origin POST. The lease lives while any
   of its pages has beaten in the last 2 minutes, so a closed tab, a sleeping
   laptop or a dropped connection never leaves a draft stuck. Closing a page
   sends a best-effort release of that page's hold only, so a second tab, or
@@ -25,6 +28,8 @@ working in the UI while the ghostwriter saves the same draft through the API.
   identity, through the UI save route, `PUT /v1/drafts/{id}`, or `/v1` image
   attach and detach (which can change the body the editor has open), is
   refused with 423 `draft_being_edited`, naming the holder, since and expiry.
+  The check and the write are one step (`EditorLeases.writing`): a lease
+  cannot be granted between an admitted save's check and its write.
   Same-identity saves (two tabs) are not blocked; the version check and the
   conflict page stay the guard there. Reads, previews, feedback and the
   reviewer's actions are never blocked.
@@ -40,8 +45,9 @@ working in the UI while the ghostwriter saves the same draft through the API.
 - **API.** `GET /v1/drafts/{id}` carries `editing: {holder, since,
   expires_at}` or null. `POST /v1/drafts/{id}/claim` and `/release` are
   removed outright (Scott's call on the issue), not kept as no-op aliases.
-- `Draft.claim` stays in the model only so records that carry one still load
-  (and so `GET` still shows `"claim": null`); nothing writes or reads it.
+- `Draft.claim` stays in the model only so records that carry one still
+  load; a stored value is dropped on load, so `GET` always shows
+  `"claim": null` and no response names a holder nobody can release.
 - **Who it actually protects.** Only the UI takes leases, and the UI is always
   `editor`, so in practice the lock stops API consumers (the ghostwriter)
   while the editor has a draft open. It is not UI-against-UI locking: two

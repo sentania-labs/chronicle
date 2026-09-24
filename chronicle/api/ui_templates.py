@@ -865,6 +865,7 @@ def editor_page(
     unpublish_pr_open: bool = False,
     locked_by: str | None = None,
     locked_since: str | None = None,
+    lease_page: str = "",
     notice: str | None = None,
     notice_kind: str = "error",
 ) -> str:
@@ -906,7 +907,7 @@ def editor_page(
     image_dir_value = draft.get("image_dir")
     image_dir_attr = f' data-image-dir="{escape(image_dir_value)}"' if image_dir_value else ""
     body = f"""
-<div id="editor-app" data-draft-id="{draft_id}" data-version="{draft["version_no"]}"{image_dir_attr} data-lease-seconds="{HEARTBEAT_SECONDS}"{' data-read-only="1"' if locked_by else ""}>
+<div id="editor-app" data-draft-id="{draft_id}" data-version="{draft["version_no"]}"{image_dir_attr} data-lease-seconds="{HEARTBEAT_SECONDS}" data-lease-page="{escape(lease_page)}"{' data-read-only="1"' if locked_by else ""}>
 <div id="backup-banner" class="backup-banner {ui_chrome.banner_class("warn")}" role="alert" hidden>
 <span id="backup-banner-text"></span>
 <button type="button" id="backup-restore" class="lat-btn">Restore</button>

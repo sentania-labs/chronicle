@@ -89,16 +89,16 @@ def save_draft(
     consumer: Consumer = Depends(require_consumer),
     services: Services = Depends(get_services),
 ) -> dict[str, Any]:
-    services.leases.check_save(draft_id, consumer.name)
-    draft = services.store.save_draft(
-        draft_id,
-        consumer.name,
-        payload.base_version,
-        payload.frontmatter,
-        payload.body,
-        payload.message,
-        announcements=payload.announcements,
-    )
+    with services.leases.writing(draft_id, consumer.name):
+        draft = services.store.save_draft(
+            draft_id,
+            consumer.name,
+            payload.base_version,
+            payload.frontmatter,
+            payload.body,
+            payload.message,
+            announcements=payload.announcements,
+        )
     return _dump(draft)
 
 
@@ -202,8 +202,8 @@ def attach_image(
     services: Services = Depends(get_services),
 ) -> dict[str, Any]:
     # An inline attach can write into the body the editor has open (ADR 025).
-    services.leases.check_save(draft_id, consumer.name)
-    return _dump(services.store.attach_image(draft_id, image_id, payload.role, consumer.name))
+    with services.leases.writing(draft_id, consumer.name):
+        return _dump(services.store.attach_image(draft_id, image_id, payload.role, consumer.name))
 
 
 @router.delete("/{draft_id}/images/{image_id}")
@@ -214,5 +214,5 @@ def detach_image(
     services: Services = Depends(get_services),
 ) -> dict[str, Any]:
     # A detach can orphan a reference in the body the editor has open.
-    services.leases.check_save(draft_id, consumer.name)
-    return _dump(services.store.detach_image(draft_id, image_id, consumer.name))
+    with services.leases.writing(draft_id, consumer.name):
+        return _dump(services.store.detach_image(draft_id, image_id, consumer.name))
