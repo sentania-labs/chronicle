@@ -74,7 +74,7 @@ def test_deployment_has_three_containers_with_security_context_and_probes() -> N
 
 def test_pvcs_declare_storage_requests_with_no_hardcoded_storage_class() -> None:
     pvcs = [d for d in _documents() if d["kind"] == "PersistentVolumeClaim"]
-    assert len(pvcs) == 2
+    assert len(pvcs) == 3
     for pvc in pvcs:
         assert pvc["spec"]["resources"]["requests"]["storage"]
         assert "storageClassName" not in pvc["spec"]

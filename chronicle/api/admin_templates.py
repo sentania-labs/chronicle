@@ -95,13 +95,96 @@ def _table(rows: str, head_cells: str = "") -> str:
     )
 
 
+_NEW_PASSWORD = ' autocomplete="new-password"'
+
+
+def _schedule_form(settings: Any, summary: dict[str, Any]) -> str:
+    """The scheduled-backup settings (issue #68, ADR 024). The S3 secret is a
+    write-only field: never echoed, left blank to keep the saved one."""
+    from .scheduled_backup import INTERVAL_CHOICES
+
+    def selected(flag: bool) -> str:
+        return " selected" if flag else ""
+
+    def checked(flag: bool) -> str:
+        return " checked" if flag else ""
+
+    interval_options = "".join(
+        f'<option value="{hours}"{selected(settings.interval_hours == hours)}>'
+        f"{escape(label)}</option>"
+        for hours, label in INTERVAL_CHOICES.items()
+    )
+    secret_hint = "saved; leave blank to keep" if settings.s3_secret_enc else "not set"
+
+    def field(name: str, label: str, value: str, kind: str = "text", extra: str = "") -> str:
+        return (
+            f'<label class="lat-label" for="{name}">{escape(label)}</label>'
+            f'<input class="lat-input" type="{kind}" id="{name}" name="{name}" '
+            f'value="{escape(value)}"{extra}>'
+        )
+
+    def choice(kind: str, name: str, value: str, label: str, flag: bool) -> str:
+        return (
+            f'<label class="lat-label"><input type="{kind}" name="{name}" '
+            f'value="{value}"{checked(flag)}> {escape(label)}</label>'
+        )
+
+    status_rows = _scheduled_backup_rows(
+        lambda *cells: "<tr>" + "".join(_cell(c) for c in cells) + "</tr>", summary
+    )
+    local_label = "Directory (a mounted volume, not under the data directory)"
+    return f"""
+<section class="lat-card">
+<h2>Scheduled backups</h2>
+{_table(status_rows)}
+<form method="post" action="/admin/backup/schedule">
+{choice("checkbox", "enabled", "1", "Enabled", settings.enabled)}
+<label class="lat-label" for="interval_hours">How often</label>
+<select class="lat-select" id="interval_hours" name="interval_hours">{interval_options}</select>
+{field("time_of_day", "Time of day (HH:MM, America/Chicago)", settings.time_of_day)}
+{field("retention", "Keep the newest", str(settings.retention), "number", ' min="1" max="365"')}
+<fieldset class="chr-fieldset">
+<legend>Target</legend>
+{choice("radio", "target", "local", "Local path", settings.target == "local")}
+{field("local_path", local_label, settings.local_path)}
+{choice("radio", "target", "s3", "S3 bucket", settings.target == "s3")}
+{field("s3_endpoint", "Endpoint URL", settings.s3_endpoint)}
+{field("s3_bucket", "Bucket", settings.s3_bucket)}
+{field("s3_prefix", "Prefix (optional)", settings.s3_prefix)}
+{field("s3_region", "Region", settings.s3_region)}
+{field("s3_access_key_id", "Access key ID", settings.s3_access_key_id)}
+{field("s3_secret", f"Secret access key ({secret_hint})", "", "password", _NEW_PASSWORD)}
+</fieldset>
+<button type="submit" class="lat-btn lat-btn--primary">Save schedule</button>
+</form>
+<form method="post" action="/admin/backup/test" class="action-form">
+<button type="submit" class="lat-btn">Test target</button>
+</form>
+<form method="post" action="/admin/backup/run" class="action-form">
+<button type="submit" class="lat-btn">Run a backup now</button>
+</form>
+</section>
+"""
+
+
 def backup_page(
-    *, last_backup: str | None, notice: str | None = None, notice_kind: str = "error"
+    *,
+    last_backup: str | None,
+    schedule: Any = None,
+    schedule_summary: dict[str, Any] | None = None,
+    notice: str | None = None,
+    notice_kind: str = "error",
 ) -> str:
     # A bare YYYY-MM-DD stays a date (no instant to shift); see `_stamp`.
     last_html = escape(_stamp(last_backup, "never"))
+    schedule_html = (
+        _schedule_form(schedule, schedule_summary)
+        if schedule is not None and schedule_summary is not None
+        else ""
+    )
     body = f"""
 <p class="muted">Last backup created: {last_html}</p>
+{schedule_html}
 <section class="lat-card">
 <h2>Create a backup</h2>
 <p>Downloads a gzip tarball: repo history, images, and the encrypted
@@ -209,6 +292,36 @@ def _heartbeat_rows(row: Any, heartbeat: dict[str, Any] | None, name: str) -> st
     )
 
 
+def _scheduled_backup_rows(row: Any, summary: dict[str, Any]) -> str:
+    """The status page's scheduled-backup rows (issue #68). A last success
+    more than two intervals old, or none since the schedule was saved, is a
+    warning badge, the same way toolchain drift is."""
+    if not summary["enabled"]:
+        return row("scheduled backups", "off")
+    size = summary["last_size_bytes"]
+    warn = (
+        "<tr><td>scheduled backups</td><td>"
+        + ui_chrome.badge("overdue", "warn")
+        + " no successful backup in over two intervals</td></tr>"
+        if summary["overdue"]
+        else ""
+    )
+    return (
+        warn
+        + row("schedule", summary["schedule"])
+        + row("target", summary["target"])
+        + row("last success", _stamp(summary["last_success_at"], "never"))
+        + (row("last size", f"{size:,} bytes") if isinstance(size, int) else "")
+        + (row("last bundle", summary["last_location"]) if summary["last_location"] else "")
+        + (
+            row("last failure", _stamp(summary["last_failure_at"], "-"))
+            + row("last error", summary["last_error"] or "-")
+            if summary["last_failure_at"]
+            else ""
+        )
+    )
+
+
 def _flag_rows(row: Any, flags: list[dict[str, Any]]) -> str:
     if not flags:
         return "<tr><td colspan=3>none</td></tr>"
@@ -310,7 +423,12 @@ def status_page(status: dict[str, Any], notice: str | None = None) -> str:
 </section>
 <section class="lat-card">
 <h2>Backup</h2>
-{_table(row("last backup", _stamp(status["last_backup_at"], "never")))}
+{
+        _table(
+            row("last backup", _stamp(status["last_backup_at"], "never"))
+            + _scheduled_backup_rows(row, status["scheduled_backup"])
+        )
+    }
 <p><a href="/admin/backup">Backup and restore</a></p>
 </section>
 <section class="lat-card">

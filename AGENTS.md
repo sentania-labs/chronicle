@@ -353,6 +353,13 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   `Store.save_draft` carries the stored date forward whenever a save on an
   already-pinned draft omits it (an API caller that drops the key, or the
   editor's Date field cleared); a hand-set different date still wins.
+- **Scheduled backups never widen what a bundle holds.**
+  `api/scheduled_backup.py` only calls `backup.create_backup` and ships the
+  result (ADR 024). Its settings file carries an encrypted S3 secret and is
+  deliberately absent from `backup.STATE_MEMBERS`; a local target under the
+  data directory is refused. `api/s3.py` is a three-call SigV4 client over
+  `httpx`, tested against AWS's published signatures, and like the GitHub
+  client it takes an `httpx` transport in tests, never the network.
 - **`chronicle/backup.py`'s restore swap keeps the displaced tree until
   reindex succeeds, and `_safe_member` runs before any extraction.** A tar
   member with an absolute path, a `..` segment, or a symlink is refused

@@ -34,6 +34,9 @@ services:
     volumes:
       - data:/data
       - preview:/data/preview
+      # Scheduled backups' local-path target (ADR 024): a separate volume,
+      # never under /data. Set /admin/backup's directory to /backups.
+      - backups:/backups
     ports:
       - "127.0.0.1:8080:8080"
 
@@ -77,3 +80,4 @@ services:
 volumes:
   data:
   preview:
+  backups:

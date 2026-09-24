@@ -24,7 +24,7 @@ from pydantic import BaseModel
 
 from ... import backup as backup_mod
 from .. import admin_templates as tpl
-from .. import crypto
+from .. import crypto, scheduled_backup
 from ..admin_auth import (
     GITHUB_STATE_COOKIE_NAME,
     AlreadyClaimed,
@@ -42,7 +42,7 @@ from ..admin_deps import (
     set_github_state_cookie,
     set_session_cookie,
 )
-from ..admin_status import build_status
+from ..admin_status import build_status, scheduled_backup_summary
 from ..deps import Services, get_services
 from ..digest_runner import run as run_digest
 from ..errors import ApiError
@@ -624,10 +624,106 @@ def _record_last_backup(admin: AdminServices) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _backup_page(
+    admin: AdminServices,
+    *,
+    notice: str | None = None,
+    notice_kind: str = "error",
+    status_code: int = 200,
+) -> HTMLResponse:
+    return HTMLResponse(
+        tpl.backup_page(
+            last_backup=_read_last_backup(admin),
+            schedule=scheduled_backup.load_settings(admin.state_dir),
+            schedule_summary=scheduled_backup_summary(admin),
+            notice=notice,
+            notice_kind=notice_kind,
+        ),
+        status_code=status_code,
+    )
+
+
 @router.get("/backup", response_class=HTMLResponse)
 def backup_page(admin: AdminServices = Depends(require_admin_session_html)) -> HTMLResponse:
     cleanup_stale_backup_uploads(admin)
-    return HTMLResponse(tpl.backup_page(last_backup=_read_last_backup(admin)))
+    return _backup_page(admin)
+
+
+def _int_field(form: dict[str, str], name: str, default: int) -> int:
+    try:
+        return int(form.get(name, "").strip())
+    except ValueError:
+        return default
+
+
+@router.post("/backup/schedule", response_class=HTMLResponse)
+async def backup_schedule_save(
+    request: Request, admin: AdminServices = Depends(require_admin_session_html)
+) -> HTMLResponse:
+    """Save the scheduled-backup settings (issue #68). A blank secret keeps
+    the saved one; a new one is encrypted with the instance key before it
+    touches disk, and is never echoed back or logged."""
+    form = await _form(request)
+    current = scheduled_backup.load_settings(admin.state_dir)
+    secret = form.get("s3_secret", "")
+    candidate = scheduled_backup.BackupSettings(
+        enabled=form.get("enabled") == "1",
+        interval_hours=_int_field(form, "interval_hours", current.interval_hours),
+        time_of_day=form.get("time_of_day", "").strip(),
+        retention=min(max(_int_field(form, "retention", current.retention), 1), 365),
+        target=form.get("target", "local"),
+        local_path=form.get("local_path", "").strip(),
+        s3_endpoint=form.get("s3_endpoint", "").strip(),
+        s3_bucket=form.get("s3_bucket", "").strip(),
+        s3_prefix=form.get("s3_prefix", "").strip(),
+        s3_region=form.get("s3_region", "").strip(),
+        s3_access_key_id=form.get("s3_access_key_id", "").strip(),
+        s3_secret_enc=(
+            crypto.encrypt(admin.instance_key, secret) if secret else current.s3_secret_enc
+        ),
+        updated_at=datetime.now(tz=UTC).isoformat(timespec="seconds"),
+    )
+    problems = scheduled_backup.settings_problems(candidate, _data_dir(admin))
+    if problems and candidate.enabled:
+        return _backup_page(
+            admin, notice="Not saved: " + "; ".join(problems) + ".", status_code=400
+        )
+    scheduled_backup.save_settings(admin.state_dir, candidate)
+    note = "Schedule saved." if not problems else "Saved (disabled): " + "; ".join(problems) + "."
+    return _backup_page(admin, notice=note, notice_kind="ok" if not problems else "error")
+
+
+@router.post("/backup/test", response_class=HTMLResponse)
+def backup_schedule_test(
+    admin: AdminServices = Depends(require_admin_session_html),
+) -> HTMLResponse:
+    """Write and delete a small probe at the saved target."""
+    settings = scheduled_backup.load_settings(admin.state_dir)
+    problem = scheduled_backup.test_target(settings, _data_dir(admin), admin.instance_key)
+    if problem:
+        return _backup_page(admin, notice=f"Target test failed: {problem}", status_code=502)
+    return _backup_page(
+        admin, notice="Target test passed: wrote and removed a probe.", notice_kind="ok"
+    )
+
+
+@router.post("/backup/run", response_class=HTMLResponse)
+def backup_schedule_run(
+    admin: AdminServices = Depends(require_admin_session_html),
+) -> HTMLResponse:
+    """Start one scheduled-style backup now, in the background: a bundle can
+    take longer than a request should. Its outcome shows on this page."""
+    threading.Thread(
+        target=scheduled_backup.run_once,
+        args=(_data_dir(admin), admin.state_dir, admin.instance_key),
+        name="chronicle-backup-now",
+        daemon=True,
+    ).start()
+    return _backup_page(
+        admin,
+        notice="Backup started; reload this page to see its outcome.",
+        notice_kind="ok",
+    )
 
 
 @router.get("/backup/create")
