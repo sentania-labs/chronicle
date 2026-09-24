@@ -468,8 +468,8 @@ def drafts_board_page(
 # --- Editor ---------------------------------------------------------------
 
 # The edit form is `<form id="edit-form">` and everything that belongs to it
-# but sits beside the editor (the frontmatter panel in the sidebar, the sticky
-# Save button) joins it with `form="edit-form"`. The sidebar's own forms
+# but sits beside the editor (the frontmatter and announcements tabs in the
+# sidebar, the sticky Save button) joins it with `form="edit-form"`. The sidebar's own forms
 # (detach, upload) cannot nest inside it, so the sidebar is a sibling.
 EDIT_FORM_ID = "edit-form"
 
@@ -734,11 +734,14 @@ def _side_tabs(tabs: list[tuple[str, str, str]]) -> str:
     `form=`, so a hidden tab's fields still save with it. Each tab's contents
     keep their own ids (`post-info` stays a `data-refresh` region), and the
     tab wrapper is never swapped, so a refresh cannot undo the chosen tab."""
+    # The first tab starts selected, so a screen reader hears a coherent tab
+    # list even before (or without) script; `editor.js` then moves it to the
+    # viewer's remembered tab.
     buttons = "".join(
-        f'<button type="button" class="lat-tab" role="tab" id="side-tab-{key}" '
-        f'data-side-tab="{key}" aria-controls="side-panel-{key}" '
-        f'aria-selected="false">{escape(label)}</button>'
-        for key, label, _inner in tabs
+        f'<button type="button" class="lat-tab{" is-on" if index == 0 else ""}" role="tab" '
+        f'id="side-tab-{key}" data-side-tab="{key}" aria-controls="side-panel-{key}" '
+        f'aria-selected="{"true" if index == 0 else "false"}">{escape(label)}</button>'
+        for index, (key, label, _inner) in enumerate(tabs)
     )
     panels = "".join(
         f'<div class="side-tab-panel" role="tabpanel" id="side-panel-{key}" '
@@ -759,16 +762,15 @@ def _panel(
     *,
     open_: bool,
     count: int | None = None,
-    refresh: bool = True,
 ) -> str:
     """A collapsible sidebar panel. `data-refresh` marks it as one the editor
     swaps for the server's fresh copy after a save or an upload, so what the
-    panel shows never lags the record. The frontmatter panel opts out: it
-    holds form fields the visitor may be typing into."""
+    panel shows never lags the record. The form-field tabs (`_side_tabs`) are
+    not panels and never refresh: they hold fields the visitor may be typing
+    into."""
     badge = f' <span class="count lat-pill"><b>{count}</b></span>' if count is not None else ""
-    marker = " data-refresh" if refresh else ""
     return (
-        f'<details id="{panel_id}"{marker} class="lat-card panel"{" open" if open_ else ""}>'
+        f'<details id="{panel_id}" data-refresh class="lat-card panel"{" open" if open_ else ""}>'
         f"<summary>{escape(title)}{badge}</summary>{inner}</details>"
     )
 
@@ -891,6 +893,7 @@ def editor_page(
     unpublish_pr_open: bool = False,
     locked_by: str | None = None,
     locked_since: str | None = None,
+    lease_page: str = "",
     notice: str | None = None,
     notice_kind: str = "error",
 ) -> str:
@@ -934,7 +937,9 @@ def editor_page(
     body = f"""
 <div id="editor-app" data-draft-id="{draft_id}" data-version="{draft["version_no"]}"{
         image_dir_attr
-    } data-lease-seconds="{HEARTBEAT_SECONDS}"{' data-read-only="1"' if locked_by else ""}>
+    } data-lease-seconds="{HEARTBEAT_SECONDS}" data-lease-page="{escape(lease_page)}"{
+        ' data-read-only="1"' if locked_by else ""
+    }>
 <div id="backup-banner" class="backup-banner {ui_chrome.banner_class("warn")}" role="alert" hidden>
 <span id="backup-banner-text"></span>
 <button type="button" id="backup-restore" class="lat-btn">Restore</button>

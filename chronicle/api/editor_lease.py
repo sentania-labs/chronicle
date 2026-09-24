@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import datetime as dt
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -66,6 +67,11 @@ class EditorLeases:
     def __init__(self, clock: Callable[[], dt.datetime] = _utc_now) -> None:
         self._clock = clock
         self._lock = threading.Lock()
+        # Held across a whole admitted write (`writing`) and by every lease
+        # grant (`touch`), so a page's first beat cannot slip in between a
+        # save's check and its write (Codex round). Always taken before
+        # `_lock`, never inside it.
+        self._gate = threading.Lock()
         self._leases: dict[str, Lease] = {}
         self._pages: dict[str, dict[str, dt.datetime]] = {}
 
@@ -91,7 +97,7 @@ class EditorLeases:
         """Take or renew `holder`'s lease for one open page; return whichever
         lease is live afterwards. Another identity's live lease is returned
         untouched."""
-        with self._lock:
+        with self._gate, self._lock:
             now = self._clock()
             lease = self._live(draft_id, now)
             if lease is not None and lease.holder != holder:
@@ -113,6 +119,14 @@ class EditorLeases:
             if not pages:
                 self._leases.pop(draft_id, None)
                 self._pages.pop(draft_id, None)
+
+    @contextmanager
+    def writing(self, draft_id: str, actor: str) -> Iterator[None]:
+        """Admit a write by `actor` and hold off new leases until it lands,
+        or refuse it (423) while someone else has the draft open."""
+        with self._gate:
+            self.check_save(draft_id, actor)
+            yield
 
     def check_save(self, draft_id: str, actor: str) -> None:
         """Refuse a save by `actor` while someone else has the draft open."""

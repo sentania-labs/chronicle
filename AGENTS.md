@@ -245,11 +245,15 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
 - **The editor lock is runtime state, and only a save checks it.**
   `editor_lease.EditorLeases` (ADR 025) lives on `Services`, in memory: a
   lease is never versioned, committed or backed up, and a restart forgets it.
-  Rendering the edit page takes or renews the `editor` lease; `editor.js`
-  heartbeats it every 30 seconds and a lease lapses 2 minutes after the last.
-  `leases.check_save` runs in the `/v1` `PUT` route and the UI save route
-  only, refusing another identity with 423; reads, previews, feedback and
-  actions never check it.
+  A top-level same-origin load of the edit page takes the `editor` lease
+  under a server-minted page token (Fetch Metadata decides: an `<img>`,
+  cross-site link, prefetch or the editor's own refetch takes nothing);
+  `editor.js` heartbeats under that token every 30 seconds, releases it on
+  `pagehide`, and a lease lapses 2 minutes after its last page's beat.
+  `leases.writing` wraps the `/v1` `PUT`, `/v1` image attach and detach, and
+  the UI save route: it refuses another identity with 423 and holds off new
+  leases until the write lands. Reads, previews, feedback and actions never
+  check it.
 - **The editor's live render is client-side only, filled by `editor.js` from
   EasyMDE's own text, never by anything the server renders.** Every value a
   UI template does interpolate goes through `html.escape` first, same bar as

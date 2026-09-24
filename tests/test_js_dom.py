@@ -306,8 +306,8 @@ def test_no_feature_image_selected_renders_nothing_at_the_top(tmp_path: Path) ->
 
 
 # A freshly uploaded feature image: editor.js's addFeatureOption creates the
-# new <option> client-side (the frontmatter panel does not refresh after an
-# upload, ui_templates._panel's own `refresh=False`), and a round of review
+# new <option> client-side (the frontmatter tab never refreshes after an
+# upload: it is not a `data-refresh` region), and a round of review
 # on this change found it left that option with no `data-image-src`, so the
 # thumbnail and the preview stayed blank for an image just uploaded and
 # selected as the feature image, until the next full page load. This drives

@@ -12,7 +12,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # Spec section 4 says "Hugo allowlist"; which keys are in it is ADR 007,
 # amended 2026-09-16 against the real blog's 347 posts and the dashboard
@@ -155,10 +155,16 @@ class Draft(BaseModel):
     source_submission: str | None = None
     source_post: dict[str, str] | None = None
     images: list[DraftImage] = []
-    # The old advisory claim, no longer written or shown (issue #64 replaced
-    # it with the editor lock, ADR 025). Kept so a record that carries one
-    # still loads; nothing reads it.
+    # The old advisory claim (issue #64 replaced it with the editor lock, ADR
+    # 025). A record that still carries one loads with it dropped, so no
+    # response shows a holder nobody can release any more (Codex round).
     claim: Claim | None = None
+
+    @field_validator("claim", mode="before")
+    @classmethod
+    def _drop_legacy_claim(cls, value: Any) -> None:
+        return None
+
     # What the last successful publish or unpublish run actually wrote
     # (branch, PR number and URL, the commit sha, the post's path and url,
     # the stamped date, the exact image site-paths placed, and the post

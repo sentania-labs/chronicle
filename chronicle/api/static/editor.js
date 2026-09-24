@@ -424,6 +424,39 @@ function copyStateText(outcome) {
   }
   document.body.classList.add("js");
 
+  // The side panel's tabs (issue #66), set up first so the page never shows
+  // every panel stacked while the editor below is still starting. The
+  // choice is a per-viewer convenience in browser storage; storage that
+  // throws or is empty just means the first tab.
+  var sideTabs = document.getElementById("side-tabs");
+  if (sideTabs && sideTabs.querySelectorAll) {
+    var tabKey = "chronicle.editor.sideTab";
+    var tabButtons = Array.prototype.slice.call(sideTabs.querySelectorAll("[data-side-tab]"));
+    var tabPanels = Array.prototype.slice.call(sideTabs.querySelectorAll("[data-side-panel]"));
+    var showTab = function (name) {
+      tabButtons.forEach(function (button) {
+        var on = button.getAttribute("data-side-tab") === name;
+        button.setAttribute("aria-selected", on ? "true" : "false");
+        button.classList.toggle("is-on", on);
+      });
+      tabPanels.forEach(function (panel) {
+        panel.hidden = panel.getAttribute("data-side-panel") !== name;
+      });
+    };
+    var storedTab = null;
+    try { storedTab = window.localStorage.getItem(tabKey); } catch (e) { storedTab = null; }
+    var names = tabButtons.map(function (button) { return button.getAttribute("data-side-tab"); });
+    if (names.length) showTab(pickSideTab(storedTab, names));
+    tabButtons.forEach(function (button) {
+      button.addEventListener("click", function () {
+        var name = button.getAttribute("data-side-tab");
+        showTab(name);
+        try { window.localStorage.setItem(tabKey, name); } catch (e) { /* per-viewer only */ }
+      });
+    });
+  }
+
+
   var draftId = app.getAttribute("data-draft-id");
   var imageDir = app.getAttribute("data-image-dir") || "";
   var baseInput = document.getElementById("base_version");
@@ -534,7 +567,7 @@ function copyStateText(outcome) {
     }
   }
 
-  // The feature image select lives in the refreshed frontmatter panel, so
+  // The feature image select lives in the frontmatter tab, so
   // this listens on the document rather than the element: a save swaps the
   // panel out for a fresh one with the same id, and a plain element listener
   // would go stale. EasyMDE's side-by-side preview re-renders on the
@@ -560,7 +593,7 @@ function copyStateText(outcome) {
   }
 
   // Every named control except the body and the version marker: the title, and
-  // the frontmatter panel's inputs that join the form by its id.
+  // the frontmatter tab's inputs that join the form by its id.
   function readFields() {
     var out = {};
     Array.prototype.forEach.call(form.elements, function (el) {
@@ -1074,37 +1107,6 @@ function copyStateText(outcome) {
       uploadAll(event.dataTransfer.files, null);
     }
   });
-  // The side panel's tabs (issue #66). The choice is a per-viewer
-  // convenience in browser storage; storage that throws or is empty just
-  // means the first tab.
-  var sideTabs = document.getElementById("side-tabs");
-  if (sideTabs && sideTabs.querySelectorAll) {
-    var tabKey = "chronicle.editor.sideTab";
-    var tabButtons = Array.prototype.slice.call(sideTabs.querySelectorAll("[data-side-tab]"));
-    var tabPanels = Array.prototype.slice.call(sideTabs.querySelectorAll("[data-side-panel]"));
-    var showTab = function (name) {
-      tabButtons.forEach(function (button) {
-        var on = button.getAttribute("data-side-tab") === name;
-        button.setAttribute("aria-selected", on ? "true" : "false");
-        button.classList.toggle("is-on", on);
-      });
-      tabPanels.forEach(function (panel) {
-        panel.hidden = panel.getAttribute("data-side-panel") !== name;
-      });
-    };
-    var storedTab = null;
-    try { storedTab = window.localStorage.getItem(tabKey); } catch (e) { storedTab = null; }
-    var names = tabButtons.map(function (button) { return button.getAttribute("data-side-tab"); });
-    if (names.length) showTab(pickSideTab(storedTab, names));
-    tabButtons.forEach(function (button) {
-      button.addEventListener("click", function () {
-        var name = button.getAttribute("data-side-tab");
-        showTab(name);
-        try { window.localStorage.setItem(tabKey, name); } catch (e) { /* per-viewer only */ }
-      });
-    });
-  }
-
   // Keep this page's editor lease alive while it is open, and hand it back
   // when the page goes away. A lease the page never releases (a crash, a
   // sleeping laptop) lapses on its own on the server.
@@ -1113,7 +1115,9 @@ function copyStateText(outcome) {
     // Each open page holds under its own token, so closing one tab, or the
     // old page's pagehide landing after the next page's first beat, releases
     // only this page's hold.
-    var pageToken = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    // The server minted this page's token (and, for a real page load, already
+    // took the lease under it); a page without one makes its own.
+    var pageToken = leaseData.leasePage || Math.random().toString(36).slice(2) + Date.now().toString(36);
     var leaseUrl = "/content/drafts/" + encodeURIComponent(leaseData.draftId) + "/lease";
     var readOnly = leaseData.readOnly === "1";
     var every = (parseInt(leaseData.leaseSeconds, 10) || 30) * 1000;
