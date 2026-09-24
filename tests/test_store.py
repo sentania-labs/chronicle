@@ -583,6 +583,42 @@ def test_migrate_previewed_restores_the_status_before_the_build(store: Store) ->
     assert store.migrate_previewed() == []
 
 
+def test_reindex_migrates_a_previewed_draft_the_index_did_not_know(store: Store) -> None:
+    # The index is a cache (ADR 006): a legacy file the index has never
+    # seen as `previewed` (a deleted or dropped index) is found by the
+    # rebuild, which must migrate it too rather than leave it with no
+    # transition out until the next restart.
+    draft, _ = store.create_draft("ghostwriter")
+    store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
+    _legacy_preview_succeeded(store, draft.id, "drafting")
+    record = store.get_draft(draft.id)
+    record.status = "previewed"
+    path = store.drafts_dir / draft.id / "draft.json"
+    path.write_text(json.dumps(record.model_dump(mode="json")), encoding="utf-8")
+    assert store.migrate_previewed() == []  # the index still says drafting
+
+    store.reindex()
+
+    assert store.get_draft(draft.id).status == "drafting"
+    assert store.list_drafts("previewed") == []
+
+
+def test_a_blank_event_line_does_not_stop_the_migration(store: Store, data_dir: Path) -> None:
+    draft, _ = store.create_draft("ghostwriter")
+    store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
+    _legacy_preview_succeeded(store, draft.id, "drafting")
+    _force_previewed(store, draft.id)
+    with store.events_file.open("a", encoding="utf-8") as handle:
+        handle.write("\n")
+    store.close()
+
+    reopened = Store.open(data_dir)
+    try:
+        assert reopened.get_draft(draft.id).status == "drafting"
+    finally:
+        reopened.close()
+
+
 def test_opening_the_store_migrates_a_previewed_draft(store: Store, data_dir: Path) -> None:
     draft, _ = store.create_draft("ghostwriter")
     store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
