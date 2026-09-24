@@ -283,3 +283,22 @@ def test_api_image_attach_and_detach_respect_the_lock(client: TestClient, agent_
     assert attach.status_code == 423
     detach = client.delete(f"/v1/drafts/{draft_id}/images/{image_id}", headers=auth(agent_token))
     assert detach.status_code == 423
+
+
+# --- Side panel tabs (issue #66) ------------------------------------------------
+
+
+def test_the_side_panel_is_three_tabs_with_status_first(
+    client: TestClient, agent_token: str
+) -> None:
+    draft_id = _draft(client, agent_token)
+    html = client.get(f"/content/drafts/{draft_id}").text
+    assert 'id="side-tabs"' in html
+    order = [
+        html.index(f'data-side-tab="{name}"') for name in ("status", "frontmatter", "announcements")
+    ]
+    assert order == sorted(order)
+    # Fields in a tab still join the edit form, so a hidden tab's fields save.
+    assert 'name="announcement_x"' in html and 'form="edit-form"' in html
+    assert 'id="frontmatter-panel"' not in html and 'id="announcements-panel"' not in html
+    assert 'id="post-info" data-refresh' in html

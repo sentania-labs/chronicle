@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 const require = createRequire(import.meta.url);
-const { pageTitles, sameState, backupVerdict, backupWriteAction, makeBackupStore, conflictBackupAction, backupMessage, uploadOutcome, lookupImageSrc, dirFilenameSrc, saveStateText, featureImageSrc, copyStateText, leaseAction } =
+const { pageTitles, sameState, backupVerdict, backupWriteAction, makeBackupStore, conflictBackupAction, backupMessage, uploadOutcome, lookupImageSrc, dirFilenameSrc, saveStateText, featureImageSrc, copyStateText, leaseAction, pickSideTab } =
   require("../chronicle/api/static/editor.js");
 
 test("sameState compares the body and every field, missing and empty alike", () => {
@@ -501,4 +501,11 @@ test("the lease heartbeat reloads a read-only page only once the lease is ours",
   assert.equal(leaseAction(true, { mine: false, holder: "ghostwriter" }), "none");
   assert.equal(leaseAction(false, { mine: true, holder: "editor" }), "none");
   assert.equal(leaseAction(true, null), "none");
+});
+
+test("the side panel opens on the viewer's last tab, or the first when that is gone", () => {
+  const tabs = ["status", "frontmatter", "announcements"];
+  assert.equal(pickSideTab("announcements", tabs), "announcements");
+  assert.equal(pickSideTab(null, tabs), "status");
+  assert.equal(pickSideTab("claim", tabs), "status");
 });
