@@ -1,8 +1,10 @@
 """The editor lock: a draft open in the editor can't be saved by anyone else (issue #64, ADR 025).
 
-Opening a draft's edit page takes a lease on it for the viewing identity (the
-consumer name the domain records: `editor` for the UI), and the page renews it
-every `HEARTBEAT_SECONDS`. A lease lapses `LEASE_SECONDS` after its last
+An open edit page holds a lease on its draft for the viewing identity (the
+consumer name the domain records: `editor` for the UI): `editor.js` beats
+once on load and every `HEARTBEAT_SECONDS` after, under a random per-page
+token, through a same-origin POST. Rendering the page alone takes nothing, so
+a prefetch or a cross-site GET cannot hold a draft. A lease lapses `LEASE_SECONDS` after its last
 heartbeat, so a closed tab, a sleeping laptop or a dropped connection never
 leaves a draft stuck; closing the page also sends a best-effort release.
 
@@ -56,17 +58,28 @@ class Lease:
 
 
 class EditorLeases:
+    """One lease per draft, held by one identity, kept alive by that
+    identity's open pages. Each page heartbeats under its own random token,
+    so closing one tab (or a navigation's `pagehide` landing after the next
+    page's first beat) drops only that page's hold, never a sibling's."""
+
     def __init__(self, clock: Callable[[], dt.datetime] = _utc_now) -> None:
         self._clock = clock
         self._lock = threading.Lock()
         self._leases: dict[str, Lease] = {}
+        self._pages: dict[str, dict[str, dt.datetime]] = {}
 
     def _live(self, draft_id: str, now: dt.datetime) -> Lease | None:
         lease = self._leases.get(draft_id)
         if lease is None:
             return None
-        if now >= lease.expires_at:
-            del self._leases[draft_id]
+        pages = self._pages.get(draft_id, {})
+        cutoff = now - dt.timedelta(seconds=LEASE_SECONDS)
+        for token in [t for t, seen in pages.items() if seen <= cutoff]:
+            del pages[token]
+        if now >= lease.expires_at or not pages:
+            self._leases.pop(draft_id, None)
+            self._pages.pop(draft_id, None)
             return None
         return lease
 
@@ -74,9 +87,10 @@ class EditorLeases:
         with self._lock:
             return self._live(draft_id, self._clock())
 
-    def touch(self, draft_id: str, holder: str) -> Lease:
-        """Take or renew `holder`'s lease; return whichever lease is live
-        afterwards. Another identity's live lease is returned untouched."""
+    def touch(self, draft_id: str, holder: str, page: str = "") -> Lease:
+        """Take or renew `holder`'s lease for one open page; return whichever
+        lease is live afterwards. Another identity's live lease is returned
+        untouched."""
         with self._lock:
             now = self._clock()
             lease = self._live(draft_id, now)
@@ -85,13 +99,20 @@ class EditorLeases:
             since = lease.since if lease is not None else now
             fresh = Lease(draft_id, holder, since, now)
             self._leases[draft_id] = fresh
+            self._pages.setdefault(draft_id, {})[page] = now
             return fresh
 
-    def release(self, draft_id: str, holder: str) -> None:
+    def release(self, draft_id: str, holder: str, page: str = "") -> None:
+        """Drop one page's hold; the lease ends when its last page is gone."""
         with self._lock:
             lease = self._leases.get(draft_id)
-            if lease is not None and lease.holder == holder:
-                del self._leases[draft_id]
+            if lease is None or lease.holder != holder:
+                return
+            pages = self._pages.get(draft_id, {})
+            pages.pop(page, None)
+            if not pages:
+                self._leases.pop(draft_id, None)
+                self._pages.pop(draft_id, None)
 
     def check_save(self, draft_id: str, actor: str) -> None:
         """Refuse a save by `actor` while someone else has the draft open."""

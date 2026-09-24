@@ -1073,19 +1073,25 @@ function copyStateText(outcome) {
   // sleeping laptop) lapses on its own on the server.
   var leaseData = (app && app.dataset) || {};
   if (leaseData.draftId && typeof fetch !== "undefined" && typeof setInterval !== "undefined") {
+    // Each open page holds under its own token, so closing one tab, or the
+    // old page's pagehide landing after the next page's first beat, releases
+    // only this page's hold.
+    var pageToken = Math.random().toString(36).slice(2) + Date.now().toString(36);
     var leaseUrl = "/content/drafts/" + encodeURIComponent(leaseData.draftId) + "/lease";
     var readOnly = leaseData.readOnly === "1";
     var every = (parseInt(leaseData.leaseSeconds, 10) || 30) * 1000;
-    setInterval(function () {
-      fetch(leaseUrl, { method: "POST", credentials: "same-origin" })
+    var beat = function () {
+      fetch(leaseUrl + "?page=" + pageToken, { method: "POST", credentials: "same-origin" })
         .then(function (response) { return response.ok ? response.json() : null; })
         .then(function (answer) {
           if (leaseAction(readOnly, answer) === "reload") window.location.reload();
         })
         .catch(function () {});
-    }, every);
+    };
+    beat();
+    setInterval(beat, every);
     if (typeof window !== "undefined" && window.addEventListener) window.addEventListener("pagehide", function () {
-      if (!readOnly && navigator.sendBeacon) navigator.sendBeacon(leaseUrl + "/release");
+      if (!readOnly && navigator.sendBeacon) navigator.sendBeacon(leaseUrl + "/release?page=" + pageToken);
     });
   }
 

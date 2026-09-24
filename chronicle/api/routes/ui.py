@@ -11,6 +11,7 @@ either.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from itertools import zip_longest
 from typing import Any
@@ -433,6 +434,9 @@ def _offer_state(store: Store, draft: Draft, preview_run: Any) -> dict[str, bool
     }
 
 
+_PAGE_TOKEN = re.compile(r"[A-Za-z0-9]{8,64}")
+
+
 def _editing(services: Services, draft_id: str) -> str | None:
     """Who has the draft open in the editor right now, for the board."""
     lease = services.leases.current(draft_id)
@@ -450,10 +454,11 @@ def _editor_response(
 ) -> HTMLResponse:
     store = services.store
     draft = store.get_draft(draft_id)
-    # Rendering the edit page is opening it (issue #64): take or renew the
-    # viewer's lease. Another identity's live lease makes the page read-only.
-    lease = services.leases.touch(draft_id, UI_ACTOR_NAME)
-    locked_by = None if lease.holder == UI_ACTOR_NAME else lease
+    # Another identity's live lease makes the page read-only (issue #64).
+    # Rendering takes no lease itself: the page's own first heartbeat does,
+    # over a same-origin POST, so a prefetch or a cross-site GET holds nothing.
+    lease = services.leases.current(draft_id)
+    locked_by = lease if lease is not None and lease.holder != UI_ACTOR_NAME else None
     versions = [_dump(v) for v in store.list_versions(draft_id)]
     feedback = [_dump(f) for f in store.list_feedback(draft_id)]
     last_run = store.last_run(draft_id)
@@ -484,9 +489,17 @@ def _editor_response(
     return HTMLResponse(html, status_code=status_code)
 
 
+def _page_token(request: Request) -> str:
+    """The open page's own lease token (`?page=`), minted by `editor.js`.
+    Anything that is not a short token counts as the page-less hold."""
+    token = request.query_params.get("page", "")
+    return token if _PAGE_TOKEN.fullmatch(token) else ""
+
+
 @router.post("/content/drafts/{draft_id}/lease")
 def draft_lease_heartbeat(
     draft_id: str,
+    request: Request,
     _origin: None = Depends(check_same_origin),
     consumer: Consumer = Depends(require_ui_consumer),
     services: Services = Depends(get_services),
@@ -495,20 +508,21 @@ def draft_lease_heartbeat(
     viewer's lease, or reports whose it is; `mine` turning true is the page's
     cue to reload out of read-only."""
     services.store.get_draft(draft_id)  # 404 for a draft that does not exist
-    lease = services.leases.touch(draft_id, consumer.name)
+    lease = services.leases.touch(draft_id, consumer.name, _page_token(request))
     return JSONResponse({"mine": lease.holder == consumer.name, **lease.as_dict()})
 
 
 @router.post("/content/drafts/{draft_id}/lease/release")
 def draft_lease_release(
     draft_id: str,
+    request: Request,
     _origin: None = Depends(check_same_origin),
     consumer: Consumer = Depends(require_ui_consumer),
     services: Services = Depends(get_services),
 ) -> JSONResponse:
     """Best-effort release when the page closes (`sendBeacon`); a lease the
     page never releases simply lapses."""
-    services.leases.release(draft_id, consumer.name)
+    services.leases.release(draft_id, consumer.name, _page_token(request))
     return JSONResponse({"released": True})
 
 

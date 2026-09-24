@@ -79,8 +79,8 @@ the image store. An index is derived from the files and rebuildable.
 - `source_submission` (optional), `source_post` (set when imported from main).
 - `images[]`: manifest of `{image_id, filename, role}` with role `inline`
   or `feature`.
-- No claim field: who has a draft open is the editor lock's runtime state
-  (ADR 025), never stored on the draft.
+- `claim`: always null; kept only so older records load. Who has a draft
+  open is the editor lock's runtime state (ADR 025), never stored.
 
 **Version**
 

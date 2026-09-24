@@ -12,14 +12,19 @@ working in the UI while the ghostwriter saves the same draft through the API.
 
 ## Decision
 
-- **Lease.** Opening a draft's edit page takes a lease for the viewing
-  identity: the consumer name the domain records (`editor` for the UI). The
-  page renews it every 30 seconds; it lapses 2 minutes after the last
-  renewal, so a closed tab, a sleeping laptop or a dropped connection never
-  leaves a draft stuck. Closing the page sends a best-effort release.
+- **Lease.** An open edit page holds a lease for the viewing identity: the
+  consumer name the domain records (`editor` for the UI). `editor.js` beats
+  once on load and every 30 seconds after, under a random per-page token,
+  through a same-origin POST; rendering the page takes nothing itself, so a
+  prefetch or a cross-site GET cannot hold a draft. The lease lives while any
+  of its pages has beaten in the last 2 minutes, so a closed tab, a sleeping
+  laptop or a dropped connection never leaves a draft stuck. Closing a page
+  sends a best-effort release of that page's hold only, so a second tab, or
+  the next page of a navigation, keeps the lock.
 - **Enforcement.** While identity A holds a live lease, a save by any other
-  identity, through the UI save route or `PUT /v1/drafts/{id}`, is refused
-  with 423 `draft_being_edited`, naming the holder, since and expiry.
+  identity, through the UI save route, `PUT /v1/drafts/{id}`, or `/v1` image
+  attach and detach (which can change the body the editor has open), is
+  refused with 423 `draft_being_edited`, naming the holder, since and expiry.
   Same-identity saves (two tabs) are not blocked; the version check and the
   conflict page stay the guard there. Reads, previews, feedback and the
   reviewer's actions are never blocked.
@@ -35,8 +40,13 @@ working in the UI while the ghostwriter saves the same draft through the API.
 - **API.** `GET /v1/drafts/{id}` carries `editing: {holder, since,
   expires_at}` or null. `POST /v1/drafts/{id}/claim` and `/release` are
   removed outright (Scott's call on the issue), not kept as no-op aliases.
-- `Draft.claim` stays in the model only so records that carry one still load;
-  nothing writes or reads it.
+- `Draft.claim` stays in the model only so records that carry one still load
+  (and so `GET` still shows `"claim": null`); nothing writes or reads it.
+- **Who it actually protects.** Only the UI takes leases, and the UI is always
+  `editor`, so in practice the lock stops API consumers (the ghostwriter)
+  while the editor has a draft open. It is not UI-against-UI locking: two
+  tabs are the same identity, guarded by the version check. The read-only
+  banner exists for a future non-editor lease holder.
 
 ## Consequences
 

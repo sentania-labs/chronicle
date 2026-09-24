@@ -105,6 +105,14 @@ def _draft(client: TestClient, token: str) -> str:
     return draft_id
 
 
+def _open(client: TestClient, draft_id: str, page: str = "pageAAAA1111") -> Any:
+    """What an open edit page does: render, then its first heartbeat."""
+    assert client.get(f"/content/drafts/{draft_id}").status_code == 200
+    beat = client.post(f"/content/drafts/{draft_id}/lease?page={page}")
+    assert beat.status_code == 200
+    return beat.json()
+
+
 def _api_save(client: TestClient, token: str, draft_id: str, base: int) -> Any:
     return client.put(
         f"/v1/drafts/{draft_id}",
@@ -118,7 +126,7 @@ def test_opening_the_editor_refuses_an_api_save_until_the_lease_lapses(
 ) -> None:
     clock = _clocked(client)
     draft_id = _draft(client, agent_token)
-    assert client.get(f"/content/drafts/{draft_id}").status_code == 200  # editor opens
+    _open(client, draft_id)
 
     refused = _api_save(client, agent_token, draft_id, 1)
     assert refused.status_code == 423
@@ -139,7 +147,7 @@ def test_opening_the_editor_refuses_an_api_save_until_the_lease_lapses(
 def test_reads_and_previews_are_not_blocked(client: TestClient, agent_token: str) -> None:
     _clocked(client)
     draft_id = _draft(client, agent_token)
-    client.get(f"/content/drafts/{draft_id}")
+    _open(client, draft_id)
     assert client.get(f"/v1/drafts/{draft_id}", headers=auth(agent_token)).status_code == 200
     preview = client.post(f"/v1/drafts/{draft_id}/actions/preview", headers=auth(agent_token))
     assert preview.status_code == 200
@@ -150,7 +158,7 @@ def test_the_editor_saving_its_own_draft_is_not_blocked(
 ) -> None:
     _clocked(client)
     draft_id = _draft(client, agent_token)
-    client.get(f"/content/drafts/{draft_id}")
+    _open(client, draft_id)
     response = client.post(
         f"/content/drafts/{draft_id}/save",
         data={"base_version": "1", "title": "Locked Post", "body": "editor edit"},
@@ -195,8 +203,9 @@ def test_the_heartbeat_reports_the_holder_and_hands_over_once_it_lapses(
 def test_closing_the_page_releases_the_lease(client: TestClient, agent_token: str) -> None:
     _clocked(client)
     draft_id = _draft(client, agent_token)
-    client.get(f"/content/drafts/{draft_id}")
-    assert client.post(f"/content/drafts/{draft_id}/lease/release").status_code == 200
+    _open(client, draft_id)
+    release = client.post(f"/content/drafts/{draft_id}/lease/release?page=pageAAAA1111")
+    assert release.status_code == 200
     assert _api_save(client, agent_token, draft_id, 1).status_code == 200
 
 
@@ -204,7 +213,7 @@ def test_the_board_marks_a_draft_open_in_the_editor(client: TestClient, agent_to
     _clocked(client)
     draft_id = _draft(client, agent_token)
     assert "editing: editor" not in client.get("/content/drafts").text
-    client.get(f"/content/drafts/{draft_id}")
+    _open(client, draft_id)
     assert "editing: editor" in client.get("/content/drafts").text
 
 
@@ -213,3 +222,64 @@ def test_the_claim_ui_is_gone(client: TestClient, agent_token: str) -> None:
     html = client.get(f"/content/drafts/{draft_id}").text
     assert "Unclaimed" not in html and ">Claim<" not in html
     assert "claim:" not in client.get("/content/drafts").text
+
+
+# --- Review round ---------------------------------------------------------------
+
+
+def test_rendering_the_page_alone_takes_no_lease(client: TestClient, agent_token: str) -> None:
+    # A prefetch or a cross-site GET must not hold a draft: only the page's
+    # own same-origin heartbeat does.
+    _clocked(client)
+    draft_id = _draft(client, agent_token)
+    client.get(f"/content/drafts/{draft_id}")
+    assert _leases(client).current(draft_id) is None
+    assert _api_save(client, agent_token, draft_id, 1).status_code == 200
+
+
+def test_closing_one_of_two_open_pages_keeps_the_lock(client: TestClient, agent_token: str) -> None:
+    # Two tabs, or a navigation whose old page's pagehide lands after the
+    # next page's first beat: only the closing page's hold goes.
+    _clocked(client)
+    draft_id = _draft(client, agent_token)
+    _open(client, draft_id, page="pageAAAA1111")
+    _open(client, draft_id, page="pageBBBB2222")
+    client.post(f"/content/drafts/{draft_id}/lease/release?page=pageAAAA1111")
+    assert _api_save(client, agent_token, draft_id, 1).status_code == 423
+    client.post(f"/content/drafts/{draft_id}/lease/release?page=pageBBBB2222")
+    assert _api_save(client, agent_token, draft_id, 1).status_code == 200
+
+
+def test_a_page_that_stops_beating_lapses_while_another_keeps_it(
+    client: TestClient, agent_token: str
+) -> None:
+    clock = _clocked(client)
+    draft_id = _draft(client, agent_token)
+    _open(client, draft_id, page="pageAAAA1111")
+    clock.advance(90)
+    _open(client, draft_id, page="pageBBBB2222")
+    clock.advance(60)  # A's last beat is 150s old, B's is 60s
+    assert _leases(client).current(draft_id) is not None
+    clock.advance(LEASE_SECONDS)
+    assert _leases(client).current(draft_id) is None
+
+
+def test_api_image_attach_and_detach_respect_the_lock(client: TestClient, agent_token: str) -> None:
+    from .conftest import png_bytes
+
+    _clocked(client)
+    draft_id = _draft(client, agent_token)
+    image_id = client.post(
+        "/v1/images",
+        files={"file": ("f.png", png_bytes(), "image/png")},
+        headers=auth(agent_token),
+    ).json()["image_id"]
+    _open(client, draft_id)
+    attach = client.put(
+        f"/v1/drafts/{draft_id}/images/{image_id}",
+        json={"role": "inline"},
+        headers=auth(agent_token),
+    )
+    assert attach.status_code == 423
+    detach = client.delete(f"/v1/drafts/{draft_id}/images/{image_id}", headers=auth(agent_token))
+    assert detach.status_code == 423

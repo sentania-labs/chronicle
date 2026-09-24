@@ -201,6 +201,8 @@ def attach_image(
     consumer: Consumer = Depends(require_consumer),
     services: Services = Depends(get_services),
 ) -> dict[str, Any]:
+    # An inline attach can write into the body the editor has open (ADR 025).
+    services.leases.check_save(draft_id, consumer.name)
     return _dump(services.store.attach_image(draft_id, image_id, payload.role, consumer.name))
 
 
@@ -211,4 +213,6 @@ def detach_image(
     consumer: Consumer = Depends(require_consumer),
     services: Services = Depends(get_services),
 ) -> dict[str, Any]:
+    # A detach can orphan a reference in the body the editor has open.
+    services.leases.check_save(draft_id, consumer.name)
     return _dump(services.store.detach_image(draft_id, image_id, consumer.name))
