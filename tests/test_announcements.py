@@ -489,3 +489,70 @@ def test_the_conflict_page_reload_form_carries_the_current_announcements(
     reloaded = client.post(f"/content/drafts/{draft_id}/save", data=reapply)
     assert reloaded.status_code == 200
     assert services.store.get_draft(draft_id).announcements == THREE
+
+
+# --- An announcement-only save changes no status (issue #69) -------------
+
+
+def _force_status(store: Store, draft_id: str, status: str) -> Draft:
+    draft = store.get_draft(draft_id)
+    draft.status = status
+    draft.slug = draft.slug or "announcing-things"
+    path = store.drafts_dir / draft_id / "draft.json"
+    path.write_text(json.dumps(draft.model_dump(mode="json")), encoding="utf-8")
+    return store.get_draft(draft_id)
+
+
+@pytest.mark.parametrize("status", ["published", "revision_requested"])
+def test_an_announcement_only_save_leaves_the_status_alone(store: Store, status: str) -> None:
+    draft, _warnings = store.create_draft("ghostwriter")
+    frontmatter = {**FRONTMATTER, "date": "2026-08-01T09:00:00-05:00"}
+    store.save_draft(draft.id, "ghostwriter", 0, frontmatter, "body")
+    before = _force_status(store, draft.id, status)
+    converted_before = convert.convert(before)
+
+    saved = store.save_draft(draft.id, "ghostwriter", 1, frontmatter, "body", announcements=THREE)
+
+    assert saved.status == status
+    assert saved.version_no == 2
+    assert store.get_version(draft.id, 2).announcements == THREE
+    after = convert.convert(store.get_draft(draft.id))
+    assert after == converted_before
+
+
+def test_a_body_change_on_a_published_draft_still_moves_it_to_drafting(store: Store) -> None:
+    draft, _warnings = store.create_draft("ghostwriter")
+    frontmatter = {**FRONTMATTER, "date": "2026-08-01T09:00:00-05:00"}
+    store.save_draft(draft.id, "ghostwriter", 0, frontmatter, "body")
+    _force_status(store, draft.id, "published")
+
+    saved = store.save_draft(
+        draft.id, "ghostwriter", 1, frontmatter, "new body", announcements=THREE
+    )
+
+    assert saved.status == "drafting"
+
+
+def test_an_announcement_only_save_keeps_the_preview_current(
+    client: TestClient, services: Services
+) -> None:
+    from .test_ui import make_draft
+    from .test_ui_actions import previewed_then_submitted
+
+    draft_id = make_draft(services, "in_review")
+    # A pinned draft carries its date (ADR 022); without one, save_draft
+    # stamps it and the save is no longer announcement-only.
+    draft = services.store.get_draft(draft_id)
+    dated = {**draft.frontmatter, "date": "2026-08-01T09:00:00-05:00"}
+    services.store.save_draft(draft_id, "scott", draft.version_no, dated, draft.body)
+    previewed_then_submitted(services, draft_id)
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(
+        draft_id, "scott", draft.version_no, draft.frontmatter, draft.body, announcements=THREE
+    )
+    assert services.store.get_draft(draft_id).status == "in_review"
+    assert "Preview first" not in client.get(f"/content/drafts/{draft_id}").text
+
+    response = client.post(f"/content/drafts/{draft_id}/actions/approve")
+    assert response.status_code == 200
+    assert services.store.get_draft(draft_id).status == "approved"

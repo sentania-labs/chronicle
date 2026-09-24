@@ -890,6 +890,20 @@ class Store:
             raise ApiError(404, "version_not_found", f"no version {version_no} of draft {draft_id}")
         return Version.model_validate(self._read_json(path))
 
+    def same_text_as_version(self, draft: Draft, version_no: int) -> bool:
+        """Whether `draft`'s current frontmatter and body equal those of
+        `version_no`, announcements aside. An announcement-only save bumps the
+        version without changing anything a build converts, so a preview of
+        the earlier version is still a preview of the current text. Not
+        `@locked`: the editor's action guard calls it under the store lock."""
+        if version_no == draft.version_no:
+            return True
+        try:
+            version = self.get_version(draft.id, version_no)
+        except ApiError:
+            return False
+        return version.frontmatter == draft.frontmatter and version.body == draft.body
+
     def list_versions(self, draft_id: str) -> list[Version]:
         draft = self.get_draft(draft_id)
         return [self.get_version(draft_id, n) for n in range(1, draft.version_no + 1)]
@@ -1035,7 +1049,11 @@ class Store:
         )
 
         from_status = draft.status
-        transition = resolve_save(draft.status)
+        # A save that changes only announcements leaves the status alone
+        # (issue #69): they never reach the post, so there is nothing to
+        # revise. The version still bumps so history keeps the change.
+        text_unchanged = frontmatter == draft.frontmatter and body == draft.body
+        transition = None if text_unchanged else resolve_save(draft.status)
         if transition is not None:
             draft.status = transition.to_status
         draft.frontmatter = frontmatter

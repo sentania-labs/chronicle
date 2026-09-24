@@ -64,15 +64,16 @@ def _preview_url(run: Any) -> str | None:
     return url if isinstance(url, str) else None
 
 
-def _has_current_preview(run: Any, version_no: int) -> bool:
+def _has_current_preview(store: Store, run: Any, draft: Draft) -> bool:
     """A preview of the draft's current text exists: the last preview run
-    succeeded and built the version the draft is at now (a run with no
-    recorded `built_version` predates the field and counts). A save after the
-    build makes it stale, which is what keeps Publish behind "Preview first"
-    after an edit to a `previewed` draft, where a save leaves the status alone."""
+    succeeded and built a version whose frontmatter and body match the draft's
+    now (a run with no recorded `built_version` predates the field and
+    counts). A save that changes the text makes it stale, which is what keeps
+    Publish behind "Preview first" after an edit to a `previewed` draft, where
+    a save leaves the status alone; an announcement-only save does not."""
     if _preview_url(run) is None:
         return False
-    return run.built_version is None or run.built_version == version_no
+    return run.built_version is None or store.same_text_as_version(draft, run.built_version)
 
 
 # `create_draft` reports dropped frontmatter keys and failed image imports
@@ -416,7 +417,7 @@ def _offer_state(store: Store, draft: Draft, preview_run: Any) -> dict[str, bool
     click from it (`ui_actions.staged_refusal`), so both read one computation."""
     watch = store.get_watch(draft.id)
     return {
-        "has_preview": _has_current_preview(preview_run, draft.version_no),
+        "has_preview": _has_current_preview(store, preview_run, draft),
         "publish_pr_open": watch is not None and watch.kind == "publish",
         "unpublish_pr_open": watch is not None and watch.kind == "unpublish",
         # `Store.act_on_draft` separately refuses a re-approve while a
