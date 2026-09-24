@@ -100,14 +100,32 @@ def home() -> RedirectResponse:
 
 # --- Submissions ------------------------------------------------------------
 
+# The statuses the Submissions list shows by default: still waiting on a draft.
+OPEN_SUBMISSIONS = ("new", "claimed")
+
 
 @router.get("/content/submissions", response_class=HTMLResponse)
 def submissions_list(
-    request: Request, page: int = Query(1, ge=1), services: Services = Depends(get_services)
+    request: Request,
+    page: int = Query(1, ge=1),
+    show: str = Query("open"),
+    services: Services = Depends(get_services),
 ) -> HTMLResponse:
-    submissions = [_dump(s) for s in services.store.list_submissions()]
-    pg = paginate(submissions, page)
-    return HTMLResponse(tpl.submissions_list_page(pg, banner=banner_enabled(request)))
+    # The default view is the "needs writing" inbox (issue #65): only `new`
+    # and `claimed`. `?show=all` brings back drafted and discarded ones so
+    # history stays findable; any other value reads as the default.
+    show_all = show == "all"
+    everything = services.store.list_submissions()
+    shown = everything if show_all else [s for s in everything if s.status in OPEN_SUBMISSIONS]
+    pg = paginate([_dump(s) for s in shown], page)
+    return HTMLResponse(
+        tpl.submissions_list_page(
+            pg,
+            banner=banner_enabled(request),
+            show_all=show_all,
+            hidden=len(everything) - len(shown),
+        )
+    )
 
 
 def _submission_response(

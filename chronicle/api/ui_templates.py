@@ -176,9 +176,18 @@ def _table(head_cells: str, rows: str) -> str:
     )
 
 
-def submissions_list_page(pg: Page[dict[str, Any]], *, banner: bool) -> str:
+def _draft_link(submission: dict[str, Any]) -> str:
+    draft_id = submission.get("draft_id")
+    if not draft_id:
+        return "-"
+    return f'<a href="/content/drafts/{escape(draft_id)}">post</a>'
+
+
+def submissions_list_page(
+    pg: Page[dict[str, Any]], *, banner: bool, show_all: bool = False, hidden: int = 0
+) -> str:
     if not pg.items:
-        rows = "<tr><td colspan=6>none</td></tr>"
+        rows = "<tr><td colspan=7>none</td></tr>"
     else:
         rows = "".join(
             "<tr>"
@@ -188,16 +197,26 @@ def submissions_list_page(pg: Page[dict[str, Any]], *, banner: bool) -> str:
             f"<td>{escape(local_time(s['created_at']))}</td>"
             f'<td class="lat-num">{len(s["image_ids"])}</td>'
             f"<td>{escape(s['claimed_by'] or '-')}</td>"
+            f"<td>{_draft_link(s)}</td>"
             "</tr>"
             for s in pg.items
         )
     heads = (
         "<th>brief</th><th>status</th><th>from</th><th>created</th>"
-        '<th class="lat-num">images</th><th>claimed by</th>'
+        '<th class="lat-num">images</th><th>claimed by</th><th>post</th>'
     )
+    if show_all:
+        toggle = '<a href="/content/submissions">Show open only</a>'
+    else:
+        toggle = (
+            f'<a href="/content/submissions?show=all">Show all ({hidden} drafted or discarded)</a>'
+            if hidden
+            else ""
+        )
     body = f"""
+<p class="muted">{"All submissions." if show_all else "Waiting on a draft."} {toggle}</p>
 {_table(heads, rows)}
-{_pagination_links(pg, "/content/submissions")}
+{_pagination_links(pg, "/content/submissions", extra="&show=all" if show_all else "")}
 """
     return page("Submissions", body, banner=banner, active=SUBMISSIONS_TAB)
 
@@ -320,7 +339,7 @@ def submission_detail_page(
 """
     body = f"""
 <p class="muted">status: {badge(submission["status"])}, version: {submission["version_no"]}, from: {escape(submission["from_"])},
-created: {escape(local_time(submission["created_at"]))}, claimed by: {escape(submission["claimed_by"] or "-")}</p>
+created: {escape(local_time(submission["created_at"]))}, claimed by: {escape(submission["claimed_by"] or "-")}{", post: " + _draft_link(submission) if submission.get("draft_id") else ""}</p>
 <section class="lat-card">
 <h2>Brief</h2>
 <p class="chr-prose">{escape(submission["brief"])}</p>
