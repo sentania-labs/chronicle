@@ -279,8 +279,9 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   still the only decider.** `ui_actions.offers_for` renders an offer available
   only if `transitions.plan_action` finds a path, and `Store.act_on_draft_staged`
   (editor buttons only, never `/v1`) runs that path's steps under one lock:
-  Preview on a `published` post revises it first, Publish on a `previewed` one
-  submits it first. The lifecycle stays in the table, but the action route also
+  Preview on a `published` post revises it first, Publish on a `drafting` one
+  with a current preview submits it first. A preview build never changes a
+  status (ADR 023); `previewed` is legacy, migrated away by `Store.open`. The lifecycle stays in the table, but the action route also
   holds a click to the offer the page rendered for it
   (`ui_actions.staged_refusal`, same `_offer_state` inputs): a disabled offer,
   or an absent one for a staged click, is a 409, so "Preview first" and an open

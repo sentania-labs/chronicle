@@ -74,8 +74,9 @@ the image store. An index is derived from the files and rebuildable.
 - `id` (stable, never reused), `slug` (pinned with collision check at first
   preview or publish, then immutable), `title`, frontmatter (Hugo allowlist,
   same field order the dashboard port uses today), `body`.
-- `status`: `drafting`, `in_review`, `revision_requested`, `previewed`,
-  `approved`, `published`, `unpublished`, `rejected`.
+- `status`: `drafting`, `in_review`, `revision_requested`, `approved`,
+  `published`, `unpublished`, `rejected`. (`previewed` is no longer
+  produced: a preview never changes a status. See ADR 023.)
 - `source_submission` (optional), `source_post` (set when imported from main).
 - `images[]`: manifest of `{image_id, filename, role}` with role `inline`
   or `feature`.
@@ -121,7 +122,6 @@ submission: new -> claimed -> drafted
 
 draft:      drafting -> in_review -> revision_requested -> drafting
                                   -> rejected -> (restore) -> drafting
-                                  -> previewed -> in_review
                                   -> approved -> published
             published -> (revise) -> drafting ... -> published (republish)
             published -> unpublished (PR merged) -> (restore) -> drafting

@@ -20,7 +20,7 @@ from chronicle.api import convert
 from chronicle.api.deps import Services
 from chronicle.api.errors import ApiError
 from chronicle.api.models import Draft, Version, now_stamp
-from chronicle.api.store import Store, text_fingerprint
+from chronicle.api.store import Store, preview_is_current, text_fingerprint
 
 from .conftest import auth
 
@@ -552,7 +552,8 @@ def _previewed_fresh_draft(store: Store) -> str:
         built_text=text_fingerprint(built.frontmatter, built.body),
     )
     store.finish_run(run.id, "builder-1", True, {"preview_url": f"/preview/{built.slug}/"})
-    assert store.get_draft(draft.id).status == "previewed"
+    # A build never changes a status (issue #70); the preview is current.
+    assert store.get_draft(draft.id).status == "drafting"
     return draft.id
 
 
@@ -570,7 +571,7 @@ def test_an_announcement_only_save_keeps_the_preview_current(
         draft.body,
         announcements=THREE,
     )
-    assert saved.status == "previewed"
+    assert saved.status == "drafting"
     assert "Preview first" not in client.get(f"/content/drafts/{draft_id}").text
 
     response = client.post(f"/content/drafts/{draft_id}/actions/approve")
@@ -625,7 +626,9 @@ def test_a_build_that_saw_an_announcement_only_save_land_is_not_stale(store: Sto
     )
     finished, _moved = store.finish_run(run.id, "builder-1", True, {"preview_url": "/preview/x/"})
     assert not (finished.result or {}).get("stale")
-    assert store.get_draft(draft.id).status == "previewed"
+    current = store.get_draft(draft.id)
+    assert current.status == "drafting"
+    assert preview_is_current(finished, current)
 
 
 def test_an_announcement_only_save_writes_a_saved_event_not_a_revise(store: Store) -> None:

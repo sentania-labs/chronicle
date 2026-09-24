@@ -885,6 +885,7 @@ def editor_page(
     details = status_details(
         draft["status"],
         came_back=came_back,
+        preview_built=preview_url is not None,
         has_preview=has_preview,
         publish_run_active=publish_run_active,
         publish_pr_open=publish_pr_open,

@@ -251,7 +251,57 @@ class Store:
             store.events_file.parent,
         ):
             path.mkdir(parents=True, exist_ok=True)
+        store.migrate_previewed()
         return store
+
+    def migrate_previewed(self) -> list[str]:
+        """Move every draft still at `previewed` back to the status it had
+        before its preview build (issue #70), and return their ids.
+
+        A build no longer changes a status, so `previewed` is never produced;
+        a record written before that still carries it. The status it came
+        from is the `from_status` of the draft's latest `draft.preview_succeeded`
+        event, which is always the change that put it there (a `previewed`
+        draft leaves only by a status change, which a later event records).
+        `in_review` when no such event exists or it names something unusable.
+        Idempotent: a second run finds nothing to move.
+        """
+        with self._lock:
+            ids = self.index.draft_ids("previewed")
+            if not ids:
+                return []
+            before: dict[str, str] = {}
+            if self.events_file.exists():
+                with self.events_file.open(encoding="utf-8") as handle:
+                    for line in handle:
+                        event = json.loads(line)
+                        if event.get("type") == f"draft.{PREVIEW_SUCCEEDED}":
+                            before[event.get("draft_id") or ""] = event.get("from_status") or ""
+            moved: list[str] = []
+            for draft_id in ids:
+                draft = self.get_draft(draft_id)
+                if draft.status != "previewed":
+                    continue
+                target = before.get(draft_id, "")
+                if target not in ("drafting", "in_review"):
+                    target = "in_review"
+                draft.status = target
+                self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
+                self._append_event(
+                    type="draft.status_migrated",
+                    actor="chronicle",
+                    draft_id=draft_id,
+                    from_status="previewed",
+                    to_status=target,
+                )
+                self.index.upsert_draft(draft)
+                moved.append(draft_id)
+            if moved:
+                self._commit(
+                    f"migrate {len(moved)} previewed draft(s) to their pre-preview status",
+                    "chronicle",
+                )
+            return moved
 
     def close(self) -> None:
         self.index.close()

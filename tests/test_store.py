@@ -41,7 +41,7 @@ def snapshot(store: Store) -> dict[str, object]:
         "submissions": [item.model_dump(mode="json") for item in store.list_submissions()],
         "claimed": [item.id for item in store.list_submissions("drafted")],
         "drafts": [item.model_dump(mode="json") for item in store.list_drafts()],
-        "previewed": [item.id for item in store.list_drafts("previewed")],
+        "drafting": [item.id for item in store.list_drafts("drafting")],
         "posts": [item.model_dump(mode="json") for item in store.list_posts()],
         "events": [item.model_dump(mode="json") for item in store.events_since(0)[0]],
     }
@@ -149,7 +149,8 @@ def test_reindex_rebuilds_every_row_from_the_files(store: Store, data_dir: Path)
 
 
 def seed_sha(store: Store) -> str:
-    draft = store.list_drafts("previewed")[0]
+    # A succeeded preview leaves the seeded draft at `drafting` (issue #70).
+    draft = store.list_drafts("drafting")[0]
     return draft.images[0].image_id
 
 
@@ -521,3 +522,77 @@ def test_resolve_run_post_url_skips_the_version_read_when_the_run_already_has_on
     url = store.resolve_run_post_url(stored_run, store.get_draft(draft.id))
     assert url == "https://x/preview/t/somewhere/"
     assert calls == []
+
+
+# --- issue #70: `previewed` is migrated away --------------------------------
+
+
+def _force_previewed(store: Store, draft_id: str) -> None:
+    """Put a draft at `previewed` the way a record written before issue #70
+    carries it: on disk and in the index, with no event of its own."""
+    draft = store.get_draft(draft_id)
+    draft.status = "previewed"
+    path = store.drafts_dir / draft_id / "draft.json"
+    path.write_text(json.dumps(draft.model_dump(mode="json")), encoding="utf-8")
+    store.index.upsert_draft(draft)
+
+
+def _legacy_preview_succeeded(store: Store, draft_id: str, from_status: str) -> None:
+    store._append_event(
+        type="draft.preview_succeeded",
+        actor="builder-1",
+        draft_id=draft_id,
+        from_status=from_status,
+        to_status="previewed",
+    )
+
+
+def test_migrate_previewed_restores_the_status_before_the_build(store: Store) -> None:
+    from_drafting, _ = store.create_draft("ghostwriter")
+    store.save_draft(from_drafting.id, "ghostwriter", 0, FRONTMATTER, "body")
+    _legacy_preview_succeeded(store, from_drafting.id, "drafting")
+    _force_previewed(store, from_drafting.id)
+
+    from_review, _ = store.create_draft("ghostwriter")
+    store.save_draft(from_review.id, "ghostwriter", 0, FRONTMATTER, "body")
+    _legacy_preview_succeeded(store, from_review.id, "in_review")
+    _force_previewed(store, from_review.id)
+
+    no_event, _ = store.create_draft("ghostwriter")
+    store.save_draft(no_event.id, "ghostwriter", 0, FRONTMATTER, "body")
+    _force_previewed(store, no_event.id)
+
+    moved = store.migrate_previewed()
+
+    assert sorted(moved) == sorted([from_drafting.id, from_review.id, no_event.id])
+    assert store.get_draft(from_drafting.id).status == "drafting"
+    assert store.get_draft(from_review.id).status == "in_review"
+    assert store.get_draft(no_event.id).status == "in_review"
+    assert store.list_drafts("previewed") == []
+    migrated = {
+        event.draft_id: (event.from_status, event.to_status)
+        for event in store.events_since(0)[0]
+        if event.type == "draft.status_migrated"
+    }
+    assert migrated == {
+        from_drafting.id: ("previewed", "drafting"),
+        from_review.id: ("previewed", "in_review"),
+        no_event.id: ("previewed", "in_review"),
+    }
+
+    assert store.migrate_previewed() == []
+
+
+def test_opening_the_store_migrates_a_previewed_draft(store: Store, data_dir: Path) -> None:
+    draft, _ = store.create_draft("ghostwriter")
+    store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
+    _legacy_preview_succeeded(store, draft.id, "drafting")
+    _force_previewed(store, draft.id)
+    store.close()
+
+    reopened = Store.open(data_dir)
+    try:
+        assert reopened.get_draft(draft.id).status == "drafting"
+        assert reopened.migrate_previewed() == []
+    finally:
+        reopened.close()

@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from chronicle.api.models import Post, Run
-from chronicle.api.store import Store
+from chronicle.api.store import Store, preview_is_current
 from chronicle.builder import main as builder_main
 from chronicle.builder import runner
 from chronicle.builder.leases import Lease, LeaseDirectory
@@ -183,7 +183,7 @@ def _prep_site(store: Store) -> None:
     (store.site_dir / "config.yaml").write_text("baseURL: /\n", encoding="utf-8")
 
 
-def test_successful_build_moves_draft_to_previewed_and_records_result(
+def test_successful_build_records_result_and_leaves_the_draft_status_alone(
     store: Store, builder_settings: BuilderSettings
 ) -> None:
     _prep_site(store)
@@ -200,7 +200,8 @@ def test_successful_build_moves_draft_to_previewed_and_records_result(
         finished.result.get("slug", "")
     )
     assert finished.result["post_url"] == finished.result["preview_url"] + "2026/08/a-real-post/"
-    assert store.get_draft(draft_id).status == "previewed"
+    # A build never changes a status (issue #70): the draft stays where it was.
+    assert store.get_draft(draft_id).status == "drafting"
     assert not (store.queue_dir / f"{run_id}.json").exists()
     slug = store.get_draft(draft_id).slug
     assert slug is not None
@@ -557,9 +558,10 @@ def test_heartbeat_advances_during_a_long_build(
 def test_a_stale_preview_does_not_transition_a_draft_that_moved_on(store: Store) -> None:
     """`finish_run` only trusts `run.built_version`, stamped by `start_run`
     when a builder actually read the draft. A save landing between that read
-    and the build finishing must not move the draft to `previewed`, because
-    the preview a builder generated reflects a version that no longer exists
-    (round C3 review, chronicle/api/store.py's finish_run).
+    and the build finishing must be recorded as stale, not as a current
+    preview, because the preview a builder generated reflects a version that
+    no longer exists (round C3 review, chronicle/api/store.py's finish_run).
+    No build changes the status either way (issue #70).
     """
     draft_id = _make_draft(store)
     run_id = _queue_preview(store, draft_id)
@@ -585,9 +587,10 @@ def test_a_stale_preview_does_not_transition_a_draft_that_moved_on(store: Store)
     assert finished.status == "succeeded"
     assert finished.result is not None
     assert finished.result["stale"] is True
-    # The draft never moved to `previewed`: the build that succeeded was of
-    # a version the draft has since moved past.
+    # The build that succeeded was of a version the draft has since moved
+    # past: it is flagged stale and does not count as a current preview.
     assert store.get_draft(draft_id).status == "drafting"
+    assert not preview_is_current(finished, store.get_draft(draft_id))
     events = [e.type for e in store.events_since(0)[0]][before:]
     assert "draft.preview_stale" in events
 
@@ -596,7 +599,7 @@ def test_build_one_stamps_built_version_so_finish_run_can_detect_staleness(
     store: Store, builder_settings: BuilderSettings
 ) -> None:
     """End-to-end through `build_one`: without a mid-build save, the version
-    it built is still current, so the draft transitions normally.
+    it built is still current.
     """
     _prep_site(store)
     draft_id = _make_draft(store)
@@ -606,7 +609,7 @@ def test_build_one_stamps_built_version_so_finish_run_can_detect_staleness(
     assert store.get_draft(draft_id).version_no == 1
 
 
-def test_a_current_preview_still_transitions_the_draft(
+def test_a_current_preview_is_current_and_leaves_the_status_alone(
     store: Store, builder_settings: BuilderSettings
 ) -> None:
     _prep_site(store)
@@ -617,7 +620,35 @@ def test_a_current_preview_still_transitions_the_draft(
     finished = store.get_run(run_id)
     assert finished.result is not None
     assert "stale" not in finished.result
-    assert store.get_draft(draft_id).status == "previewed"
+    draft = store.get_draft(draft_id)
+    assert preview_is_current(finished, draft)
+    assert draft.status == "drafting"
+
+
+def test_a_preview_of_an_in_review_draft_leaves_it_in_review(store: Store) -> None:
+    """Issue #70: a succeeded build is not a status change, so a draft that
+    was submitted before its preview is still `in_review` afterwards, and
+    the preview it has is current."""
+    draft_id = _make_draft(store)
+    store.act_on_draft(draft_id, "submit", "ghostwriter", actor_is_ui=False)
+    run_id = _queue_preview(store, draft_id)
+    assert store.get_draft(draft_id).status == "in_review"
+    store.start_run(
+        run_id,
+        "test-builder",
+        "0.164.0",
+        toolchain_drift=False,
+        built_version=store.get_draft(draft_id).version_no,
+    )
+    store.finish_run(
+        run_id, "test-builder", succeeded=True, result={"preview_url": "/preview/a-real-post/"}
+    )
+
+    finished = store.get_run(run_id)
+    draft = store.get_draft(draft_id)
+    assert finished.status == "succeeded"
+    assert draft.status == "in_review"
+    assert preview_is_current(finished, draft)
 
 
 # --- lease retained and renewed through the build: fix #4 ----------------
