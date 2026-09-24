@@ -34,7 +34,7 @@ def _handle_merged(store: Store, target: RepoTarget, watch: WatchEntry) -> None:
     # Never deletes a Post record itself (digest's own no-delete rule,
     # AGENTS.md); the unpublish case right below is not digest, and knows
     # with certainty this specific removal is real.
-    refresh_from_target(store, target, WATCHER_ACTOR)
+    conventions = refresh_from_target(store, target, WATCHER_ACTOR)
     draft = store.get_draft(watch.draft_id)
     if watch.kind == "unpublish" and draft.slug:
         store.remove_post(draft.slug, WATCHER_ACTOR)
@@ -71,28 +71,27 @@ def _handle_merged(store: Store, target: RepoTarget, watch: WatchEntry) -> None:
         )
     store.observe_pr_outcome(watch.draft_id, "merged", watch.pr_number, actor=WATCHER_ACTOR)
     if watch.kind == "publish":
-        _fill_announcement_links(store, watch.draft_id)
+        _fill_announcement_links(store, watch.draft_id, getattr(conventions, "baseurl", None))
     store.clear_watch(watch.draft_id, WATCHER_ACTOR, f"PR #{watch.pr_number} merged")
 
 
-def _fill_announcement_links(store: Store, draft_id: str) -> None:
+def _fill_announcement_links(store: Store, draft_id: str, base_url: str | None) -> None:
     """Put the post's public link into its announcements (issue #71).
 
-    The base is the site's own production `baseURL`, as the digest that
-    `refresh_from_target` just ran read it; the path is the url the publish
-    run recorded. A site with no absolute `baseURL` leaves the announcements
+    The base is the site's own production `baseURL` as this merge's refresh
+    just read it, or, when that read had none, what the last digest that
+    wrote toolchain state read; the path is the url the publish run
+    recorded. A site with no absolute `baseURL` leaves the announcements
     alone. A failure here is logged, never raised: the merge is real and the
     watch must still clear, and the fill is only a convenience.
     """
     try:
         draft = store.get_draft(draft_id)
         post_url = (draft.published or {}).get("url")
-        base_url = digest_mod.read_base_url_from_state(store.data_dir)
-        if draft.status != "published" or not isinstance(post_url, str) or not base_url:
+        base = base_url or digest_mod.read_base_url_from_state(store.data_dir)
+        if not isinstance(post_url, str) or not base:
             return
-        store.fill_announcement_links(
-            draft_id, announce.public_link(base_url, post_url), WATCHER_ACTOR
-        )
+        store.fill_announcement_links(draft_id, announce.public_link(base, post_url), WATCHER_ACTOR)
     except Exception:
         log.exception("filling the published link into draft %s announcements failed", draft_id)
 

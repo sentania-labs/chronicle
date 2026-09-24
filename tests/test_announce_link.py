@@ -212,3 +212,56 @@ def test_the_panel_shows_the_filled_public_link(client: Any, services: Any) -> N
     services.store.fill_announcement_links(draft_id, LINK, "chronicle-watcher")
     html = client.get(f"/content/drafts/{draft_id}").text
     assert f"Published at <code>{LINK}</code>" in html
+
+
+# --- Review round: boundaries, absolute urls, races ----------------------
+
+
+def test_a_longer_url_that_starts_with_the_link_does_not_count_as_the_link() -> None:
+    filled = announce.fill_links({"x": "see https://b.example/foo-bar"}, "https://b.example/foo")
+    assert filled == {"x": "see https://b.example/foo-bar\nhttps://b.example/foo"}
+
+
+def test_swapping_a_previous_link_that_prefixes_the_new_one_does_not_corrupt_it() -> None:
+    old, new = "https://b.example/a/", "https://b.example/a/b/"
+    filled = announce.fill_links({"x": f"new {new} old {old}"}, new, old)
+    assert filled == {"x": f"new {new} old {new}"}
+
+
+def test_a_link_followed_by_sentence_punctuation_is_still_found() -> None:
+    once = announce.fill_links({"x": "Read it: {link}. More soon."}, LINK)
+    assert once == {"x": f"Read it: {LINK}. More soon."}
+    assert announce.fill_links(once, LINK, LINK) == once
+
+
+def test_an_absolute_post_url_is_used_as_is() -> None:
+    assert announce.public_link("https://b.example/blog/", "https://other.example/foo/") == (
+        "https://other.example/foo/"
+    )
+
+
+def test_a_draft_revised_after_the_merge_is_not_filled(store: Store) -> None:
+    draft_id = _published_with_announcements(store, {"x": "New: {link}"})
+    store.save_draft(draft_id, "ghostwriter", 1, FRONTMATTER, "Edited.\n")
+    assert store.get_draft(draft_id).status == "drafting"
+    assert store.fill_announcement_links(draft_id, LINK, "chronicle-watcher") is None
+    assert store.get_draft(draft_id).announcements == {"x": "New: {link}"}
+
+
+def test_the_watcher_prefers_the_base_url_this_merge_just_read(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_state(store.data_dir, {"source": "hugo_config", "baseurl": "https://old.example/"})
+    fresh = digest.HugoConventions(
+        contentdir="content",
+        staticdir="static",
+        mainsections=(),
+        taxonomies={},
+        environment="production",
+        source="hugo_config",
+        baseurl="https://new.example/",
+    )
+    monkeypatch.setattr(watcher, "refresh_from_target", lambda *a, **k: fresh)
+    draft_id = _merge_a_publish(store, {"x": "{link}"})
+    draft = store.get_draft(draft_id)
+    assert draft.announcements["x"].startswith("https://new.example/")

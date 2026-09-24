@@ -2121,6 +2121,10 @@ class Store:
         announcements, or the link already where it belongs (a retried merge).
         """
         draft = self.get_draft(draft_id)
+        if draft.status != "published":
+            # Checked under the lock: a save that revised the post after the
+            # merge was observed owns the announcements now.
+            return None
         filled = announce.fill_links(draft.announcements, link, draft.announcement_link)
         if filled == draft.announcements and draft.announcement_link == link:
             return None
