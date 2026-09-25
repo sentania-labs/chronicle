@@ -12,7 +12,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 # Spec section 4 says "Hugo allowlist"; which keys are in it is ADR 007,
 # amended 2026-09-16 against the real blog's 347 posts and the dashboard
@@ -133,6 +133,15 @@ class DraftImage(BaseModel):
     source_ref: str | None = None
 
 
+def to_lf(text: str) -> str:
+    """Text with LF line endings only: CRLF and a lone CR both become LF.
+
+    A draft's body is always stored and compared in this form (issue #51),
+    so a body imported or saved with CRLF never diffs as a full rewrite
+    against the editor's LF on its next save."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 class Claim(BaseModel):
     author: str
     since: str
@@ -167,6 +176,17 @@ class Draft(BaseModel):
     def _drop_legacy_claim(cls, value: Any) -> None:
         return None
 
+    # Issue #51: a record stored with CRLF before this rule loads as LF, and
+    # nothing assigned to `body` reaches disk with a CR in it.
+    @field_validator("body", mode="before")
+    @classmethod
+    def _body_lf(cls, value: Any) -> Any:
+        return to_lf(value) if isinstance(value, str) else value
+
+    @field_serializer("body")
+    def _dump_body_lf(self, value: str) -> str:
+        return to_lf(value)
+
     # What the last successful publish or unpublish run actually wrote
     # (branch, PR number and URL, the commit sha, the post's path and url,
     # the stamped date, the exact image site-paths placed, and the post
@@ -198,6 +218,17 @@ class Version(BaseModel):
     # Carried so a version restores the announcements that were current when
     # it was written, the same way it restores frontmatter and body.
     announcements: dict[str, str] = {}
+
+    # Same rule as `Draft.body` (issue #51), so a diff against a version
+    # written with CRLF shows only the lines that changed.
+    @field_validator("body", mode="before")
+    @classmethod
+    def _body_lf(cls, value: Any) -> Any:
+        return to_lf(value) if isinstance(value, str) else value
+
+    @field_serializer("body")
+    def _dump_body_lf(self, value: str) -> str:
+        return to_lf(value)
 
 
 class FeedbackEntry(BaseModel):
