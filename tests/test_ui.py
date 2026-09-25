@@ -437,9 +437,7 @@ def test_editor_save_stores_lf_when_posting_over_an_lf_base(
 ) -> None:
     """A browser posts every textarea line break as CRLF (#22). The record must
     hold LF, and a save that changed one line against an LF base must diff as
-    one line. This does not cover a base that was itself stored with CRLF
-    (an imported post, or a record written by a caller other than this
-    route): see the next test."""
+    one line. The next test covers a base stored with CRLF."""
     draft_id = make_draft(services, "drafting", title="Endings")
     draft = services.store.get_draft(draft_id)
     services.store.save_draft(
@@ -463,20 +461,24 @@ def test_editor_save_stores_lf_when_posting_over_an_lf_base(
     assert changed == ["-two", "+TWO"]
 
 
-def test_editor_save_over_a_crlf_stored_base_rewrites_every_line(
+def test_editor_save_over_a_crlf_stored_base_diffs_only_the_changed_line(
     client: TestClient, services: Services
 ) -> None:
-    """A base stored with CRLF (an imported post, or any writer other than
-    this UI route, since only this route's _crlf_to_lf normalises on the way
-    in) is not the case the test above covers. This UI save normalises the
-    posted body to LF, so the diff is against a CRLF base and every line
-    comes out changed. This is disclosed, not fixed here: the fix is
-    normalising on read or on import, which lives in store.py."""
+    """A base stored with CRLF before issue #51 (an imported post, or any
+    writer other than this route) loads as LF, so a UI save that changed one
+    line diffs as that one line, not a rewrite of every line."""
     draft_id = make_draft(services, "drafting", title="Endings")
     draft = services.store.get_draft(draft_id)
     services.store.save_draft(
-        draft_id, "scott", draft.version_no, {"title": "Endings"}, "one\r\ntwo\r\nthree\r\n"
+        draft_id, "scott", draft.version_no, {"title": "Endings"}, "one\ntwo\nthree\n"
     )
+    draft = services.store.get_draft(draft_id)
+    for path in (
+        services.store._draft_path(draft_id),
+        services.store._version_path(draft_id, draft.version_no),
+    ):
+        path.write_text(path.read_text(encoding="utf-8").replace("\\n", "\\r\\n"), encoding="utf-8")
+    assert "\\r\\n" in services.store._draft_path(draft_id).read_text(encoding="utf-8")
     draft = services.store.get_draft(draft_id)
 
     posted = "one\r\nTWO\r\nthree\r\n"
@@ -491,7 +493,7 @@ def test_editor_save_over_a_crlf_stored_base_rewrites_every_line(
     changed = [
         line for line in diff.splitlines() if line[:1] in "+-" and line[:3] not in ("+++", "---")
     ]
-    assert changed == ["-one", "-two", "-three", "+one", "+TWO", "+three"]
+    assert changed == ["-two", "+TWO"]
 
 
 def test_a_stale_save_conflict_keeps_the_attempted_body_in_lf(

@@ -56,6 +56,7 @@ from .models import (
     render_content,
     render_submission_content,
     slugify,
+    to_lf,
 )
 from .transitions import (
     PREVIEW_SUCCEEDED,
@@ -810,7 +811,7 @@ class Store:
         draft.slug = slug
         draft.title = str(allowed["title"])
         draft.frontmatter = allowed
-        draft.body = body
+        draft.body = to_lf(body)
         draft.source_post = {"slug": post.slug, "path": post.path, "sha": post.sha}
         # ADR 015: the image directory is the post's own url slug, never
         # `post.slug` (digest's slug can carry a dated filename stem), so an
@@ -1039,6 +1040,8 @@ class Store:
         message: str = "",
         announcements: dict[str, Any] | None = None,
     ) -> Draft:
+        # Compared against the stored body below, which is always LF (#51).
+        body = to_lf(body)
         draft = self.get_draft(draft_id)
         watch = self.get_watch(draft_id)
         if watch is not None and watch.kind == "publish":
@@ -2123,6 +2126,7 @@ class Store:
         to the allowlist already, the same way `_fill_from_post` handles an
         import.
         """
+        body = to_lf(body)
         draft = self.get_draft(draft_id)
         version = Version(
             draft_id=draft_id,
