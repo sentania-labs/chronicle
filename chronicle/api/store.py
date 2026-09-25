@@ -740,7 +740,7 @@ class Store:
                     allowed["title"] = title
             draft.title = str(title)
             draft.frontmatter = allowed
-            draft.body = body
+            draft.body = to_lf(body)
 
         for material in submission.materials:
             if material is primary:

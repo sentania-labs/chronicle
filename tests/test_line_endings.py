@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from chronicle.api.models import Post, to_lf
+from chronicle.api.models import Material, Post, to_lf
 from chronicle.api.store import Store
 
 
@@ -114,3 +114,16 @@ def test_a_crlf_github_version_is_stored_as_lf(store: Store) -> None:
     recorded = store.record_github_version(draft.id, {"title": "T"}, "a\r\nb\r\n", "drift")
     assert recorded.body == "a\nb\n"
     assert store.get_version(draft.id, recorded.version_no).body == "a\nb\n"
+
+
+def test_a_crlf_submission_seeds_an_lf_body(store: Store) -> None:
+    submission = store.create_submission(
+        "ghostwriter",
+        brief="b",
+        materials=[Material(name="post.md", text="# Title\r\n\r\nline one\r\nline two\r\n")],
+        image_ids=[],
+    )
+    store.act_on_submission(submission.id, "claim", "ghostwriter")
+    draft, _ = store.create_draft("ghostwriter", from_submission=submission.id)
+    assert "\r" not in draft.body
+    assert "line one\nline two\n" in draft.body

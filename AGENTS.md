@@ -113,7 +113,8 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   (`models.to_lf`, issue #51), and `save_draft` compares the incoming body
   in that form. A record stored with CRLF before this rule is read as LF,
   with no backfill. A publish of a post that is CRLF on main therefore
-  commits it as LF once.
+  commits it as LF once, and a preview built from a CRLF body before this
+  rule reads as stale until it is rebuilt (its `built_text` hashed the CR).
 - **Announcements live on the draft, never in frontmatter and never in the
   post.** `Draft.announcements` and `Version.announcements` (ADR 021) hold
   suggested social text under exactly the three keys in
