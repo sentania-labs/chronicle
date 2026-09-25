@@ -24,7 +24,7 @@ from pydantic import BaseModel
 
 from ... import backup as backup_mod
 from .. import admin_templates as tpl
-from .. import crypto, scheduled_backup
+from .. import crypto, scheduled_backup, toolchain_check
 from ..admin_auth import (
     GITHUB_STATE_COOKIE_NAME,
     AlreadyClaimed,
@@ -48,6 +48,7 @@ from ..digest_runner import run as run_digest
 from ..errors import ApiError
 from ..github_client import GitHubApiError, build_manifest, manifest_target_url
 from ..models import RECONCILE_RESOLUTIONS
+from ..publisher import PublishFailed, build_repo_target
 from ..reconcile import run_once_logged as run_reconcile
 from ..tokens import RESERVED_TOKEN_NAMES
 from ..ui_deps import check_same_origin
@@ -929,3 +930,105 @@ def tokens_revoke_json(
 ) -> dict[str, Any]:
     revoked = services.tokens.revoke(name)
     return {"revoked": revoked}
+
+
+# --- Toolchain (issue #67, ADR 026) ------------------------------------------
+
+
+def _toolchain_page(
+    admin: AdminServices,
+    *,
+    notice: str | None = None,
+    notice_kind: str = "error",
+    status_code: int = 200,
+) -> HTMLResponse:
+    result = toolchain_check.load_result(admin.state_dir)
+    hugo = (result or {}).get("hugo") or {}
+    latest, image = hugo.get("latest"), hugo.get("image")
+    return HTMLResponse(
+        tpl.toolchain_page(
+            result=result,
+            actions=toolchain_check.load_actions(admin.state_dir),
+            hugo_issue_url=(
+                toolchain_check.hugo_issue_url(str(image), str(latest))
+                if toolchain_check.hugo_behind(image, latest)
+                else None
+            ),
+            hugo_release_url=(
+                toolchain_check.HUGO_RELEASE_URL.format(version=latest) if latest else None
+            ),
+            check_running=toolchain_check.check_running(),
+            notice=notice,
+            notice_kind=notice_kind,
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/toolchain", response_class=HTMLResponse)
+def toolchain_page(admin: AdminServices = Depends(require_admin_session_html)) -> HTMLResponse:
+    return _toolchain_page(admin)
+
+
+@router.post("/toolchain/check", response_class=HTMLResponse)
+def toolchain_check_now(
+    _origin: None = Depends(check_same_origin),
+    admin: AdminServices = Depends(require_admin_session_html),
+    services: Services = Depends(get_services),
+) -> HTMLResponse:
+    if not toolchain_check.start_check_now(services.store, admin):
+        return _toolchain_page(admin, notice="A check is already running.", status_code=409)
+    return _toolchain_page(
+        admin, notice="Check started; reload this page to see the result.", notice_kind="ok"
+    )
+
+
+def _toolchain_action(admin: AdminServices, act: Any) -> HTMLResponse:
+    """Run one PR-opening action against the configured blog repo. Same
+    GitHub App (or test-token repo) the publisher uses; nothing configured
+    is a refusal, not a crash."""
+    try:
+        target = build_repo_target(admin)
+    except PublishFailed as exc:
+        return _toolchain_page(admin, notice=str(exc), status_code=409)
+    if target is None:
+        return _toolchain_page(
+            admin, notice="No GitHub App or test-token repo is configured.", status_code=409
+        )
+    try:
+        record = act(target)
+    except toolchain_check.ToolchainActionError as exc:
+        return _toolchain_page(admin, notice=str(exc), status_code=409)
+    except GitHubApiError as exc:
+        return _toolchain_page(admin, notice=f"GitHub refused it: {exc}", status_code=502)
+    return _toolchain_page(admin, notice=f"PR opened: {record['pr_url']}", notice_kind="ok")
+
+
+@router.post("/toolchain/bump", response_class=HTMLResponse)
+async def toolchain_bump(
+    request: Request,
+    _origin: None = Depends(check_same_origin),
+    admin: AdminServices = Depends(require_admin_session_html),
+) -> HTMLResponse:
+    form = await _form(request)
+    path, which = form.get("path", ""), form.get("which", "")
+    return _toolchain_action(
+        admin,
+        lambda t: toolchain_check.bump_submodule(
+            admin.state_dir, t.ops, t.default_branch, path, which
+        ),
+    )
+
+
+@router.post("/toolchain/remove", response_class=HTMLResponse)
+async def toolchain_remove(
+    request: Request,
+    _origin: None = Depends(check_same_origin),
+    admin: AdminServices = Depends(require_admin_session_html),
+) -> HTMLResponse:
+    form = await _form(request)
+    path = form.get("path", "")
+    return _toolchain_action(
+        admin,
+        lambda t: toolchain_check.remove_theme(admin.state_dir, t.ops, t.default_branch, path),
+    )

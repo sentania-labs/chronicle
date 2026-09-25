@@ -19,12 +19,14 @@ STATUS_TAB = "/admin"
 GITHUB_TAB = "/admin/github/connect"
 TOKENS_TAB = "/admin/tokens"
 BACKUP_TAB = "/admin/backup"
+TOOLCHAIN_TAB = "/admin/toolchain"
 PASSWORD_TAB = "/admin/password"
 NAV_LINKS = (
     (STATUS_TAB, "Status"),
     (GITHUB_TAB, "GitHub"),
     (TOKENS_TAB, "Tokens"),
     (BACKUP_TAB, "Backup"),
+    (TOOLCHAIN_TAB, "Toolchain"),
     (PASSWORD_TAB, "Password"),
 )
 
@@ -619,3 +621,199 @@ def tokens_page(
 {_table(rows, "<th>name</th><th>created</th><th>last used</th><th>revoked</th><th></th>")}
 """
     return page("Tokens", body, notice, "ok" if minted else "error", active=TOKENS_TAB)
+
+
+def _short(sha: Any) -> str:
+    text = str(sha or "")
+    return text[:12] if text else "-"
+
+
+def _post_button(action: str, label: str, fields: dict[str, str], *, danger: bool = False) -> str:
+    hidden = "".join(
+        f'<input type="hidden" name="{escape(k)}" value="{escape(v)}">' for k, v in fields.items()
+    )
+    kind = "lat-btn--danger" if danger else ""
+    return (
+        f'<form method="post" action="{escape(action)}" class="inline">{hidden}'
+        f'<button type="submit" class="lat-btn {kind}">{escape(label)}</button></form>'
+    )
+
+
+def _theme_actions(row: dict[str, Any], action: dict[str, Any] | None) -> str:
+    if action is not None and action.get("pinned_at_open") == row.get("pinned"):
+        # The PR this page opened has not landed yet (the pinned commit has
+        # not moved), so link it instead of offering the same action again.
+        return (
+            f'PR open: <a href="{escape(str(action.get("pr_url", "")))}">'
+            f"{escape(str(action.get('pr_url', '')))}</a>"
+        )
+    buttons = []
+    tag = row.get("latest_tag") or {}
+    if tag.get("sha") and tag.get("sha") != row.get("pinned"):
+        buttons.append(
+            _post_button(
+                "/admin/toolchain/bump",
+                f"PR: move to {tag.get('tag')}",
+                {"path": str(row["path"]), "which": "tag"},
+            )
+        )
+    head = row.get("head")
+    if head and head != row.get("pinned") and head != tag.get("sha"):
+        buttons.append(
+            _post_button(
+                "/admin/toolchain/bump",
+                "PR: move to upstream head",
+                {"path": str(row["path"]), "which": "head"},
+            )
+        )
+    if row.get("unused"):
+        buttons.append(
+            _post_button(
+                "/admin/toolchain/remove",
+                "PR: remove this theme",
+                {"path": str(row["path"])},
+                danger=True,
+            )
+        )
+    return " ".join(buttons) or "-"
+
+
+def _theme_status(row: dict[str, Any]) -> str:
+    if row.get("error"):
+        return escape(str(row["error"]))
+    pinned = row.get("pinned")
+    tag = row.get("latest_tag") or {}
+    if pinned and pinned == tag.get("sha"):
+        state = f"at latest tag {tag.get('tag')}"
+    elif pinned and pinned == row.get("head"):
+        state = "at upstream head"
+    elif tag:
+        state = f"not at latest tag {tag.get('tag')}"
+    else:
+        state = "upstream has no version tags"
+    return escape(state) + (
+        ' <span class="lat-badge lat-badge--warn">unused</span>' if row.get("unused") else ""
+    )
+
+
+def toolchain_page(
+    *,
+    result: dict[str, Any] | None,
+    actions: dict[str, Any],
+    hugo_issue_url: str | None,
+    hugo_release_url: str | None,
+    check_running: bool,
+    notice: str | None = None,
+    notice_kind: str = "error",
+) -> str:
+    """The admin Toolchain page (issue #67): what the blog pins against what
+    upstream offers. Nothing here is fetched on page load; the numbers come
+    from the last check, which runs daily or on "Check now"."""
+    check_button = _post_button("/admin/toolchain/check", "Check now", {})
+    running = " A check is running now; reload in a moment." if check_running else ""
+    if result is None:
+        body = f"""
+<p>No toolchain check has run yet.{running}</p>
+{check_button}
+"""
+        return page("Toolchain", body, notice=notice, notice_kind=notice_kind, active=TOOLCHAIN_TAB)
+
+    checked = escape(_stamp(result.get("checked_at"), "?"))
+    hugo = result.get("hugo") or {}
+    latest = hugo.get("latest")
+    image = hugo.get("image")
+    hugo_rows = (
+        "<tr><td>Chronicle image (builds and previews)</td>"
+        f"<td>{escape(str(image or '-'))}</td></tr>"
+        f"<tr><td>Blog deploy workflow</td><td>{escape(str(hugo.get('site') or '-'))}</td></tr>"
+        f"<tr><td>Latest release</td><td>{escape(str(latest or '-'))}</td></tr>"
+    )
+    hugo_note = ""
+    if hugo_issue_url:
+        links = []
+        if hugo_release_url:
+            links.append(f'<a href="{escape(hugo_release_url)}">release notes</a>')
+        if hugo_issue_url:
+            links.append(
+                f'<a href="{escape(hugo_issue_url)}">file a Chronicle issue to bump it</a>'
+            )
+        hugo_note = (
+            f"<p>Chronicle's image is behind the latest Hugo. Hugo is baked into the image, so"
+            f" this page cannot change it: the bump is a Chronicle release that changes"
+            f" <code>HUGO_VERSION</code>. {' | '.join(links)}</p>"
+        )
+
+    if result.get("site_missing"):
+        themes_html = "<p>No site checkout yet: run a digest from the Status page first.</p>"
+        modules_html = ""
+    else:
+        config = result.get("config")
+        config_note = (
+            '<p class="muted">The site\'s own <code>hugo config</code> could not be read, so no'
+            " theme is marked unused.</p>"
+            if config is None
+            else '<p class="muted">Configured theme: '
+            + escape(", ".join(config.get("themes") or []) or "none")
+            + "</p>"
+        )
+        theme_rows = "".join(
+            "<tr>"
+            f"<td>{escape(str(row.get('path', '')))}</td>"
+            f"<td><code>{escape(_short(row.get('pinned')))}</code></td>"
+            f"<td>{escape(str((row.get('latest_tag') or {}).get('tag') or '-'))}"
+            f" <code>{escape(_short((row.get('latest_tag') or {}).get('sha')))}</code></td>"
+            f"<td><code>{escape(_short(row.get('head')))}</code></td>"
+            f"<td>{_theme_status(row)}</td>"
+            f"<td>{_theme_actions(row, actions.get(str(row.get('path'))))}</td>"
+            "</tr>"
+            for row in result.get("themes", [])
+        )
+        themes_html = config_note + (
+            _table(
+                theme_rows,
+                "<th>submodule</th><th>pinned</th><th>latest tag</th><th>upstream head</th>"
+                "<th>status</th><th>action</th>",
+            )
+            if theme_rows
+            else "<p>The blog has no submodules.</p>"
+        )
+        module_rows = "".join(
+            "<tr>"
+            f"<td>{escape(str(m.get('module', '')))}</td>"
+            f"<td>{escape(str(m.get('version', '')))}</td>"
+            f"<td>{escape(str(m.get('latest') or m.get('error') or '-'))}</td>"
+            "</tr>"
+            for m in result.get("modules", [])
+        )
+        modules_html = (
+            '<section class="lat-card"><h2>Hugo modules</h2>'
+            '<p class="muted">Reported only: moving a module needs <code>hugo mod get</code>'
+            " and a Go toolchain, which Chronicle does not carry.</p>"
+            + _table(module_rows, "<th>module</th><th>pinned</th><th>latest tag</th>")
+            + "</section>"
+            if module_rows
+            else ""
+        )
+
+    errors = result.get("errors") or []
+    errors_html = (
+        "<ul>" + "".join(f"<li>{escape(str(e))}</li>" for e in errors) + "</ul>" if errors else ""
+    )
+    body = f"""
+<p class="muted">Last checked {checked}. Checks run daily.{running}</p>
+{check_button}
+{errors_html}
+<section class="lat-card">
+<h2>Hugo</h2>
+{_table(hugo_rows)}
+{hugo_note}
+</section>
+<section class="lat-card">
+<h2>Themes and other submodules</h2>
+<p class="muted">Each action opens a PR on the blog repo for you to review and merge. Nothing is
+pushed to the default branch.</p>
+{themes_html}
+</section>
+{modules_html}
+"""
+    return page("Toolchain", body, notice=notice, notice_kind=notice_kind, active=TOOLCHAIN_TAB)

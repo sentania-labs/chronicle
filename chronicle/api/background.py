@@ -13,7 +13,7 @@ import logging
 import threading
 from dataclasses import dataclass, field
 
-from . import publisher, reconcile, scheduled_backup, watcher
+from . import publisher, reconcile, scheduled_backup, toolchain_check, watcher
 from .admin_deps import AdminServices
 from .deps import Services
 
@@ -85,7 +85,20 @@ def start(services: Services, admin: AdminServices) -> Background:
         name="chronicle-backup",
         daemon=True,
     )
-    background.threads = [publisher_thread, watcher_thread, reconcile_thread, backup_thread]
+    # The admin Toolchain page's daily upstream check (issue #67, ADR 026).
+    toolchain_thread = threading.Thread(
+        target=toolchain_check.run_loop,
+        args=(store, admin, background.stop_event),
+        name="chronicle-toolchain",
+        daemon=True,
+    )
+    background.threads = [
+        publisher_thread,
+        watcher_thread,
+        reconcile_thread,
+        backup_thread,
+        toolchain_thread,
+    ]
     for thread in background.threads:
         thread.start()
     return background
