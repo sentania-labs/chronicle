@@ -36,14 +36,13 @@ class Transition:
 
 DRAFT_TRANSITIONS: dict[tuple[str, str], Transition] = {
     ("drafting", "submit"): Transition("in_review"),
-    ("previewed", "submit"): Transition("in_review"),
-    # Asking for a preview queues a build and changes nothing else: a draft is
-    # `previewed` when a preview exists, which is the builder's answer on a
-    # succeeded run (RUN_OUTCOME_TRANSITIONS below), not the API's answer at
-    # enqueue time. A failed build therefore leaves the draft where it was.
+    # Asking for a preview queues a build and changes nothing else, and so
+    # does the build finishing (issue #70): having a preview is a property of
+    # the draft (`store.preview_is_current`), not a stage of its lifecycle.
+    # `previewed` is no longer produced; `Store.migrate_previewed` moves any
+    # record still carrying it back to the status it had before the build.
     ("drafting", "preview"): Transition("drafting", run_kind="preview"),
     ("in_review", "preview"): Transition("in_review", run_kind="preview"),
-    ("previewed", "preview"): Transition("previewed", run_kind="preview"),
     ("in_review", "approve"): Transition("approved", actor=UI_ACTOR, run_kind="publish"),
     # A re-approve: the previous publish run failed (see PUBLISH_RUN_FAILED
     # below) or the draft is simply approved again with no publish PR open
@@ -70,7 +69,8 @@ DRAFT_TRANSITIONS: dict[tuple[str, str], Transition] = {
 # check applies, and an outcome that has no entry for the draft's current
 # status leaves the status alone instead of raising. A draft that was
 # rejected, or saved back into `drafting`, while its build ran must not be
-# dragged into `previewed` by a build that finished afterwards.
+# moved by a build that finished afterwards. A succeeded preview has no entry
+# at all: it never changes a status (issue #70).
 PREVIEW_SUCCEEDED = "preview_succeeded"
 # A publish run failed after `approve` already moved the draft to `approved`
 # (a transient GitHub error, a conversion failure): this is what makes the
@@ -79,9 +79,6 @@ PREVIEW_SUCCEEDED = "preview_succeeded"
 PUBLISH_RUN_FAILED = "publish_failed"
 
 RUN_OUTCOME_TRANSITIONS: dict[tuple[str, str], Transition] = {
-    ("drafting", PREVIEW_SUCCEEDED): Transition("previewed"),
-    ("in_review", PREVIEW_SUCCEEDED): Transition("previewed"),
-    ("previewed", PREVIEW_SUCCEEDED): Transition("previewed"),
     ("approved", PUBLISH_RUN_FAILED): Transition("in_review"),
 }
 
@@ -157,9 +154,9 @@ def resolve_draft(status: str, action: str, actor_is_ui: bool) -> Transition:
 # - preview may `revise`: that is exactly what a save already does to a
 #   `published` or `revision_requested` draft, so asking for a preview is a
 #   save without the edit.
-# - approve may `submit`: the UI token is the reviewer, so a previewed draft
-#   goes to review and is approved in one click, each step still a recorded
-#   event.
+# - approve may `submit`: the UI token is the reviewer, so a draft with a
+#   current preview goes to review and is approved in one click, each step
+#   still a recorded event.
 STAGING_ACTIONS: dict[str, tuple[str, ...]] = {
     "preview": ("revise",),
     "approve": ("submit",),

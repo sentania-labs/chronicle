@@ -106,16 +106,21 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   of the API's named actions, so it is modelled as the `revise` action in
   `chronicle/api/transitions.py` and writes an event like any other
   transition. Never decide a status anywhere else: that table is the whole
-  lifecycle.
+  lifecycle. A save whose frontmatter and body equal the draft's current ones
+  (announcements only, issue #69) skips `revise` and keeps its status.
 - **Announcements live on the draft, never in frontmatter and never in the
   post.** `Draft.announcements` and `Version.announcements` (ADR 021) hold
   suggested social text under exactly the three keys in
   `models.ANNOUNCEMENT_CHANNELS`, validated by `store.check_announcements`
-  and written only by `Store.save_draft` (omitted means keep, a mapping
+  and written by `Store.save_draft` (omitted means keep, a mapping
   means replace). `convert.py` cannot see the field, and a test asserts the
   converted post is byte-identical with and without it. Chronicle never
   posts any of it anywhere: the edit page renders three escaped textareas
-  with a Copy button, and that is the whole feature.
+  with a Copy button. The one other writer is the watcher, which fills the
+  post's public link (the site's own `baseURL` plus `published.url`) into
+  them on a publish merge through `Store.fill_announcement_links`, a
+  `chronicle`-authored version that never changes the status (ADR 021
+  amendment, issue #71).
 - **The index is a cache; single-record reads must not use it.** Lists and
   cursors come from SQLite, a record's own content always comes from its
   file, and `chronicle reindex` rebuilds every row. See
@@ -290,8 +295,9 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   still the only decider.** `ui_actions.offers_for` renders an offer available
   only if `transitions.plan_action` finds a path, and `Store.act_on_draft_staged`
   (editor buttons only, never `/v1`) runs that path's steps under one lock:
-  Preview on a `published` post revises it first, Publish on a `previewed` one
-  submits it first. The lifecycle stays in the table, but the action route also
+  Preview on a `published` post revises it first, Publish on a `drafting` one
+  with a current preview submits it first. A preview build never changes a
+  status (ADR 023); `previewed` is legacy, migrated away by `Store.open`. The lifecycle stays in the table, but the action route also
   holds a click to the offer the page rendered for it
   (`ui_actions.staged_refusal`, same `_offer_state` inputs): a disabled offer,
   or an absent one for a staged click, is a 409, so "Preview first" and an open
@@ -299,8 +305,9 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   That check is the `guard` `act_on_draft_staged` runs under the store lock,
   never a check before the call: a save landing in between would otherwise be
   published unpreviewed. A preview counts only
-  while `built_version` equals the draft's version, so a save makes it stale
-  again. The draft status shown to a human goes through
+  while the text it built still matches the draft's (`store.preview_is_current`,
+  `Run.built_text`, stamped by `start_run`; `finish_run` uses the same check),
+  so a text save makes it stale again and an announcement-only save does not. The draft status shown to a human goes through
   `ui_status.status_label`; API values and filter query values stay raw.
 - **The image upload route answers JSON to `Accept: application/json`.**
   `editor.js` gets the stored filename (a dedup can keep an earlier upload's
@@ -365,6 +372,13 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   `Store.save_draft` carries the stored date forward whenever a save on an
   already-pinned draft omits it (an API caller that drops the key, or the
   editor's Date field cleared); a hand-set different date still wins.
+- **Scheduled backups never widen what a bundle holds.**
+  `api/scheduled_backup.py` only calls `backup.create_backup` and ships the
+  result (ADR 024). Its settings file carries an encrypted S3 secret and is
+  deliberately absent from `backup.STATE_MEMBERS`; a local target under the
+  data directory is refused. `api/s3.py` is a three-call SigV4 client over
+  `httpx`, tested against AWS's published signatures, and like the GitHub
+  client it takes an `httpx` transport in tests, never the network.
 - **`chronicle/backup.py`'s restore swap keeps the displaced tree until
   reindex succeeds, and `_safe_member` runs before any extraction.** A tar
   member with an absolute path, a `..` segment, or a symlink is refused

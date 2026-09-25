@@ -177,9 +177,18 @@ def _table(head_cells: str, rows: str) -> str:
     )
 
 
-def submissions_list_page(pg: Page[dict[str, Any]], *, banner: bool) -> str:
+def _draft_link(submission: dict[str, Any]) -> str:
+    draft_id = submission.get("draft_id")
+    if not draft_id:
+        return "-"
+    return f'<a href="/content/drafts/{escape(draft_id)}">post</a>'
+
+
+def submissions_list_page(
+    pg: Page[dict[str, Any]], *, banner: bool, show_all: bool = False, hidden: int = 0
+) -> str:
     if not pg.items:
-        rows = "<tr><td colspan=6>none</td></tr>"
+        rows = "<tr><td colspan=7>none</td></tr>"
     else:
         rows = "".join(
             "<tr>"
@@ -189,16 +198,26 @@ def submissions_list_page(pg: Page[dict[str, Any]], *, banner: bool) -> str:
             f"<td>{escape(local_time(s['created_at']))}</td>"
             f'<td class="lat-num">{len(s["image_ids"])}</td>'
             f"<td>{escape(s['claimed_by'] or '-')}</td>"
+            f"<td>{_draft_link(s)}</td>"
             "</tr>"
             for s in pg.items
         )
     heads = (
         "<th>brief</th><th>status</th><th>from</th><th>created</th>"
-        '<th class="lat-num">images</th><th>claimed by</th>'
+        '<th class="lat-num">images</th><th>claimed by</th><th>post</th>'
     )
+    if show_all:
+        toggle = '<a href="/content/submissions">Show open only</a>'
+    else:
+        toggle = (
+            f'<a href="/content/submissions?show=all">Show all ({hidden} drafted or discarded)</a>'
+            if hidden
+            else ""
+        )
     body = f"""
+<p class="muted">{"All submissions." if show_all else "Waiting on a draft."} {toggle}</p>
 {_table(heads, rows)}
-{_pagination_links(pg, "/content/submissions")}
+{_pagination_links(pg, "/content/submissions", extra="&show=all" if show_all else "")}
 """
     return page("Submissions", body, banner=banner, active=SUBMISSIONS_TAB)
 
@@ -321,7 +340,7 @@ def submission_detail_page(
 """
     body = f"""
 <p class="muted">status: {badge(submission["status"])}, version: {submission["version_no"]}, from: {escape(submission["from_"])},
-created: {escape(local_time(submission["created_at"]))}, claimed by: {escape(submission["claimed_by"] or "-")}</p>
+created: {escape(local_time(submission["created_at"]))}, claimed by: {escape(submission["claimed_by"] or "-")}{", post: " + _draft_link(submission) if submission.get("draft_id") else ""}</p>
 <section class="lat-card">
 <h2>Brief</h2>
 <p class="chr-prose">{escape(submission["brief"])}</p>
@@ -754,7 +773,10 @@ ANNOUNCEMENT_LABELS = (("x", "X"), ("bluesky", "Bluesky"), ("linkedin", "LinkedI
 
 
 def _announcement_fields(
-    announcements: dict[str, Any], published: dict[str, Any] | None, form_id: str
+    announcements: dict[str, Any],
+    published: dict[str, Any] | None,
+    form_id: str,
+    public_link: str | None = None,
 ) -> str:
     """The edit page's announcements panel (ADR 021).
 
@@ -766,9 +788,13 @@ def _announcement_fields(
     """
     url = (published or {}).get("url")
     link = ""
-    if isinstance(url, str) and url:
-        # No configured public base URL exists anywhere in the service, so
-        # this is the site-relative path convert.post_url wrote, shown as is.
+    if public_link:
+        # The full link the watcher filled in on publish (issue #71).
+        link = f'<p class="announce-url">Published at <code>{escape(public_link)}</code></p>'
+    elif isinstance(url, str) and url:
+        # No public base URL is known (the site has no absolute baseURL, or
+        # no merge has filled one yet), so this is the site-relative path
+        # convert.post_url wrote, shown as is.
         link = f'<p class="announce-url">Published at <code>{escape(url)}</code></p>'
     rows = "".join(
         f'<label class="lat-label" for="announcement_{key}">{escape(label)}</label>'
@@ -896,6 +922,7 @@ def editor_page(
     details = status_details(
         draft["status"],
         came_back=came_back,
+        preview_built=preview_url is not None,
         has_preview=has_preview,
         publish_run_active=publish_run_active,
         publish_pr_open=publish_pr_open,
@@ -935,7 +962,7 @@ def editor_page(
 <aside class="editor-side">
 {_post_info(draft, last_run, preview_url, post_url)}
 {_panel("frontmatter-panel", "Frontmatter", _frontmatter_fields(frontmatter, draft["images"], draft["slug"], draft_id, include_title=False, form_id=EDIT_FORM_ID), open_=False, refresh=False)}
-{_panel("announcements-panel", "Announcements", _announcement_fields(draft.get("announcements") or {}, draft.get("published"), EDIT_FORM_ID), open_=False, refresh=False)}
+{_panel("announcements-panel", "Announcements", _announcement_fields(draft.get("announcements") or {}, draft.get("published"), EDIT_FORM_ID, draft.get("announcement_link")), open_=False, refresh=False)}
 {_panel("feedback-panel", "Feedback", _feedback_log(feedback), open_=True, count=len(feedback))}
 {_panel("images-panel", "Images", _image_upload_form(draft["id"], draft["images"]), open_=True, count=len(draft["images"]))}
 {_panel("versions-panel", "Version history", _version_history(draft["id"], versions), open_=False, count=len(versions))}

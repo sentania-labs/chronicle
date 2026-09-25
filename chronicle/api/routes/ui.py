@@ -28,7 +28,7 @@ from ..errors import ApiError
 from ..images import MAX_IMAGE_BYTES, alt_text_for, safe_upload_filename
 from ..models import ANNOUNCEMENT_CHANNELS, Draft, Material, Submission
 from ..pagination import Page, paginate
-from ..store import Store
+from ..store import Store, preview_is_current
 from ..tokens import UI_COMMIT_AUTHOR as UI_ACTOR_NAME
 from ..ui_actions import staged_refusal
 from ..ui_deps import banner_enabled, check_same_origin, get_services, require_ui_consumer
@@ -68,15 +68,16 @@ def _preview_url(run: Any) -> str | None:
     return url if isinstance(url, str) else None
 
 
-def _has_current_preview(run: Any, version_no: int) -> bool:
+def _has_current_preview(run: Any, draft: Draft) -> bool:
     """A preview of the draft's current text exists: the last preview run
-    succeeded and built the version the draft is at now (a run with no
-    recorded `built_version` predates the field and counts). A save after the
-    build makes it stale, which is what keeps Publish behind "Preview first"
-    after an edit to a `previewed` draft, where a save leaves the status alone."""
+    succeeded and built the frontmatter and body the draft has now
+    (`store.preview_is_current`). A text save makes it stale, which is what
+    keeps Publish behind "Preview first" after an edit to a previewed
+    draft, where a save leaves the status alone; an announcement-only save
+    (issue #69) does not."""
     if _preview_url(run) is None:
         return False
-    return run.built_version is None or run.built_version == version_no
+    return preview_is_current(run, draft)
 
 
 # `create_draft` reports dropped frontmatter keys and failed image imports
@@ -104,14 +105,32 @@ def home() -> RedirectResponse:
 
 # --- Submissions ------------------------------------------------------------
 
+# The statuses the Submissions list shows by default: still waiting on a draft.
+OPEN_SUBMISSIONS = ("new", "claimed")
+
 
 @router.get("/content/submissions", response_class=HTMLResponse)
 def submissions_list(
-    request: Request, page: int = Query(1, ge=1), services: Services = Depends(get_services)
+    request: Request,
+    page: int = Query(1, ge=1),
+    show: str = Query("open"),
+    services: Services = Depends(get_services),
 ) -> HTMLResponse:
-    submissions = [_dump(s) for s in services.store.list_submissions()]
-    pg = paginate(submissions, page)
-    return HTMLResponse(tpl.submissions_list_page(pg, banner=banner_enabled(request)))
+    # The default view is the "needs writing" inbox (issue #65): only `new`
+    # and `claimed`. `?show=all` brings back drafted and discarded ones so
+    # history stays findable; any other value reads as the default.
+    show_all = show == "all"
+    everything = services.store.list_submissions()
+    shown = everything if show_all else [s for s in everything if s.status in OPEN_SUBMISSIONS]
+    pg = paginate([_dump(s) for s in shown], page)
+    return HTMLResponse(
+        tpl.submissions_list_page(
+            pg,
+            banner=banner_enabled(request),
+            show_all=show_all,
+            hidden=len(everything) - len(shown),
+        )
+    )
 
 
 def _submission_response(
@@ -421,7 +440,7 @@ def _offer_state(store: Store, draft: Draft, preview_run: Any) -> dict[str, bool
     click from it (`ui_actions.staged_refusal`), so both read one computation."""
     watch = store.get_watch(draft.id)
     return {
-        "has_preview": _has_current_preview(preview_run, draft.version_no),
+        "has_preview": _has_current_preview(preview_run, draft),
         "publish_pr_open": watch is not None and watch.kind == "publish",
         "unpublish_pr_open": watch is not None and watch.kind == "unpublish",
         # `Store.act_on_draft` separately refuses a re-approve while a
@@ -751,7 +770,7 @@ async def draft_action(
     feedback = str(form_data.get("feedback") or "") or None
     try:
         # Staged: the editor offers Preview on a published post and Publish
-        # on a previewed one, and the store runs the steps
+        # on a draft with a current preview, and the store runs the steps
         # `transitions.plan_action` says make that legal (nothing decided here).
         # The click is held to the offer the page rendered for it, and that
         # check runs inside the store's lock (`guard`), on the draft as it is

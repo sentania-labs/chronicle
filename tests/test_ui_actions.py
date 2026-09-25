@@ -32,11 +32,11 @@ def build_preview(services: Services, draft_id: str) -> None:
     store.finish_run(run.id, "builder-1", True, {"preview_url": f"/preview/{draft.slug}/"})
 
 
-def previewed_then_submitted(services: Services, draft_id: str) -> None:
-    """An `in_review` draft whose current text has a built preview (the preview
-    finishing moves a draft to `previewed`; submitting it puts it in review)."""
+def preview_in_review(services: Services, draft_id: str) -> None:
+    """An `in_review` draft whose current text has a built preview (a build
+    never changes a status, issue #70, so it stays in review)."""
+    assert services.store.get_draft(draft_id).status == "in_review"
     build_preview(services, draft_id)
-    services.store.act_on_draft(draft_id, "submit", "scott", True)
     assert services.store.get_draft(draft_id).status == "in_review"
 
 
@@ -105,7 +105,9 @@ def test_preview_is_present_on_published_and_stages_a_revise() -> None:
 
 
 def test_preview_is_present_from_every_working_status() -> None:
-    for status in ("drafting", "in_review", "revision_requested", "previewed", "published"):
+    # `previewed` is not a working status any more (issue #70): it is never
+    # produced, and `Store.migrate_previewed` moves a legacy record off it.
+    for status in ("drafting", "in_review", "revision_requested", "published"):
         assert by_action(offers_for(status, has_preview=True))["preview"].state == AVAILABLE
 
 
@@ -118,7 +120,7 @@ def test_publish_is_disabled_with_preview_first_until_a_preview_exists(status: s
 
 
 def test_publish_becomes_the_primary_action_once_a_preview_exists() -> None:
-    offers = by_action(offers_for("previewed", has_preview=True))
+    offers = by_action(offers_for("drafting", has_preview=True))
     assert offers["approve"].state == AVAILABLE
     assert offers["approve"].primary
     assert offers["approve"].steps == ("submit", "approve")
@@ -163,9 +165,9 @@ def test_publish_is_absent_while_a_publish_pr_or_run_is_in_flight() -> None:
 
 
 def test_republish_label_only_for_a_draft_with_a_published_record() -> None:
-    assert by_action(offers_for("previewed", has_preview=True))["approve"].label == "Publish"
+    assert by_action(offers_for("drafting", has_preview=True))["approve"].label == "Publish"
     assert (
-        by_action(offers_for("previewed", has_preview=True, republish=True))["approve"].label
+        by_action(offers_for("drafting", has_preview=True, republish=True))["approve"].label
         == "Republish"
     )
 
@@ -187,7 +189,7 @@ def test_plan_action_refuses_what_staging_cannot_reach() -> None:
     assert plan_action("revision_requested", "approve", True) is None
     assert plan_action("drafting", "reject", True) is None
     # A reserved action is never planned for a non-UI actor, staged or not.
-    assert plan_action("previewed", "approve", False) is None
+    assert plan_action("drafting", "approve", False) is None
     assert plan_action("in_review", "approve", False) is None
 
 
@@ -230,16 +232,26 @@ def test_clicking_preview_on_a_published_post_revises_it_then_queues_a_preview(
     assert run is not None and run.status == "queued"
 
 
-def test_clicking_publish_on_a_previewed_post_submits_then_approves(
+def test_clicking_publish_on_a_drafting_post_with_a_current_preview_submits_then_approves(
     client: TestClient, services: Services
 ) -> None:
-    draft_id = make_draft(services, "previewed")
+    # Issue #70: the preview leaves the draft at `drafting`, so Publish stages
+    # submit then approve, each a recorded status change.
+    draft_id = make_draft(services, "drafting", title="Staged publish")
     build_preview(services, draft_id)
+    assert services.store.get_draft(draft_id).status == "drafting"
     response = client.post(f"/content/drafts/{draft_id}/actions/approve")
     assert response.status_code == 200
     assert services.store.get_draft(draft_id).status == "approved"
     run = services.store.last_run(draft_id, kind="publish")
     assert run is not None and run.status == "queued"
+    events, _cursor = services.store.events_since(0)
+    path = [
+        (e.from_status, e.to_status)
+        for e in events
+        if e.draft_id == draft_id and e.type in ("draft.submit", "draft.approve")
+    ]
+    assert path == [("drafting", "in_review"), ("in_review", "approved")]
 
 
 def test_a_refused_click_writes_nothing(client: TestClient, services: Services) -> None:
@@ -273,13 +285,13 @@ def test_a_staged_publish_with_no_current_preview_is_refused_and_writes_nothing(
 def test_a_staged_publish_on_a_stale_preview_is_refused(
     client: TestClient, services: Services
 ) -> None:
-    draft_id = make_draft(services, "previewed")
+    draft_id = make_draft(services, "drafting")
     build_preview(services, draft_id)
     draft = services.store.get_draft(draft_id)
     services.store.save_draft(draft_id, "scott", draft.version_no, draft.frontmatter, "edited")
     refused = client.post(f"/content/drafts/{draft_id}/actions/approve")
     assert refused.status_code == 409
-    assert services.store.get_draft(draft_id).status == "previewed"
+    assert services.store.get_draft(draft_id).status == "drafting"
 
 
 def test_a_staged_publish_with_a_current_preview_still_runs_both_steps(
@@ -322,7 +334,7 @@ def test_the_route_and_the_page_read_one_offer(client: TestClient, services: Ser
                     services, status, title=f"Draft {status} {with_preview} {action}"
                 )
                 if with_preview:
-                    build_preview(services, draft_id)  # may move the draft to previewed
+                    build_preview(services, draft_id)  # never moves the status
                 actual = services.store.get_draft(draft_id).status
                 if plan_action(actual, action, True) is None:
                     continue
@@ -358,7 +370,7 @@ def test_a_one_step_publish_on_a_stale_preview_is_refused(
     client: TestClient, services: Services
 ) -> None:
     draft_id = make_draft(services, "in_review")
-    previewed_then_submitted(services, draft_id)
+    preview_in_review(services, draft_id)
     draft = services.store.get_draft(draft_id)
     services.store.save_draft(draft_id, "scott", draft.version_no, draft.frontmatter, "edited")
     assert services.store.get_draft(draft_id).status == "in_review"
@@ -371,7 +383,7 @@ def test_a_one_step_publish_with_a_current_preview_still_runs(
     client: TestClient, services: Services
 ) -> None:
     draft_id = make_draft(services, "in_review")
-    previewed_then_submitted(services, draft_id)
+    preview_in_review(services, draft_id)
     response = client.post(f"/content/drafts/{draft_id}/actions/approve")
     assert response.status_code == 200
     assert services.store.get_draft(draft_id).status == "approved"
@@ -389,7 +401,7 @@ def test_a_publish_retry_on_an_approved_post_still_needs_no_preview(
 # --- The offer check runs under the store lock -----------------------------------
 
 
-@pytest.mark.parametrize("status", ["previewed", "in_review"])
+@pytest.mark.parametrize("status", ["drafting", "in_review"])
 def test_a_save_landing_after_the_click_is_read_cannot_publish_an_unpreviewed_version(
     client: TestClient, services: Services, monkeypatch: pytest.MonkeyPatch, status: str
 ) -> None:
@@ -407,8 +419,6 @@ def test_a_save_landing_after_the_click_is_read_cannot_publish_an_unpreviewed_ve
     store = client.app.state.services.store  # type: ignore[attr-defined]
     draft_id = make_draft(services, status)
     build_preview(services, draft_id)
-    if status == "in_review":
-        store.act_on_draft(draft_id, "submit", "scott", True)
     assert store.get_draft(draft_id).status == status
     version = store.get_draft(draft_id).version_no
     real = store.act_on_draft_staged

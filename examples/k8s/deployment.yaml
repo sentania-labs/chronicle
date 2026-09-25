@@ -55,6 +55,11 @@ spec:
               subPath: site
             - name: tmp
               mountPath: /tmp
+            # Scheduled backups' local-path target (ADR 024); set
+            # /admin/backup's directory to /backups. api only. With the S3
+            # target only, drop this mount and the `backups` volume below.
+            - name: backups
+              mountPath: /backups
           readinessProbe:
             httpGet:
               path: /readyz
@@ -156,6 +161,9 @@ spec:
         - name: preview-site
           persistentVolumeClaim:
             claimName: chronicle-preview-site
+        - name: backups
+          persistentVolumeClaim:
+            claimName: chronicle-backups
         - name: tmp
           emptyDir: {}
         - name: builder-home

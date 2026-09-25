@@ -6,6 +6,8 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from chronicle.api.store import text_fingerprint
+
 from .conftest import auth
 
 FRONTMATTER = {"title": "Drift and Recovery", "tags": ["lab"]}
@@ -290,13 +292,51 @@ def test_preview_queues_a_run_and_pins_a_slug(client: TestClient, agent_token: s
     assert log["log"] == ""
 
     status = client.get(f"/v1/drafts/{draft_id}/status", headers=auth(agent_token)).json()
-    # A draft only becomes `previewed` once its build succeeds (the builder's
-    # answer, not the enqueue-time api's); queuing alone leaves it as it was.
+    # Neither queuing a preview nor its build changes the status (issue #70).
     assert status["status"] == "drafting"
     assert status["last_run"]["id"] == run_id
     assert status["preview_url"] is None
+    assert status["has_current_preview"] is False
     assert status["branch"] is None
     assert status["pr_url"] is None
+
+
+def test_status_reports_whether_the_preview_is_current(
+    client: TestClient, agent_token: str
+) -> None:
+    """Issue #70: a build no longer moves the status, so `has_current_preview`
+    is what says the last preview built the draft's current text."""
+    draft_id = new_draft(client, agent_token)
+    save(client, agent_token, draft_id, 0)
+    previewed = client.post(f"/v1/drafts/{draft_id}/actions/preview", headers=auth(agent_token))
+    run_id = previewed.json()["run_id"]
+
+    store = client.app.state.services.store  # type: ignore[attr-defined]
+    built = store.get_draft(draft_id)
+    store.start_run(
+        run_id,
+        "test-builder",
+        "0.164.0",
+        False,
+        built_version=built.version_no,
+        built_text=text_fingerprint(built.frontmatter, built.body),
+    )
+    store.finish_run(
+        run_id,
+        "test-builder",
+        succeeded=True,
+        result={"preview_url": "https://x/preview/drift-and-recovery/"},
+    )
+
+    status = client.get(f"/v1/drafts/{draft_id}/status", headers=auth(agent_token)).json()
+    assert status["status"] == "drafting"
+    assert status["has_current_preview"] is True
+
+    assert save(client, agent_token, draft_id, built.version_no, "edited").status_code == 200
+    status = client.get(f"/v1/drafts/{draft_id}/status", headers=auth(agent_token)).json()
+    assert status["status"] == "drafting"
+    assert status["has_current_preview"] is False
+    assert status["preview_url"] == "https://x/preview/drift-and-recovery/"
 
 
 def test_preview_and_status_carry_post_url_beside_preview_url(

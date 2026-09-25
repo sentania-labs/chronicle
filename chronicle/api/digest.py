@@ -47,6 +47,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -263,12 +264,17 @@ class HugoConventions:
     # post is written (`read_new_post_dir_from_state`). None until a digest
     # has walked a site that has any post.
     postdir: str | None = None
+    # The environment's own `baseURL` (issue #71): the site's public root,
+    # used to turn a post's site-relative url into the link announcements
+    # carry. None on a fallback read or when the config has none usable.
+    baseurl: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "contentdir": self.contentdir,
             "postdir": self.postdir,
             "staticdir": self.staticdir,
+            "baseurl": self.baseurl,
             "mainsections": list(self.mainsections),
             "taxonomies": self.taxonomies,
             "environment": self.environment,
@@ -371,7 +377,21 @@ def read_hugo_conventions(site_dir: Path, environment: str | None = None) -> Hug
         taxonomies=taxonomies,
         environment=env_name,
         source="hugo_config",
+        baseurl=_public_base_url(parsed.get("baseurl")),
     )
+
+
+def _public_base_url(value: Any) -> str | None:
+    """`baseURL` as an absolute http(s) root ending in `/`, or None. Hugo
+    accepts a bare `/` or an empty value for local sites; neither is a link
+    anyone outside can follow, so neither is used."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    parts = urlsplit(candidate)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return None
+    return candidate if candidate.endswith("/") else candidate + "/"
 
 
 TOOLCHAIN_STATE_PATH = ("state", "toolchain.json")
@@ -458,6 +478,21 @@ def with_observed_post_dir(
     if conventions.source != "hugo_config":
         return conventions
     return replace(conventions, postdir=dominant_post_dir(discovered, conventions.contentdir))
+
+
+def read_base_url_from_state(data_dir: Path) -> str | None:
+    """The public `baseURL` the last digest's `hugo config` read, from
+    `data/state/toolchain.json`, or None when no digest has run, the read
+    fell back, or the site has no absolute http(s) `baseURL` (issue #71)."""
+    path = data_dir.joinpath(*TOOLCHAIN_STATE_PATH)
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    conventions = loaded.get("conventions") if isinstance(loaded, dict) else None
+    if not isinstance(conventions, dict) or conventions.get("source") != "hugo_config":
+        return None
+    return _public_base_url(conventions.get("baseurl"))
 
 
 def read_new_post_dir_from_state(data_dir: Path) -> str:

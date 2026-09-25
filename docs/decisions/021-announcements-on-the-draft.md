@@ -80,3 +80,27 @@ is a text field with a copy button; the human does the posting.
   never heard of.
 - Announcement text is not reconciled against anything on main, because
   nothing on main ever carries it.
+
+## Amendment (issue #71): the published link is filled in on merge
+
+The "no configured public base URL" premise above was cheaper to lift than
+this ADR assumed: digest already runs `hugo config` against the site's
+production environment, and that output carries `baseURL`. Digest now keeps it
+(`HugoConventions.baseurl`, stored in `data/state/toolchain.json`), and only
+an absolute http(s) value counts; still no new setting.
+
+When the watcher observes a publish PR's merge, after the draft is
+`published`, it joins that base with `published.url` and asks
+`Store.fill_announcement_links` to put the link in (`announce.fill_links`):
+
+- every `{link}` becomes the URL; an announcement without one gets the URL on
+  its own last line; an empty announcement stays empty;
+- the link the last fill wrote is kept on the draft (`announcement_link`), so
+  a later publish at a different url swaps it instead of adding a second;
+- a second observation of the same merge changes nothing.
+
+The write is a new version authored `chronicle` with the same frontmatter and
+body. It never goes through `save_draft`, never changes the status, and a
+failure is logged without blocking the merge. A site with no usable `baseURL`
+leaves the announcements alone, and the panel keeps showing the site-relative
+path. Chronicle still posts nothing anywhere.

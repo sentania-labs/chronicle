@@ -28,13 +28,16 @@ from chronicle.api.ui_status import (
 from .conftest import auth
 from .test_ui import make_draft
 
+# Issue #70: everything before approval reads Draft, and approval is its own
+# word. `previewed` is never produced any more but still has a label, since a
+# record not yet migrated can load.
 EXPECTED = {
     "drafting": "Draft",
+    "in_review": "Draft",
     "previewed": "Draft",
     "revision_requested": "Draft",
     "unpublished": "Draft",
-    "in_review": "In review",
-    "approved": "In review",
+    "approved": "Approved",
     "published": "Published",
     "rejected": "Rejected",
 }
@@ -43,7 +46,7 @@ EXPECTED = {
 def test_every_status_has_a_label_and_the_labels_are_exactly_four_words() -> None:
     # A status added to the state machine fails here until it is given a label.
     assert set(STATUS_LABELS) == set(DRAFT_STATUSES)
-    assert FOUR_WORDS == ("Draft", "In review", "Published", "Rejected")
+    assert FOUR_WORDS == ("Draft", "Approved", "Published", "Rejected")
     for status in DRAFT_STATUSES:
         assert status_label(status) == EXPECTED[status]
     assert set(STATUS_LABELS.values()) == set(FOUR_WORDS)
@@ -74,13 +77,29 @@ def test_the_facts_the_finer_statuses_carried_are_detail() -> None:
     assert status_details("in_review") == []
     assert status_details("published") == []
     assert status_details("rejected") == []
-    assert status_details("previewed") == [Detail("Preview built")]
-    assert status_details("previewed", has_preview=False) == [Detail("Preview out of date")]
     assert status_details("unpublished") == [Detail("Was published")]
-    assert status_details("approved") == [Detail("Approved")]
+    # The badge already says Approved; the detail never repeats it (issue #70).
+    assert status_details("approved") == []
     assert status_details("drafting", came_back=True) == [Detail("Came back from review", "warn")]
+    # A built preview is detail on a working draft: current or out of date.
+    for status in ("drafting", "in_review", "revision_requested"):
+        assert status_details(status, preview_built=True, has_preview=True) == [
+            Detail("Preview built")
+        ]
+        assert status_details(status, preview_built=True, has_preview=False) == [
+            Detail("Preview out of date")
+        ]
+    # No build at all (or the board, which passes neither): no preview detail.
+    assert status_details("drafting", has_preview=True) == []
+    # Past the working stages a preview is not news.
+    for status in ("approved", "published", "rejected", "unpublished", "previewed"):
+        details = status_details(status, preview_built=True, has_preview=True)
+        assert Detail("Preview built") not in details
     # Two facts at once: both show.
-    assert [d.text for d in status_details("previewed", came_back=True)] == [
+    assert [
+        d.text
+        for d in status_details("drafting", came_back=True, preview_built=True, has_preview=True)
+    ] == [
         "Came back from review",
         "Preview built",
     ]
@@ -125,20 +144,23 @@ def test_board_shows_the_four_word_status_with_the_detail_beside_it(
     client: TestClient, services: Services
 ) -> None:
     make_draft(services, "revision_requested", title="Sent back")
-    make_draft(services, "previewed", title="Built")
+    built = make_draft(services, "in_review", title="Built")
+    _build_preview(services, built)
     make_draft(services, "unpublished", title="Pulled", with_publish=True)
     make_draft(services, "approved", title="Going out")
     board = client.get("/content/drafts").text
     assert "Needs revision" not in board
     assert "Previewed<" not in board
     assert "Unpublished<" not in board
-    assert ">Approved</span>" in board
-    for detail in ("Came back from review", "Preview built", "Was published"):
+    for detail in ("Came back from review", "Was published"):
         assert board.count(f">{detail}</span>") == 1
+    # The board does not know whether a preview is current, so it shows none.
+    assert "Preview built" not in board and "Preview out of date" not in board
     # The warn tone moved with the signal.
     assert 'lat-badge--warn">Came back from review</span>' in board
     assert board.count(">Draft</span>") == 3
-    assert board.count(">In review</span>") == 1
+    assert board.count(">Approved</span>") == 1
+    assert ">In review</span>" not in board
 
 
 def test_a_preview_does_not_erase_that_a_reviewer_sent_it_back(
@@ -162,12 +184,23 @@ def test_a_preview_does_not_erase_that_a_reviewer_sent_it_back(
     assert '<span id="status-detail" data-refresh>' in editor
     assert ">Came back from review</span>" in editor
 
-    # Resubmitting answers it: the draft is In review and the board says so.
+    # Resubmitting answers it: the draft is in review, which reads Draft.
     client.post(f"/content/drafts/{draft_id}/actions/submit")
     assert services.store.get_draft(draft_id).status == "in_review"
     board = client.get("/content/drafts").text
     assert "Came back from review" not in board
-    assert ">In review</span>" in board
+    assert ">Draft</span>" in board
+    assert ">In review</span>" not in board
+
+
+def _build_preview(services: Services, draft_id: str) -> None:
+    """A succeeded preview run of the draft's current version."""
+    store = services.store
+    draft = store.get_draft(draft_id)
+    run = store._queue_run(draft_id, "preview")
+    store.index.upsert_run(run)
+    store.start_run(run.id, "builder-1", "0.164.0", False, built_version=draft.version_no)
+    store.finish_run(run.id, "builder-1", True, {"preview_url": f"/preview/{draft.slug}/"})
 
 
 def _finish_queued_preview(services: Services, draft_id: str) -> None:
@@ -179,19 +212,20 @@ def _finish_queued_preview(services: Services, draft_id: str) -> None:
     store.finish_run(run.id, "builder-1", True, {"preview_url": f"/preview/{draft.slug}/"})
 
 
-def test_came_back_shows_once_previewed_straight_out_of_revision_requested(
+def test_came_back_still_shows_after_a_preview_straight_out_of_revision_requested(
     client: TestClient, services: Services
 ) -> None:
     """The event-ordering fix, first half: request revision, revise (via
-    Preview), and a successful build lands the draft on `previewed` with no
-    resubmit yet. The request is still open, so the badge must show."""
+    Preview), and a successful build, which leaves the draft at `drafting`
+    (issue #70), with no resubmit yet. The request is still open, so the
+    badge must show."""
     draft_id = make_draft(services, "in_review", title="Reviewed")
     client.post(
         f"/content/drafts/{draft_id}/actions/request_revision", data={"feedback": "tighten it"}
     )
     client.post(f"/content/drafts/{draft_id}/actions/preview")
     _finish_queued_preview(services, draft_id)
-    assert services.store.get_draft(draft_id).status == "previewed"
+    assert services.store.get_draft(draft_id).status == "drafting"
 
     board = client.get("/content/drafts").text
     assert ">Came back from review</span>" in board
@@ -204,22 +238,22 @@ def test_came_back_does_not_show_after_a_full_resubmit_round_trip(
 ) -> None:
     """The event-ordering fix, second half, and the reviewer's own scenario
     (part-b, fix round finding A): request revision, revise, preview, a real
-    resubmit back to in_review, then a further preview success lands on
-    `previewed` again. The resubmit answers the request, so the badge must
-    not show even though the status is the same `previewed` as the first case."""
+    resubmit back to in_review, then a further preview success, which leaves
+    it in review (issue #70). The resubmit answers the request, so the badge
+    must not show."""
     draft_id = make_draft(services, "in_review", title="Reviewed")
     client.post(
         f"/content/drafts/{draft_id}/actions/request_revision", data={"feedback": "tighten it"}
     )
     client.post(f"/content/drafts/{draft_id}/actions/preview")
     _finish_queued_preview(services, draft_id)
-    assert services.store.get_draft(draft_id).status == "previewed"
+    assert services.store.get_draft(draft_id).status == "drafting"
 
     client.post(f"/content/drafts/{draft_id}/actions/submit")
     assert services.store.get_draft(draft_id).status == "in_review"
     client.post(f"/content/drafts/{draft_id}/actions/preview")
     _finish_queued_preview(services, draft_id)
-    assert services.store.get_draft(draft_id).status == "previewed"
+    assert services.store.get_draft(draft_id).status == "in_review"
 
     board = client.get("/content/drafts").text
     assert "Came back from review" not in board
@@ -248,15 +282,39 @@ def test_a_revised_published_post_does_not_show_a_stale_request(
 def test_editor_details_come_from_what_the_page_already_knows(
     client: TestClient, services: Services
 ) -> None:
-    draft_id = make_draft(services, "previewed")
+    draft_id = make_draft(services, "in_review")
     editor = client.get(f"/content/drafts/{draft_id}").text
-    # `make_draft` records no preview run, so there is no current preview.
-    assert ">Preview out of date</span>" in editor
+    # `make_draft` records no preview run, so there is no preview detail.
+    assert "Preview built" not in editor and "Preview out of date" not in editor
     assert re.search(r'id="status-pill"[^>]*>Draft</span>', editor)
+
+    _build_preview(services, draft_id)
+    editor = client.get(f"/content/drafts/{draft_id}").text
+    assert ">Preview built</span>" in editor
+    assert re.search(r'id="status-pill"[^>]*>Draft</span>', editor)
+
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(draft_id, "scott", draft.version_no, draft.frontmatter, "edited")
+    editor = client.get(f"/content/drafts/{draft_id}").text
+    assert ">Preview out of date</span>" in editor
+    assert "Preview built" not in editor
+
     published = make_draft(services, "approved", with_publish=True)
     editor = client.get(f"/content/drafts/{published}").text
-    assert ">In review</span>" in editor
-    assert ">Approved</span>" in editor
+    assert ">In review</span>" not in editor
+    assert re.search(r'id="status-pill"[^>]*>Approved</span>', editor)
+
+
+def test_an_approved_post_shows_exactly_one_approved_badge(
+    client: TestClient, services: Services
+) -> None:
+    # Issue #70: Approved is the status word now, so the detail no longer
+    # repeats it beside the badge.
+    draft_id = make_draft(services, "approved", with_publish=True)
+    _build_preview(services, draft_id)
+    editor = client.get(f"/content/drafts/{draft_id}").text
+    assert editor.count(">Approved</span>") == 1
+    assert re.search(r'id="status-pill"[^>]*>Approved</span>', editor)
 
 
 # --- The filter ------------------------------------------------------------
@@ -271,7 +329,8 @@ def test_the_filter_lists_four_words_that_map_onto_all_eight_values() -> None:
     values = dict((text, value) for value, text in options)
     assert values["Published"] == "published"
     assert values["Rejected"] == "rejected"
-    assert parse_status_filter(values["In review"]) == ["in_review", "approved"]
+    assert parse_status_filter(values["Approved"]) == ["approved"]
+    assert "in_review" in parse_status_filter(values["Draft"])
     assert parse_status_filter("previewed") == ["previewed"]
     assert parse_status_filter(None) == []
     # A repeated status in a hand-typed URL does not double the list.
@@ -286,19 +345,19 @@ def test_board_filter_has_each_word_once_and_no_raw_status_text(
     select = board[board.index('<select class="lat-select" id="status"') :]
     select = select[: select.index("</select>")]
     texts = re.findall(r">([^<]+)</option>", select)
-    assert texts == ["all", "Draft", "In review", "Published", "Rejected"]
+    assert texts == ["all", "Draft", "Approved", "Published", "Rejected"]
     assert '<option value="published">Published</option>' in select
     assert '<option value="rejected">Rejected</option>' in select
     draft_value = dict((text, value) for value, text in filter_options())["Draft"]
     assert sorted(draft_value.split(",")) == sorted(
-        ["drafting", "previewed", "revision_requested", "unpublished"]
+        ["drafting", "in_review", "previewed", "revision_requested", "unpublished"]
     )
     assert f'<option value="{draft_value}">Draft</option>' in select
 
 
 def test_a_word_filter_finds_every_status_it_covers(client: TestClient, services: Services) -> None:
     make_draft(services, "drafting", title="Alpha")
-    make_draft(services, "previewed", title="Bravo")
+    make_draft(services, "previewed", title="Bravo")  # a legacy record, not yet migrated
     make_draft(services, "revision_requested", title="Charlie")
     make_draft(services, "unpublished", title="Delta", with_publish=True)
     make_draft(services, "in_review", title="Echo")
@@ -307,14 +366,15 @@ def test_a_word_filter_finds_every_status_it_covers(client: TestClient, services
 
     draft_value = dict((text, value) for value, text in filter_options())["Draft"]
     found = client.get("/content/drafts", params={"status": draft_value}).text
-    for shown in ("Alpha", "Bravo", "Charlie", "Delta"):
+    for shown in ("Alpha", "Bravo", "Charlie", "Delta", "Echo"):
         assert shown in found
-    for hidden in ("Echo", "Foxtrot", "Golf"):
+    for hidden in ("Foxtrot", "Golf"):
         assert hidden not in found
     assert f'<option value="{draft_value}" selected>Draft</option>' in found
 
-    review = client.get("/content/drafts", params={"status": "in_review,approved"}).text
-    assert "Echo" in review and "Foxtrot" in review and "Alpha" not in review
+    approved = client.get("/content/drafts", params={"status": "approved"}).text
+    assert "Foxtrot" in approved and "Echo" not in approved and "Alpha" not in approved
+    assert '<option value="approved" selected>Approved</option>' in approved
 
 
 def test_a_raw_status_query_value_still_works_and_is_not_mislabelled(
@@ -339,14 +399,15 @@ def test_admin_status_counts_are_summed_under_the_four_words(
     for status in ("drafting", "previewed", "revision_requested", "in_review", "approved"):
         make_draft(services, status)
     assert label_counts({"drafting": 1, "previewed": 2, "in_review": 1, "approved": 1}) == {
-        "Draft": 3,
-        "In review": 2,
+        "Draft": 4,
+        "Approved": 1,
         "Published": 0,
         "Rejected": 0,
     }
     page = admin_client.get("/admin").text
     assert page.count("<td>Draft</td>") == 1
-    assert page.count("<td>In review</td>") == 1
+    assert page.count("<td>Approved</td>") == 1
+    assert "<td>In review</td>" not in page
     assert "<td>Previewed</td>" not in page and "<td>Needs revision</td>" not in page
 
 
@@ -384,7 +445,10 @@ def test_editor_pill_uses_the_label(client: TestClient, services: Services) -> N
 
 def test_admin_status_page_uses_labels(admin_client: TestClient, services: Services) -> None:
     make_draft(services, "in_review")
+    make_draft(services, "approved")
     response = admin_client.get("/admin")
     assert response.status_code == 200
-    assert "In review" in response.text
+    assert "<td>Approved</td>" in response.text
+    assert "<td>approved</td>" not in response.text
+    assert "In review" not in response.text
     assert "<td>in_review</td>" not in response.text
