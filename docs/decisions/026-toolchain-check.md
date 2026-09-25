@@ -42,16 +42,20 @@ Scott when any of these fell behind, and the blog still carries
 - **Actions open PRs, never push.** Each goes through the same
   `GitHubRepoOps` the publisher uses (the GitHub App, or test-token mode) and
   builds one commit off the default branch's head on a
-  `chronicle/toolchain/<action>-<path>` branch (`bump-tag`, `bump-head` or
-  `remove`). A second click refreshes the same PR.
+  `chronicle/toolchain/<action>-<path>-<hash>` branch (`bump-tag`,
+  `bump-head` or `remove`; the hash of the exact path keeps two paths that
+  slug alike apart). A second click refreshes the same PR.
   - Move a submodule: a gitlink tree entry at the latest tag's commit or at
     upstream head. Only those two commits, as found by the last check, can
     be chosen; the form names `tag` or `head`, never a sha. Refused when
-    the default branch's gitlink no longer matches the check's, so a stale
-    check never builds a PR that moves a theme backwards.
+    the default branch's gitlink or the submodule's url no longer matches
+    the check's, so a stale check never builds a PR that moves a theme
+    backwards or points a new upstream at a commit it may not have.
   - Remove an unused theme: deletes the gitlink and its `.gitmodules`
     section (read from the default branch through the API, every other line
     kept byte for byte), or `.gitmodules` itself when nothing is left.
+    Refused unless the default branch is still at the commit the check read
+    (`site_commit`), since "unused" was decided against that commit's config.
   - The page links the opened PR until the pinned commit changes, and
     keeps the buttons, so a closed PR never leaves a row with nothing to
     press.

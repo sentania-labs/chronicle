@@ -12,6 +12,7 @@ to the default branch.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -349,6 +350,7 @@ def _read_local(site_dir: Path) -> dict[str, Any]:
     with digest_mod.site_clone_lock():
         if not (site_dir / ".git").exists():
             return {"missing": True}
+        site_commit = digest_mod._run(["rev-parse", "HEAD"], cwd=site_dir).stdout.strip()
         toolchain = digest_mod.parse_toolchain(site_dir)
         pinned = {item["path"]: item["commit"] for item in toolchain.submodules}
         gitmodules_path = site_dir / ".gitmodules"
@@ -369,6 +371,7 @@ def _read_local(site_dir: Path) -> dict[str, Any]:
         )
     return {
         "missing": False,
+        "site_commit": site_commit,
         "site_hugo": toolchain.hugo_version,
         "pinned": pinned,
         "gitmodules": gitmodules,
@@ -409,6 +412,9 @@ def run_check(store: Store, admin: AdminServices, run: LsRemote = ls_remote) -> 
 
     config = local["config"]
     result["config"] = config
+    # The main commit every row below describes; a removal is refused once
+    # main has moved past it (Codex round), since the theme may be in use.
+    result["site_commit"] = local["site_commit"]
     themes: list[dict[str, Any]] = []
     for section in local["gitmodules"]:
         path = section["path"]
@@ -537,8 +543,11 @@ def _theme_row(state_dir: Path, path: str) -> dict[str, Any]:
 
 
 def _branch_name(kind: str, path: str) -> str:
+    """A readable slug plus a short hash of the exact path, so two paths
+    that slug the same (`a+b`, `a b`) never share a branch (Codex round)."""
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", path).strip("-") or "submodule"
-    return f"{BRANCH_PREFIX}{kind}-{slug}"
+    digest = hashlib.sha256(path.encode("utf-8")).hexdigest()[:8]
+    return f"{BRANCH_PREFIX}{kind}-{slug}-{digest}"
 
 
 def _main_gitmodules(ops: GitHubRepoOps, default_branch: str) -> str:
@@ -595,8 +604,18 @@ def bump_submodule(
         raise ToolchainActionError(f"the last check found no {which} commit for {path}")
     if target == row.get("pinned"):
         raise ToolchainActionError(f"{path} is already at {label}")
-    if not any(s["path"] == path for s in parse_gitmodules(_main_gitmodules(ops, default_branch))):
+    on_main_section = next(
+        (s for s in parse_gitmodules(_main_gitmodules(ops, default_branch)) if s["path"] == path),
+        None,
+    )
+    if on_main_section is None:
         raise ToolchainActionError(f"{path} is no longer a submodule on the default branch")
+    if on_main_section.get("url", "") != row.get("url", ""):
+        # The target commit came from the old upstream (Codex round).
+        raise ToolchainActionError(
+            f"{path}'s url on the default branch has changed since the last check;"
+            " run a check first"
+        )
     on_main = ops.get_contents(path, default_branch) or {}
     if on_main.get("type") != "submodule" or on_main.get("sha") != row.get("pinned"):
         # Main moved (a hand bump, another PR) after the check: a PR built
@@ -643,6 +662,14 @@ def remove_theme(
     row = _theme_row(state_dir, path)
     if not row.get("unused"):
         raise ToolchainActionError(f"{path} is not flagged unused by the last check")
+    checked_at_commit = (load_result(state_dir) or {}).get("site_commit")
+    ref = ops.get_ref(f"heads/{default_branch}")
+    if not checked_at_commit or ref is None or ref["object"]["sha"] != checked_at_commit:
+        # "Unused" was decided against that commit's config; main has moved
+        # since, and may use the theme now (Codex round).
+        raise ToolchainActionError(
+            "the default branch has changed since the last check; run a digest and a check first"
+        )
     remaining = remove_gitmodules_section(_main_gitmodules(ops, default_branch), path)
     if remaining is None:
         raise ToolchainActionError(f"{path} is no longer a submodule on the default branch")

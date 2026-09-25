@@ -270,6 +270,10 @@ def _checked(
     _config(monkeypatch, {"themes": ["blowfish"], "themesdir": "themes"})
     tc.run_check(store, admin)
     ops = FakeRepoOps()
+    # main is at the commit the check read.
+    head = git(store.site_dir, "rev-parse", "HEAD")
+    ops.refs["heads/main"] = head
+    ops.commits[head] = {"tree": {"sha": "base-tree-1"}}
     ops.contents[".gitmodules"] = base64.b64encode(
         (store.site_dir / ".gitmodules").read_bytes()
     ).decode("ascii")
@@ -294,10 +298,12 @@ def test_moving_a_theme_to_its_latest_tag_opens_one_pr(
             "sha": world["blowfish"]["v2.81.0"],
         }
     ]
-    assert ops.refs["heads/chronicle/toolchain/bump-tag-themes-blowfish"]
+    branch = next(ref for ref in ops.refs if ref.startswith("heads/chronicle/toolchain/"))
+    assert branch.startswith("heads/chronicle/toolchain/bump-tag-themes-blowfish-")
     assert ops.pulls[1]["base"]["ref"] == "main"
     assert record["pr_url"] == ops.pulls[1]["html_url"]
-    assert ops.refs["heads/main"] == "base-commit-1"  # nothing pushed to the default branch
+    # nothing pushed to the default branch
+    assert ops.refs["heads/main"] == git(store.site_dir, "rev-parse", "HEAD")
 
     tc.bump_submodule(admin.state_dir, ops, "main", "themes/blowfish", "tag")
     assert len(ops.pulls) == 1  # the second click refreshes the same PR
@@ -558,3 +564,35 @@ def test_quoted_and_mixed_case_gitmodules_values_parse() -> None:
         {"name": "t", "path": "themes/t", "url": "https://github.com/o/t"}
     ]
     assert tc.remove_gitmodules_section(text, "themes/t") == ""
+
+
+def test_a_removal_is_refused_once_main_moved_past_the_check(
+    world: dict[str, Any], store: Any, admin: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round: the theme was unused at the checked commit; main may use
+    it now."""
+    ops = _checked(world, store, admin, monkeypatch)
+    ops.refs["heads/main"] = "a-later-commit"
+    with pytest.raises(tc.ToolchainActionError, match="changed since the last check"):
+        tc.remove_theme(admin.state_dir, ops, "main", "themes/hugo-clarity")
+    assert ops.pulls == {}
+
+
+def test_a_bump_is_refused_when_the_submodule_url_changed(
+    world: dict[str, Any], store: Any, admin: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round: the target commit came from the old upstream."""
+    ops = _checked(world, store, admin, monkeypatch)
+    moved = (
+        (store.site_dir / ".gitmodules")
+        .read_text("utf-8")
+        .replace(str(world["root"] / "up" / "blowfish"), "https://github.com/fork/blowfish")
+    )
+    ops.contents[".gitmodules"] = base64.b64encode(moved.encode("utf-8")).decode("ascii")
+    with pytest.raises(tc.ToolchainActionError, match="url on the default branch has changed"):
+        tc.bump_submodule(admin.state_dir, ops, "main", "themes/blowfish", "tag")
+    assert ops.pulls == {}
+
+
+def test_paths_that_slug_alike_get_different_branches() -> None:
+    assert tc._branch_name("remove", "themes/a+b") != tc._branch_name("remove", "themes/a b")
