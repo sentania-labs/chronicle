@@ -15,6 +15,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -22,6 +23,7 @@ from chronicle.api import toolchain_check as tc
 from chronicle.api.publisher import RepoTarget
 from chronicle.api.routes import admin as admin_routes
 
+from .conftest import requires_hugo
 from .fakes import FakeRepoOps
 
 GIT_ENV = {
@@ -271,6 +273,8 @@ def _checked(
     ops.contents[".gitmodules"] = base64.b64encode(
         (store.site_dir / ".gitmodules").read_bytes()
     ).decode("ascii")
+    ops.contents["themes/blowfish"] = {"type": "submodule", "sha": world["blowfish"]["v2.80.0"]}
+    ops.contents["themes/hugo-clarity"] = {"type": "submodule", "sha": world["clarity"]["v1.0.0"]}
     return ops
 
 
@@ -290,7 +294,7 @@ def test_moving_a_theme_to_its_latest_tag_opens_one_pr(
             "sha": world["blowfish"]["v2.81.0"],
         }
     ]
-    assert ops.refs["heads/chronicle/toolchain/bump-blowfish"]
+    assert ops.refs["heads/chronicle/toolchain/bump-tag-themes-blowfish"]
     assert ops.pulls[1]["base"]["ref"] == "main"
     assert record["pr_url"] == ops.pulls[1]["html_url"]
     assert ops.refs["heads/main"] == "base-commit-1"  # nothing pushed to the default branch
@@ -425,13 +429,15 @@ def test_an_action_with_no_github_configured_is_a_409(admin_client: TestClient) 
     assert "No GitHub App" in response.text
 
 
-def test_an_opened_pr_replaces_its_button_until_the_pin_moves(
+def test_an_opened_pr_is_linked_and_its_button_stays(
     world: dict[str, Any],
     store: Any,
     admin: Any,
     admin_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Pressing the button again refreshes the same PR, and a PR Scott closed
+    must not leave the row with nothing to press."""
     ops = _checked(world, store, admin, monkeypatch)
     target = RepoTarget(ops=ops, owner="o", repo="r", default_branch="main")
     monkeypatch.setattr(admin_routes, "build_repo_target", lambda a: target)
@@ -442,4 +448,113 @@ def test_an_opened_pr_replaces_its_button_until_the_pin_moves(
     assert response.status_code == 200
     assert "PR opened: https://github.com/o/r/pull/1" in response.text
     assert "PR open: " in response.text
-    assert "PR: move to v2.81.0" not in response.text
+    assert "PR: move to v2.81.0" in response.text
+
+
+def test_a_network_failure_on_an_action_is_a_502(
+    world: dict[str, Any],
+    store: Any,
+    admin: Any,
+    admin_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ops = _checked(world, store, admin, monkeypatch)
+
+    def unreachable(base_tree: str, entries: list[dict[str, Any]]) -> str:
+        raise httpx.ConnectError("no route to api.github.com")
+
+    monkeypatch.setattr(ops, "create_tree", unreachable)
+    target = RepoTarget(ops=ops, owner="o", repo="r", default_branch="main")
+    monkeypatch.setattr(admin_routes, "build_repo_target", lambda a: target)
+    response = admin_client.post(
+        "/admin/toolchain/bump", data={"path": "themes/blowfish", "which": "tag"}
+    )
+    assert response.status_code == 502
+    assert "no route to api.github.com" in response.text
+
+
+def test_check_now_runs_one_check_in_the_background(
+    admin_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_check(store: Any, admin: Any) -> None:
+        started.set()
+        release.wait(5)
+
+    monkeypatch.setattr(tc, "run_check_logged", fake_check)
+    first = admin_client.post("/admin/toolchain/check")
+    assert first.status_code == 200
+    assert started.wait(5)
+    second = admin_client.post("/admin/toolchain/check")
+    assert second.status_code == 409
+    release.set()
+
+
+def test_a_bump_is_refused_when_main_moved_since_the_check(
+    world: dict[str, Any], store: Any, admin: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ops = _checked(world, store, admin, monkeypatch)
+    ops.contents["themes/blowfish"] = {"type": "submodule", "sha": world["blowfish"]["v2.81.0"]}
+    with pytest.raises(tc.ToolchainActionError, match="changed since the last check"):
+        tc.bump_submodule(admin.state_dir, ops, "main", "themes/blowfish", "head")
+    assert ops.pulls == {}
+
+
+def test_a_theme_loaded_by_module_import_counts_as_used(tmp_path: Path) -> None:
+    (tmp_path / "themes" / "main").mkdir(parents=True)
+    (tmp_path / "themes" / "main" / "hugo.toml").write_text(
+        '[module]\n[[module.imports]]\npath = "component"\n', encoding="utf-8"
+    )
+    assert tc.used_themes(tmp_path, "themes", ["main"]) == {"main", "component"}
+    assert set(
+        tc._imported_names({"module": {"imports": [{"path": "github.com/o/blowfish"}]}})
+    ) == {
+        "github.com/o/blowfish",
+        "blowfish",
+    }
+
+
+def _hugo_site(site: Path, config: str) -> Path:
+    site.mkdir(parents=True)
+    (site / "hugo.toml").write_text('baseURL = "https://example.com/"\n' + config, "utf-8")
+    for name in ("blowfish", "hugo-clarity"):
+        (site / "themes" / name).mkdir(parents=True)
+    return site
+
+
+@requires_hugo
+def test_real_hugo_config_names_the_configured_theme(tmp_path: Path) -> None:
+    site = _hugo_site(tmp_path / "site", 'theme = "blowfish"\n')
+    assert tc.read_site_hugo_config(site) == {"themes": ["blowfish"], "themesdir": "themes"}
+
+
+@requires_hugo
+def test_real_hugo_config_counts_a_module_import(tmp_path: Path) -> None:
+    site = _hugo_site(tmp_path / "site", '[module]\n[[module.imports]]\npath = "blowfish"\n')
+    config = tc.read_site_hugo_config(site)
+    assert config is not None
+    assert "blowfish" in config["themes"]
+
+
+@requires_hugo
+def test_real_hugo_config_with_no_theme_marks_nothing_unused(tmp_path: Path) -> None:
+    site = _hugo_site(tmp_path / "site", "")
+    assert tc.read_site_hugo_config(site) is None
+
+
+def test_date_tags_do_not_outrank_releases_and_a_newer_image_is_not_behind() -> None:
+    assert tc.latest_tag([("a", "refs/tags/20240101"), ("b", "refs/tags/v2.1.0")]) == {
+        "tag": "v2.1.0",
+        "sha": "b",
+    }
+    assert not tc.hugo_behind("0.166.0", "0.165.1")
+
+
+def test_quoted_and_mixed_case_gitmodules_values_parse() -> None:
+    text = '[submodule "t"]\n\tPath = "themes/t"\n\turl = "https://github.com/o/t"\n'
+    assert tc.parse_gitmodules(text) == [
+        {"name": "t", "path": "themes/t", "url": "https://github.com/o/t"}
+    ]
+    assert tc.remove_gitmodules_section(text, "themes/t") == ""

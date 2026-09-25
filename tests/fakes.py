@@ -21,9 +21,10 @@ class FakeRepoOps:
         }
         self.trees: dict[str, list[dict[str, Any]]] = {"base-tree-1": []}
         self.blobs: dict[str, str] = {}
-        # Test-only: files `get_contents` returns, keyed by path, as the
-        # base64 `content` the real API sends.
-        self.contents: dict[str, str] = {}
+        # Test-only: what `get_contents` returns, keyed by path: a string is
+        # a file's base64 `content`, a dict is returned as is (a submodule
+        # entry, `{"type": "submodule", "sha": ...}`).
+        self.contents: dict[str, Any] = {}
         self.pulls: dict[int, dict[str, Any]] = {}
         self._next_pr = 1
         # Test-only: name a call that should raise instead of succeeding,
@@ -63,8 +64,11 @@ class FakeRepoOps:
 
     def get_contents(self, path: str, ref: str) -> dict[str, Any] | None:
         self.calls.append("get_contents")
-        if path in self.contents:
-            return {"path": path, "content": self.contents[path], "encoding": "base64"}
+        found = self.contents.get(path)
+        if isinstance(found, dict):
+            return found
+        if found is not None:
+            return {"path": path, "content": found, "encoding": "base64"}
         return None
 
     def create_blob(self, content_b64: str) -> str:

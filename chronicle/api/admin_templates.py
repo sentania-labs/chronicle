@@ -640,14 +640,13 @@ def _post_button(action: str, label: str, fields: dict[str, str], *, danger: boo
 
 
 def _theme_actions(row: dict[str, Any], action: dict[str, Any] | None) -> str:
-    if action is not None and action.get("pinned_at_open") == row.get("pinned"):
-        # The PR this page opened has not landed yet (the pinned commit has
-        # not moved), so link it instead of offering the same action again.
-        return (
-            f'PR open: <a href="{escape(str(action.get("pr_url", "")))}">'
-            f"{escape(str(action.get('pr_url', '')))}</a>"
-        )
     buttons = []
+    if action is not None and action.get("pinned_at_open") == row.get("pinned"):
+        # A PR this page opened has not landed (the pin has not moved). The
+        # buttons stay: pressing one again refreshes that PR, and a PR Scott
+        # closed must not leave the row with no way forward.
+        url = escape(str(action.get("pr_url", "")))
+        buttons.append(f'PR open: <a href="{url}">{url}</a><br>')
     tag = row.get("latest_tag") or {}
     if tag.get("sha") and tag.get("sha") != row.get("pinned"):
         buttons.append(

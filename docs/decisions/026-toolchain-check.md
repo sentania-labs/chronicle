@@ -25,12 +25,14 @@ Scott when any of these fell behind, and the blog still carries
     so an annotated tag names its commit).
   - Hugo modules: each `require` in the site's `go.mod` on a github.com path,
     set against its highest tag.
-- **Unused themes:** a submodule directly under `themesdir` whose name is not
-  the configured `theme` and is not imported by one (read from the used
-  theme's own `theme.toml`, `hugo.toml` or `config.*`, transitively). The
-  configured theme comes from the site's own `hugo config`. When that read
-  fails, no theme is ever marked unused, so a broken config read can never
-  offer to delete the theme the site depends on.
+- **Unused themes:** a submodule directly under `themesdir` that nothing
+  loads. Loaded means named by the site's `theme` or a `module.imports`
+  path (full path or last segment), or imported the same way by a loaded
+  theme's own `theme.toml`, `hugo.toml` or `config.*`, transitively. These
+  come from the site's own `hugo config`, in the environment digest uses.
+  When that read fails, names no theme at all, or puts `themesdir` outside
+  the site, no theme is ever marked unused, so a broken or unexpected
+  config can never offer to delete the theme the site depends on.
 - **When:** a background thread in the api (ADR 013's pattern) runs one
   check a day, never in its first five minutes after start, and never
   before a digest has left a site checkout. "Check now" on the page runs one
@@ -40,16 +42,19 @@ Scott when any of these fell behind, and the blog still carries
 - **Actions open PRs, never push.** Each goes through the same
   `GitHubRepoOps` the publisher uses (the GitHub App, or test-token mode) and
   builds one commit off the default branch's head on a
-  `chronicle/toolchain/<kind>-<name>` branch. A second click refreshes the
-  same PR.
+  `chronicle/toolchain/<action>-<path>` branch (`bump-tag`, `bump-head` or
+  `remove`). A second click refreshes the same PR.
   - Move a submodule: a gitlink tree entry at the latest tag's commit or at
     upstream head. Only those two commits, as found by the last check, can
-    be chosen; the form names `tag` or `head`, never a sha.
+    be chosen; the form names `tag` or `head`, never a sha. Refused when
+    the default branch's gitlink no longer matches the check's, so a stale
+    check never builds a PR that moves a theme backwards.
   - Remove an unused theme: deletes the gitlink and its `.gitmodules`
     section (read from the default branch through the API, every other line
     kept byte for byte), or `.gitmodules` itself when nothing is left.
-  - The page shows the opened PR instead of the button until the pinned
-    commit changes.
+  - The page links the opened PR until the pinned commit changes, and
+    keeps the buttons, so a closed PR never leaves a row with nothing to
+    press.
 - **Hugo bumps stay a Chronicle release.** Hugo is in the image, so the page
   reports the gap, links the release notes, and offers a prefilled new-issue
   link on Chronicle's repo. It does not file the issue itself.

@@ -49,7 +49,7 @@ BRANCH_PREFIX = "chronicle/toolchain/"
 # https form first. Tests widen this to `file` to point at local repos.
 ALLOWED_PROTOCOLS = "https"
 
-_SEMVER_TAG = re.compile(r"^v?(\d+(?:\.\d+)*)$")
+_SEMVER_TAG = re.compile(r"^v?(\d+(?:\.\d+)+)$")
 _GITHUB_SSH = re.compile(r"^git@github\.com:(?P<path>.+)$")
 _CHECK_LOCK = threading.Lock()
 
@@ -77,9 +77,9 @@ def parse_gitmodules(text: str) -> list[dict[str, str]]:
         if line.startswith("["):
             current = None
             continue
-        if current is not None and "=" in line:
+        if current is not None and "=" in line and not line.startswith(("#", ";")):
             key, _, value = line.partition("=")
-            current[key.strip()] = value.strip()
+            current[key.strip().lower()] = value.strip().strip('"')
     return [s for s in sections if s.get("path")]
 
 
@@ -94,9 +94,9 @@ def remove_gitmodules_section(text: str, path: str) -> str | None:
     def flush() -> None:
         nonlocal removed
         paths = [
-            ln.partition("=")[2].strip()
+            ln.partition("=")[2].strip().strip('"')
             for ln in section
-            if ln.strip().startswith("path") and "=" in ln
+            if ln.strip().lower().startswith("path") and "=" in ln
         ]
         if section and path in paths:
             removed = True
@@ -167,13 +167,28 @@ def _theme_names(value: Any) -> list[str]:
     return []
 
 
+def _imported_names(config: dict[str, Any]) -> list[str]:
+    """Theme names a config loads: its `theme`, and each `module.imports`
+    path both as given and by its last segment (a theme under `themes/` is
+    imported by its directory name; a Hugo module by its full path)."""
+    names = _theme_names(config.get("theme"))
+    module = config.get("module")
+    imports = module.get("imports") if isinstance(module, dict) else None
+    for entry in imports if isinstance(imports, list) else []:
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if isinstance(path, str) and path.strip():
+            names.extend([path.strip(), path.strip().rstrip("/").rsplit("/", 1)[-1]])
+    # Hugo lists a `theme` among `module.imports` too; keep each name once.
+    return list(dict.fromkeys(names))
+
+
 def _theme_own_themes(theme_dir: Path) -> list[str]:
-    """The `theme` a theme component itself imports, from its own config."""
+    """What a theme component itself imports, from its own config."""
     for name in ("theme.toml", "hugo.toml", "config.toml"):
         path = theme_dir / name
         if path.is_file():
             try:
-                return _theme_names(tomllib.loads(path.read_text(encoding="utf-8")).get("theme"))
+                return _imported_names(tomllib.loads(path.read_text(encoding="utf-8")))
             except (OSError, tomllib.TOMLDecodeError):
                 return []
     for name in ("theme.yaml", "hugo.yaml", "config.yaml", "theme.yml", "hugo.yml"):
@@ -183,7 +198,7 @@ def _theme_own_themes(theme_dir: Path) -> list[str]:
                 loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
             except (OSError, yaml.YAMLError):
                 return []
-            return _theme_names(loaded.get("theme")) if isinstance(loaded, dict) else []
+            return _imported_names(loaded) if isinstance(loaded, dict) else []
     return []
 
 
@@ -201,11 +216,27 @@ def used_themes(site_dir: Path, themes_dir: str, configured: list[str]) -> set[s
 
 
 def read_site_hugo_config(site_dir: Path) -> dict[str, Any] | None:
-    """`theme` and `themesdir` from the site's own `hugo config`, or None
-    when it cannot be read. Without it no theme is ever called unused."""
+    """The themes the site loads (`theme` and `module.imports`) and its
+    `themesdir`, from its own `hugo config` in the same environment digest
+    reads. None when it cannot be read, names no theme at all, or puts
+    `themesdir` outside the site: without a known theme, no theme is ever
+    called unused."""
+    environment = (
+        os.environ.get(digest_mod.HUGO_ENVIRONMENT_ENV, "").strip()
+        or digest_mod.DEFAULT_HUGO_ENVIRONMENT
+    )
     try:
         result = subprocess.run(
-            ["hugo", "--source", str(site_dir), "config", "--format", "json"],
+            [
+                "hugo",
+                "--source",
+                str(site_dir),
+                "config",
+                "--format",
+                "json",
+                "--environment",
+                environment,
+            ],
             capture_output=True,
             text=True,
             timeout=digest_mod.HUGO_CONFIG_TIMEOUT_SECONDS,
@@ -216,11 +247,19 @@ def read_site_hugo_config(site_dir: Path) -> dict[str, Any] | None:
         return None
     if not isinstance(parsed, dict):
         return None
-    themes_dir = parsed.get("themesdir")
-    return {
-        "themes": _theme_names(parsed.get("theme")),
-        "themesdir": themes_dir if isinstance(themes_dir, str) and themes_dir else "themes",
-    }
+    themes = _imported_names(parsed)
+    if not themes:
+        return None
+    raw_dir = parsed.get("themesdir")
+    themes_dir = raw_dir if isinstance(raw_dir, str) and raw_dir.strip() else "themes"
+    if Path(themes_dir).is_absolute():
+        try:
+            themes_dir = Path(themes_dir).resolve().relative_to(site_dir.resolve()).as_posix()
+        except ValueError:
+            return None
+    if not digest_mod._is_safe_relative_dir(themes_dir):
+        return None
+    return {"themes": themes, "themesdir": themes_dir}
 
 
 # --- Asking upstream ---------------------------------------------------------
@@ -479,10 +518,14 @@ def load_actions(state_dir: Path) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
+_ACTIONS_LOCK = threading.Lock()
+
+
 def _record_action(state_dir: Path, path: str, record: dict[str, Any]) -> None:
-    actions = load_actions(state_dir)
-    actions[path] = record
-    _save_json(state_dir / ACTIONS_FILE, actions)
+    with _ACTIONS_LOCK:
+        actions = load_actions(state_dir)
+        actions[path] = record
+        _save_json(state_dir / ACTIONS_FILE, actions)
 
 
 def _theme_row(state_dir: Path, path: str) -> dict[str, Any]:
@@ -494,7 +537,7 @@ def _theme_row(state_dir: Path, path: str) -> dict[str, Any]:
 
 
 def _branch_name(kind: str, path: str) -> str:
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(path).name).strip("-") or "submodule"
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", path).strip("-") or "submodule"
     return f"{BRANCH_PREFIX}{kind}-{slug}"
 
 
@@ -554,6 +597,13 @@ def bump_submodule(
         raise ToolchainActionError(f"{path} is already at {label}")
     if not any(s["path"] == path for s in parse_gitmodules(_main_gitmodules(ops, default_branch))):
         raise ToolchainActionError(f"{path} is no longer a submodule on the default branch")
+    on_main = ops.get_contents(path, default_branch) or {}
+    if on_main.get("type") != "submodule" or on_main.get("sha") != row.get("pinned"):
+        # Main moved (a hand bump, another PR) after the check: a PR built
+        # from the stale pin could move the theme backwards.
+        raise ToolchainActionError(
+            f"{path} on the default branch has changed since the last check; run a check first"
+        )
 
     title = f"Move {path} to {label}"
     body = "\n".join(
@@ -571,9 +621,10 @@ def bump_submodule(
         ]
     )
     entries = [{"path": path, "mode": "160000", "type": "commit", "sha": target}]
-    pr = _open_pr(ops, default_branch, _branch_name("bump", path), entries, title, body)
+    pr = _open_pr(ops, default_branch, _branch_name(f"bump-{which}", path), entries, title, body)
     record = {
         "kind": "bump",
+        "which": which,
         "to": label,
         "pinned_at_open": row.get("pinned", ""),
         "pr_url": str(pr["html_url"]),
@@ -632,9 +683,10 @@ def remove_theme(
 
 def hugo_behind(image: Any, latest: Any) -> bool:
     """Whether Chronicle's image is known to run an older Hugo than the
-    latest release. An unknown image version is never called behind."""
-    known = isinstance(image, str) and image not in ("", "unknown")
-    return bool(known and latest and image != latest)
+    latest release. An unknown or unparseable version is never behind."""
+    have = _version_key(image) if isinstance(image, str) else None
+    want = _version_key(latest) if isinstance(latest, str) else None
+    return have is not None and want is not None and have < want
 
 
 def hugo_issue_url(image: str, latest: str) -> str:

@@ -18,7 +18,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -983,10 +985,11 @@ def toolchain_check_now(
     )
 
 
-def _toolchain_action(admin: AdminServices, act: Any) -> HTMLResponse:
+async def _toolchain_action(admin: AdminServices, act: Any) -> HTMLResponse:
     """Run one PR-opening action against the configured blog repo. Same
     GitHub App (or test-token repo) the publisher uses; nothing configured
-    is a refusal, not a crash."""
+    is a refusal, not a crash. The GitHub calls block, so they run in the
+    threadpool rather than on the event loop."""
     try:
         target = build_repo_target(admin)
     except PublishFailed as exc:
@@ -996,11 +999,11 @@ def _toolchain_action(admin: AdminServices, act: Any) -> HTMLResponse:
             admin, notice="No GitHub App or test-token repo is configured.", status_code=409
         )
     try:
-        record = act(target)
+        record = await run_in_threadpool(act, target)
     except toolchain_check.ToolchainActionError as exc:
         return _toolchain_page(admin, notice=str(exc), status_code=409)
-    except GitHubApiError as exc:
-        return _toolchain_page(admin, notice=f"GitHub refused it: {exc}", status_code=502)
+    except (GitHubApiError, httpx.HTTPError) as exc:
+        return _toolchain_page(admin, notice=f"GitHub call failed: {exc}", status_code=502)
     return _toolchain_page(admin, notice=f"PR opened: {record['pr_url']}", notice_kind="ok")
 
 
@@ -1012,7 +1015,7 @@ async def toolchain_bump(
 ) -> HTMLResponse:
     form = await _form(request)
     path, which = form.get("path", ""), form.get("which", "")
-    return _toolchain_action(
+    return await _toolchain_action(
         admin,
         lambda t: toolchain_check.bump_submodule(
             admin.state_dir, t.ops, t.default_branch, path, which
@@ -1028,7 +1031,7 @@ async def toolchain_remove(
 ) -> HTMLResponse:
     form = await _form(request)
     path = form.get("path", "")
-    return _toolchain_action(
+    return await _toolchain_action(
         admin,
         lambda t: toolchain_check.remove_theme(admin.state_dir, t.ops, t.default_branch, path),
     )
