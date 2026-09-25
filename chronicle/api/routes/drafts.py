@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from ..deps import Consumer, Services, get_services, require_consumer
 from ..errors import ApiError
 from ..models import Draft
+from ..store import preview_is_current
 from ..transitions import DRAFT_ACTIONS
 
 router = APIRouter(prefix="/drafts", tags=["drafts"])
@@ -158,6 +159,11 @@ def get_status(draft_id: str, services: Services = Depends(get_services)) -> dic
         "last_run": last_run.model_dump(mode="json") if last_run else None,
         "preview_url": _preview_url(last_preview_run),
         "post_url": services.store.resolve_run_post_url(last_preview_run, draft),
+        # Whether that preview built the draft's current text (issue #70):
+        # the status no longer says so, since a build never changes it.
+        "has_current_preview": _preview_url(last_preview_run) is not None
+        and last_preview_run is not None
+        and preview_is_current(last_preview_run, draft),
         # Set once a publish or unpublish run has actually recorded a
         # result (Store.record_publish_result); null before that, not a
         # guessed value.

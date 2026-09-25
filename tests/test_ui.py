@@ -788,7 +788,7 @@ def test_draft_warnings_from_a_submission_render_on_the_editor_once(
 def test_editor_shows_the_post_link_first_and_the_site_link_second(
     client: TestClient, services: Services
 ) -> None:
-    draft_id = make_draft(services, "previewed", title="Linked post")
+    draft_id = make_draft(services, "in_review", title="Linked post")
     draft = services.store.get_draft(draft_id)
     run = services.store._queue_run(draft_id, "preview")
     services.store.start_run(run.id, "builder-1", "0.164.0", False, built_version=draft.version_no)
@@ -806,7 +806,7 @@ def test_editor_shows_the_post_link_first_and_the_site_link_second(
     assert f'href="/preview/{draft.slug}/2026/08/{draft.slug}/"' in response.text
     assert f'href="/preview/{draft.slug}/"' in response.text
 
-    board = client.get("/content/drafts?status=previewed")
+    board = client.get("/content/drafts?status=in_review")
     assert f'href="/preview/{draft.slug}/2026/08/{draft.slug}/"' in board.text
     assert f'(<a href="/preview/{draft.slug}/">site</a>)' in board.text
 
@@ -837,7 +837,7 @@ def test_editor_derives_the_post_link_for_a_legacy_run_with_no_post_url(
     stored result, but the draft it built is pinned with a date, so the
     editor and board both derive the post's own link at read time rather
     than falling back to the site root."""
-    draft_id = make_draft(services, "previewed", title="Old run")
+    draft_id = make_draft(services, "in_review", title="Old run")
     draft = services.store.get_draft(draft_id)
     run = services.store._queue_run(draft_id, "preview")
     services.store.start_run(run.id, "builder-1", "0.164.0", False, built_version=draft.version_no)
@@ -850,7 +850,7 @@ def test_editor_derives_the_post_link_for_a_legacy_run_with_no_post_url(
     assert f'href="{derived}"' in response.text
     assert f'(<a href="/preview/{draft.slug}/">site</a>)' in response.text
 
-    board = client.get("/content/drafts?status=previewed")
+    board = client.get("/content/drafts?status=in_review")
     assert f'href="{derived}"' in board.text
     assert f'(<a href="/preview/{draft.slug}/">site</a>)' in board.text
 
@@ -866,7 +866,7 @@ def test_editor_and_board_derive_the_post_link_from_the_built_version_not_a_late
     hand-set url; the edit page and board must still show the link the
     build actually rendered, not one derived from the current draft."""
     store = services.store
-    draft_id = make_draft(services, "previewed", title="Old run")
+    draft_id = make_draft(services, "in_review", title="Old run")
     draft = store.get_draft(draft_id)
     store.save_draft(
         draft_id, "scott", draft.version_no, {"title": "Old run", "url": "/2026/08/original/"}, "b"
@@ -888,7 +888,7 @@ def test_editor_and_board_derive_the_post_link_from_the_built_version_not_a_late
     response = client.get(f"/content/drafts/{draft_id}")
     assert f'href="{expected}"' in response.text
 
-    board = client.get("/content/drafts?status=previewed")
+    board = client.get("/content/drafts?status=in_review")
     assert f'href="{expected}"' in board.text
 
 
@@ -907,7 +907,7 @@ def test_an_unpinned_draft_has_no_preview_link_at_all(
 
 
 def test_preview_list_and_rebuild_and_run_log(client: TestClient, services: Services) -> None:
-    draft_id = make_draft(services, "previewed")
+    draft_id = make_draft(services, "in_review")
     draft = services.store.get_draft(draft_id)
     run = services.store._queue_run(draft_id, "preview")
     services.store.start_run(run.id, "builder-1", "0.164.0", False, built_version=draft.version_no)
@@ -940,7 +940,7 @@ def test_preview_list_page_derives_the_post_link_for_a_legacy_run(
 ) -> None:
     """Issue #61: `/content/previews` derives the same way the edit page and
     board do, for a run with no stored `post_url`."""
-    draft_id = make_draft(services, "previewed")
+    draft_id = make_draft(services, "in_review")
     draft = services.store.get_draft(draft_id)
     run = services.store._queue_run(draft_id, "preview")
     services.store.start_run(run.id, "builder-1", "0.164.0", False, built_version=draft.version_no)

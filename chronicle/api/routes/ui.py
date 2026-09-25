@@ -68,7 +68,7 @@ def _has_current_preview(run: Any, draft: Draft) -> bool:
     """A preview of the draft's current text exists: the last preview run
     succeeded and built the frontmatter and body the draft has now
     (`store.preview_is_current`). A text save makes it stale, which is what
-    keeps Publish behind "Preview first" after an edit to a `previewed`
+    keeps Publish behind "Preview first" after an edit to a previewed
     draft, where a save leaves the status alone; an announcement-only save
     (issue #69) does not."""
     if _preview_url(run) is None:
@@ -685,7 +685,7 @@ async def draft_action(
     feedback = str(form_data.get("feedback") or "") or None
     try:
         # Staged: the editor offers Preview on a published post and Publish
-        # on a previewed one, and the store runs the steps
+        # on a draft with a current preview, and the store runs the steps
         # `transitions.plan_action` says make that legal (nothing decided here).
         # The click is held to the offer the page rendered for it, and that
         # check runs inside the store's lock (`guard`), on the draft as it is

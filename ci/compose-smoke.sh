@@ -141,7 +141,7 @@ print(match["id"] if match else "")' "$published")"
 ok "found published draft $draft_id for hello-world"
 
 step "revise the published record so it can be previewed"
-# The preview action only exists from drafting/in_review/previewed, never
+# The preview action only exists from drafting/in_review, never
 # from published (chronicle/api/transitions.py), so a save is the same step
 # a real edit would take: it moves the record to drafting (the `revise`
 # transition) without touching what digest already recorded on `published`.
@@ -187,6 +187,16 @@ for _ in $(seq 1 60); do
 done
 [ "$run_status" = "succeeded" ] || { cat "$status_file"; fail "the preview run did not finish in time"; }
 ok "run $run_id succeeded"
+
+step "the build left the status alone and reports a current preview"
+# A preview is a property of the draft, not a status (ADR 023).
+draft_status="$(mktemp -p "$fixture_dir")"
+curl -sS -o "$draft_status" "${AUTH[@]}" "$API/v1/drafts/$draft_id/status"
+status="$(field "$draft_status" status)"
+[ "$status" = "drafting" ] || { cat "$draft_status"; fail "the build moved the draft to $status, expected drafting"; }
+current="$(field "$draft_status" has_current_preview)"
+[ "$current" = "True" ] || { cat "$draft_status"; fail "has_current_preview is $current, expected True"; }
+ok "draft $draft_id still drafting, has_current_preview True"
 
 step "the built page is reachable through the preview container"
 wait_for_status 200 "$PREVIEW/preview/hello-world/"

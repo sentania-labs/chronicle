@@ -6,11 +6,13 @@ them change. This is render layer only: `status_label` is what every UI
 template calls when it shows a draft's status to a human, the same way
 `ui_time.local_time` is the one place a stamp becomes a clock time.
 
-A reader sees exactly four words: Draft, In review, Published, Rejected. The
-state machine has eight statuses because it tracks facts a reader does not
-think of as states (a preview was built, a reviewer asked for changes, the
-post was once live). Those are shown as detail next to the four-word status,
-by `status_details`, never as a status of their own.
+A reader sees exactly four words: Draft, Approved, Published, Rejected
+(issue #70). Everything before approval is Draft, whether or not it was
+submitted or previewed: from the editor's side those are one stage, written
+and waiting on him. The state machine tracks facts a reader does not think of
+as states (a preview was built, a reviewer asked for changes, the post was
+once live); those are shown as detail next to the four-word status, by
+`status_details`, never as a status of their own.
 
 The mapping is a plain dict so a test can hold it against `DRAFT_STATUSES`:
 adding a status to the state machine fails `tests/test_ui_status.py` until it
@@ -25,20 +27,20 @@ from dataclasses import dataclass
 from .models import DRAFT_STATUSES
 
 DRAFT = "Draft"
-IN_REVIEW = "In review"
+APPROVED = "Approved"
 PUBLISHED = "Published"
 REJECTED = "Rejected"
 
 # The whole vocabulary a reader sees, in the order the board's filter lists it.
-FOUR_WORDS: tuple[str, ...] = (DRAFT, IN_REVIEW, PUBLISHED, REJECTED)
+FOUR_WORDS: tuple[str, ...] = (DRAFT, APPROVED, PUBLISHED, REJECTED)
 
 STATUS_LABELS: dict[str, str] = {
     "drafting": DRAFT,
+    "in_review": DRAFT,
     "previewed": DRAFT,
     "revision_requested": DRAFT,
     "unpublished": DRAFT,
-    "in_review": IN_REVIEW,
-    "approved": IN_REVIEW,
+    "approved": APPROVED,
     "published": PUBLISHED,
     "rejected": REJECTED,
 }
@@ -46,7 +48,7 @@ STATUS_LABELS: dict[str, str] = {
 
 # Which Lattice state colour a status carries, or "" for the neutral badge.
 # A state colour carries state and nothing else: `published` is done (ok) and
-# `rejected` is a refusal (bad). Draft and In review stay neutral on purpose:
+# `rejected` is a refusal (bad). Draft and Approved stay neutral on purpose:
 # the label already says which, and colouring them apart would be decoration.
 # "Waiting on a person" (warn) is no longer a status colour; it belongs to the
 # `Came back from review` detail (`status_details`), which is where a draft
@@ -120,7 +122,6 @@ CAME_BACK = "Came back from review"
 WAS_PUBLISHED = "Was published"
 PREVIEW_BUILT = "Preview built"
 PREVIEW_STALE = "Preview out of date"
-APPROVED = "Approved"
 PUBLISHING = "Publishing"
 PUBLISH_PR_OPEN = "Publish PR open"
 UNPUBLISH_PR_OPEN = "Unpublish PR open"
@@ -170,26 +171,27 @@ def status_details(
     status: str,
     *,
     came_back: bool = False,
-    has_preview: bool | None = None,
+    preview_built: bool = False,
+    has_preview: bool = False,
     publish_run_active: bool = False,
     publish_pr_open: bool = False,
     unpublish_pr_open: bool = False,
 ) -> list[Detail]:
     """The facts to show beside a status badge, most important first.
 
-    `has_preview` is whether a preview of the draft's current text exists; the
-    board does not know it and passes None, which says only that a preview was
-    built. The rest are what the editor already computes for its buttons.
+    `preview_built` is whether the last preview build succeeded at all, and
+    `has_preview` whether it built the draft's current text; the board knows
+    neither and passes the defaults. The rest are what the editor already
+    computes for its buttons. Nothing here repeats the status badge itself,
+    so an approved post shows one "Approved", never two.
     """
     details: list[Detail] = []
     if came_back:
         details.append(Detail(CAME_BACK, "warn"))
-    if status == "previewed":
-        details.append(Detail(PREVIEW_STALE if has_preview is False else PREVIEW_BUILT))
+    if preview_built and status in ("drafting", "in_review", "revision_requested"):
+        details.append(Detail(PREVIEW_BUILT if has_preview else PREVIEW_STALE))
     if status == "unpublished":
         details.append(Detail(WAS_PUBLISHED))
-    if status == "approved":
-        details.append(Detail(APPROVED))
     if publish_run_active:
         details.append(Detail(PUBLISHING))
     elif publish_pr_open:

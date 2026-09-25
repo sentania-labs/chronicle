@@ -251,7 +251,72 @@ class Store:
             store.events_file.parent,
         ):
             path.mkdir(parents=True, exist_ok=True)
+        store.migrate_previewed()
         return store
+
+    def migrate_previewed(self) -> list[str]:
+        """Move every draft still at `previewed` back to the status it had
+        before its preview build (issue #70, ADR 023), and return their ids.
+
+        A build no longer changes a status, so `previewed` is never produced;
+        a record written before that still carries it. Runs from `Store.open`
+        against the index (one indexed query when there is nothing to do),
+        and again at the end of `reindex`, so a draft the index did not know
+        about at open time is still moved by the rebuild that finds it.
+        """
+        with self._lock:
+            return self._migrate_previewed_unlocked()
+
+    def _migrate_previewed_unlocked(self) -> list[str]:
+        """The status each draft came from is the `from_status` of its latest
+        `draft.preview_succeeded` event, which is always the change that put
+        it at `previewed` (that event was only written when the status
+        actually changed). `in_review` when there is no such event or it
+        names anything else. Idempotent: a second run finds nothing."""
+        ids = self.index.draft_ids("previewed")
+        if not ids:
+            return []
+        before: dict[str, str] = {}
+        if self.events_file.exists():
+            with self.events_file.open(encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    event = json.loads(line)
+                    if event.get("type") == f"draft.{PREVIEW_SUCCEEDED}":
+                        before[event.get("draft_id") or ""] = event.get("from_status") or ""
+        moved: list[str] = []
+        for draft_id in ids:
+            # The index is only a cache (ADR 006): a stale row naming a draft
+            # whose file is gone must not stop `Store.open`, or the api and
+            # `chronicle reindex` (the tool that repairs the index) could
+            # never start. The file decides; a row it contradicts is skipped.
+            try:
+                draft = self.get_draft(draft_id)
+            except ApiError:
+                continue
+            if draft.status != "previewed":
+                continue
+            target = before.get(draft_id, "")
+            if target not in ("drafting", "in_review"):
+                target = "in_review"
+            draft.status = target
+            self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
+            self._append_event(
+                type="draft.status_migrated",
+                actor="chronicle",
+                draft_id=draft_id,
+                from_status="previewed",
+                to_status=target,
+            )
+            self.index.upsert_draft(draft)
+            moved.append(draft_id)
+        if moved:
+            self._commit(
+                f"migrate {len(moved)} previewed draft(s) to their pre-preview status",
+                "chronicle",
+            )
+        return moved
 
     def close(self) -> None:
         self.index.close()
@@ -1315,7 +1380,7 @@ class Store:
         """`act_on_draft`, first running whatever staging steps
         `transitions.plan_action` says stand between the draft's status and
         `action` (a `revise` before a preview of a published post, a `submit`
-        before approving a previewed one). Each step is an ordinary
+        before approving a draft with a current preview). Each step is an ordinary
         transition with its own event and commit, and all of them run under
         one lock so no other writer lands between them. With no plan it is
         exactly `act_on_draft`, refusal included; the `/v1` routes never call
@@ -2523,6 +2588,9 @@ class Store:
                     self.index.add_event(Event.model_validate_json(line))
                     counts["events"] += 1
 
+        # A rebuilt index can surface a legacy `previewed` draft that the
+        # migration at open time never saw (ADR 023).
+        self._migrate_previewed_unlocked()
         return counts
 
 

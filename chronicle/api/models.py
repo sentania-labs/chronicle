@@ -45,6 +45,8 @@ DRAFT_STATUSES = (
     "drafting",
     "in_review",
     "revision_requested",
+    # No longer produced (issue #70): kept so a record written before that
+    # still loads until `Store.migrate_previewed` moves it at startup.
     "previewed",
     "approved",
     "published",
