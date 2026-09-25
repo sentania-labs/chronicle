@@ -28,6 +28,12 @@ Files:
 - `pvc-data.yaml`: the `data` PVC (submissions, drafts, versions, images,
   state).
 - `pvc-preview-site.yaml`: the `preview` and `site` PVC, shared, disposable.
+- `pvc-backups.yaml`: scheduled backups' local-path target, mounted at
+  `/backups` in `api` only (ADR 024). `deployment.yaml` references it, so
+  apply it with the rest; back it with different storage from
+  `chronicle-data`. Using only the S3 target instead? Remove the `backups`
+  volume and its mount from `deployment.yaml` too, or the pod stays Pending
+  waiting for a claim that does not exist.
 - `secret-instance-key.yaml`: placeholder Secret for the instance key that
   encrypts credentials at rest. Never commit a real value here.
 - `service.yaml`: fronts the pod's api and preview ports for the Ingress.

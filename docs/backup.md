@@ -326,3 +326,11 @@ four listed `state/` files when present, appears once in `manifest.json`'s
 digest of its bytes. `sha256sum <path>` on the extracted tree reproduces
 every value; a bundle assembled by hand should compute these last, after
 every file is in its final place.
+
+## Scheduled backups
+
+`/admin/backup` can also make bundles on a schedule (issue #68, ADR 024): a
+local directory that is not under the data directory (the reference
+deployments mount one at `/backups`) or an S3 bucket, with retention and
+status on `/admin`. A scheduled bundle is the same format described above,
+and `chronicle backup restore` takes it the same way.
