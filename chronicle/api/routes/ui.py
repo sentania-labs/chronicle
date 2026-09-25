@@ -25,7 +25,7 @@ from ..errors import ApiError
 from ..images import MAX_IMAGE_BYTES, alt_text_for, safe_upload_filename
 from ..models import ANNOUNCEMENT_CHANNELS, Draft, Material, Submission
 from ..pagination import Page, paginate
-from ..store import Store
+from ..store import Store, preview_is_current
 from ..ui_actions import staged_refusal
 from ..ui_deps import banner_enabled, check_same_origin, get_services, require_ui_consumer
 from ..ui_status import came_back_from_review, parse_status_filter
@@ -64,15 +64,16 @@ def _preview_url(run: Any) -> str | None:
     return url if isinstance(url, str) else None
 
 
-def _has_current_preview(run: Any, version_no: int) -> bool:
+def _has_current_preview(run: Any, draft: Draft) -> bool:
     """A preview of the draft's current text exists: the last preview run
-    succeeded and built the version the draft is at now (a run with no
-    recorded `built_version` predates the field and counts). A save after the
-    build makes it stale, which is what keeps Publish behind "Preview first"
-    after an edit to a `previewed` draft, where a save leaves the status alone."""
+    succeeded and built the frontmatter and body the draft has now
+    (`store.preview_is_current`). A text save makes it stale, which is what
+    keeps Publish behind "Preview first" after an edit to a `previewed`
+    draft, where a save leaves the status alone; an announcement-only save
+    (issue #69) does not."""
     if _preview_url(run) is None:
         return False
-    return run.built_version is None or run.built_version == version_no
+    return preview_is_current(run, draft)
 
 
 # `create_draft` reports dropped frontmatter keys and failed image imports
@@ -416,7 +417,7 @@ def _offer_state(store: Store, draft: Draft, preview_run: Any) -> dict[str, bool
     click from it (`ui_actions.staged_refusal`), so both read one computation."""
     watch = store.get_watch(draft.id)
     return {
-        "has_preview": _has_current_preview(preview_run, draft.version_no),
+        "has_preview": _has_current_preview(preview_run, draft),
         "publish_pr_open": watch is not None and watch.kind == "publish",
         "unpublish_pr_open": watch is not None and watch.kind == "unpublish",
         # `Store.act_on_draft` separately refuses a re-approve while a

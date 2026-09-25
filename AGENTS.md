@@ -106,7 +106,8 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   of the API's named actions, so it is modelled as the `revise` action in
   `chronicle/api/transitions.py` and writes an event like any other
   transition. Never decide a status anywhere else: that table is the whole
-  lifecycle.
+  lifecycle. A save whose frontmatter and body equal the draft's current ones
+  (announcements only, issue #69) skips `revise` and keeps its status.
 - **Announcements live on the draft, never in frontmatter and never in the
   post.** `Draft.announcements` and `Version.announcements` (ADR 021) hold
   suggested social text under exactly the three keys in
@@ -287,8 +288,9 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   That check is the `guard` `act_on_draft_staged` runs under the store lock,
   never a check before the call: a save landing in between would otherwise be
   published unpreviewed. A preview counts only
-  while `built_version` equals the draft's version, so a save makes it stale
-  again. The draft status shown to a human goes through
+  while the text it built still matches the draft's (`store.preview_is_current`,
+  `Run.built_text`, stamped by `start_run`; `finish_run` uses the same check),
+  so a text save makes it stale again and an announcement-only save does not. The draft status shown to a human goes through
   `ui_status.status_label`; API values and filter query values stay raw.
 - **The image upload route answers JSON to `Accept: application/json`.**
   `editor.js` gets the stored filename (a dedup can keep an earlier upload's

@@ -16,6 +16,7 @@ from __future__ import annotations
 import difflib
 import fcntl
 import functools
+import hashlib
 import json
 import logging
 import re
@@ -114,6 +115,24 @@ log = logging.getLogger("chronicle.api.store")
 
 def new_id() -> str:
     return uuid.uuid4().hex
+
+
+def text_fingerprint(frontmatter: dict[str, Any], body: str) -> str:
+    """A digest of what a build converts: frontmatter and body, never
+    announcements (ADR 021). `Run.built_text` holds it so a preview stays
+    current across a save that changes neither (issue #69)."""
+    payload = json.dumps({"frontmatter": frontmatter, "body": body}, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def preview_is_current(run: Run, draft: Draft) -> bool:
+    """Whether `run` (a preview) built the draft's current text. A run with
+    `built_text` compares text, so an announcement-only save keeps it
+    current; an older run falls back to its `built_version`, and a run with
+    neither predates both fields and counts."""
+    if run.built_text is not None:
+        return run.built_text == text_fingerprint(draft.frontmatter, draft.body)
+    return run.built_version is None or run.built_version == draft.version_no
 
 
 class StoreLock:
@@ -1035,7 +1054,11 @@ class Store:
         )
 
         from_status = draft.status
-        transition = resolve_save(draft.status)
+        # A save that changes only announcements leaves the status alone
+        # (issue #69): they never reach the post, so there is nothing to
+        # revise. The version still bumps so history keeps the change.
+        text_unchanged = frontmatter == draft.frontmatter and body == draft.body
+        transition = None if text_unchanged else resolve_save(draft.status)
         if transition is not None:
             draft.status = transition.to_status
         draft.frontmatter = frontmatter
@@ -1621,12 +1644,14 @@ class Store:
         hugo_version: str,
         toolchain_drift: bool,
         built_version: int | None = None,
+        built_text: str | None = None,
     ) -> Run:
         """Move a claimed run to `building` and stamp who is building it.
 
         `built_version` records the draft's `version_no` at the moment the
-        builder read it for this build, so `finish_run` can tell a build
-        that is still current from one the draft has since moved past.
+        builder read it for this build, and `built_text` the
+        `text_fingerprint` of that same snapshot, so `finish_run` can tell a
+        build that is still current from one the draft has since moved past.
         """
         run = self.get_run(run_id)
         run.status = "building"
@@ -1636,6 +1661,7 @@ class Store:
         run.hugo_version = hugo_version
         run.toolchain_drift = toolchain_drift
         run.built_version = built_version
+        run.built_text = built_text
         run.log_path = str(self.log_path_for(run_id).relative_to(self.data_dir))
         self._write_json(self._run_path(run_id), run.model_dump(mode="json"))
         self._append_event(
@@ -1662,13 +1688,14 @@ class Store:
         rejected, or saved back to `drafting`, while the build ran) is left
         exactly as it is.
 
-        A build only transitions the draft when the version it actually
-        built (`run.built_version`, stamped by `start_run`) still matches the
-        draft's current version. A draft saved again while the build ran is
-        left alone, the run is recorded `succeeded` with `result["stale"]`
-        set, and a `draft.preview_stale` event says the draft moved on,
-        because the generated preview reflects a version that is no longer
-        current (round C3 review).
+        A build only transitions the draft when the text it actually built
+        (`run.built_text`, stamped by `start_run`, or `run.built_version` on
+        an older run) still matches the draft's (`preview_is_current`). A
+        draft whose text was saved again while the build ran is left alone,
+        the run is recorded `succeeded` with `result["stale"]` set, and a
+        `draft.preview_stale` event says the draft moved on, because the
+        generated preview no longer reflects its current text (round C3
+        review).
         """
         run = self.get_run(run_id)
         run.status = "succeeded" if succeeded else "failed"
@@ -1719,7 +1746,7 @@ class Store:
             )
         if succeeded and run.kind == "preview":
             current = self.get_draft(run.draft_id)
-            if run.built_version is not None and current.version_no != run.built_version:
+            if not preview_is_current(run, current):
                 stale = True
             else:
                 transition = resolve_run_outcome(current.status, PREVIEW_SUCCEEDED)

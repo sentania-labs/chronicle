@@ -244,6 +244,10 @@ class Run(BaseModel):
     # so a `preview_succeeded` transition can be skipped when the draft has
     # since moved on to a newer version the build never saw (round C3 review).
     built_version: int | None = None
+    # `store.text_fingerprint` of the frontmatter and body at `built_version`,
+    # so an announcement-only save (issue #69) does not make the build stale.
+    # None on a run started before this field existed.
+    built_text: str | None = None
     # A publish run only: the draft's `version_no` when `approve` queued it,
     # which is the version the reviewer approved. The publisher refuses to
     # convert a draft that has moved past it (issue 41). None on a run queued

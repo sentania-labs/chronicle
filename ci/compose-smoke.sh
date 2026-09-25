@@ -145,6 +145,8 @@ step "revise the published record so it can be previewed"
 # from published (chronicle/api/transitions.py), so a save is the same step
 # a real edit would take: it moves the record to drafting (the `revise`
 # transition) without touching what digest already recorded on `published`.
+# The body must actually change: a save with the same frontmatter and body
+# leaves the status alone (issue #69).
 draft="$(mktemp -p "$fixture_dir")"
 curl -sS -o "$draft" "${AUTH[@]}" "$API/v1/drafts/$draft_id"
 base_version="$(field "$draft" version_no)"
@@ -153,7 +155,7 @@ draft = json.load(open(sys.argv[1]))
 print(json.dumps({
     "base_version": draft["version_no"],
     "frontmatter": draft["frontmatter"],
-    "body": draft["body"],
+    "body": draft["body"] + "\n\nSmoke edit.\n",
     "message": "smoke: revise to claim a preview",
 }))' "$draft")"
 saved="$(mktemp -p "$fixture_dir")"
