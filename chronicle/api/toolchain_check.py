@@ -356,7 +356,8 @@ def run_check(store: Store, admin: AdminServices, run: LsRemote = ls_remote) -> 
     latest_version = latest["tag"].removeprefix("v") if latest else None
     result["hugo"] = {
         "image": summary["builder_hugo_version"],
-        "site": summary["hugo_version"],
+        # The checkout just read wins over the last digest's copy of it.
+        "site": local.get("site_hugo") or summary["hugo_version"],
         "latest": latest_version,
     }
 
