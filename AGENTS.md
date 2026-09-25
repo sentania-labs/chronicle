@@ -379,6 +379,13 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   data directory is refused. `api/s3.py` is a three-call SigV4 client over
   `httpx`, tested against AWS's published signatures, and like the GitHub
   client it takes an `httpx` transport in tests, never the network.
+- **The Toolchain page never queries upstream on a page load, and never
+  offers a sha it did not find.** `toolchain_check.run_check` (daily thread,
+  or "Check now") uses `git ls-remote` over https only and writes
+  `state/toolchain_check.json`; the page renders that file. Its actions open
+  PRs on the blog repo through `GitHubRepoOps`, moving a submodule only to
+  the latest tag or head that check recorded, and removing a theme only when
+  the site's own `hugo config` was read and nothing uses it (ADR 026).
 - **`chronicle/backup.py`'s restore swap keeps the displaced tree until
   reindex succeeds, and `_safe_member` runs before any extraction.** A tar
   member with an absolute path, a `..` segment, or a symlink is refused
