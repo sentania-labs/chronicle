@@ -38,7 +38,6 @@ from .index import Index, index_path
 from .models import (
     ANNOUNCEMENT_CHANNELS,
     FRONTMATTER_ALLOWLIST,
-    Claim,
     Draft,
     DraftImage,
     Event,
@@ -1144,18 +1143,6 @@ class Store:
         self._commit(f"draft {draft_id}: version {version.version_no} by {actor}", actor)
         self.index.upsert_draft(draft)
         self.index.upsert_version(version)
-        return draft
-
-    @locked
-    def set_claim(self, draft_id: str, actor: str, held: bool) -> Draft:
-        draft = self.get_draft(draft_id)
-        draft.claim = Claim(author=actor, since=now_stamp()) if held else None
-        self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
-        self._append_event(
-            type="draft.claim" if held else "draft.release", actor=actor, draft_id=draft_id
-        )
-        self._commit(f"draft {draft_id}: {'claim' if held else 'release'} by {actor}", actor)
-        self.index.upsert_draft(draft)
         return draft
 
     # Feedback

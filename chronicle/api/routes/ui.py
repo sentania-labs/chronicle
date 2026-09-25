@@ -11,6 +11,8 @@ either.
 
 from __future__ import annotations
 
+import re
+import secrets
 from datetime import datetime
 from itertools import zip_longest
 from typing import Any
@@ -21,11 +23,13 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 
 from .. import ui_templates as tpl
 from ..deps import Consumer, Services
+from ..editor_lease import Lease
 from ..errors import ApiError
 from ..images import MAX_IMAGE_BYTES, alt_text_for, safe_upload_filename
 from ..models import ANNOUNCEMENT_CHANNELS, Draft, Material, Submission
 from ..pagination import Page, paginate
 from ..store import Store, preview_is_current
+from ..tokens import UI_COMMIT_AUTHOR as UI_ACTOR_NAME
 from ..ui_actions import staged_refusal
 from ..ui_deps import banner_enabled, check_same_origin, get_services, require_ui_consumer
 from ..ui_status import came_back_from_review, parse_status_filter
@@ -360,6 +364,7 @@ def _board_row(
         "came_back": came_back_from_review(
             draft.status, request_seq=request_seq, answered_seq=answered_seq
         ),
+        "editing": _editing(services, draft.id),
     }
 
 
@@ -450,6 +455,15 @@ def _offer_state(store: Store, draft: Draft, preview_run: Any) -> dict[str, bool
     }
 
 
+_PAGE_TOKEN = re.compile(r"[A-Za-z0-9]{8,64}")  # editor.js and secrets.token_hex both fit
+
+
+def _editing(services: Services, draft_id: str) -> str | None:
+    """Who has the draft open in the editor right now, for the board."""
+    lease = services.leases.current(draft_id)
+    return lease.holder if lease else None
+
+
 def _editor_response(
     services: Services,
     draft_id: str,
@@ -458,9 +472,22 @@ def _editor_response(
     notice: str | None = None,
     notice_kind: str = "error",
     status_code: int = 200,
+    request: Request | None = None,
 ) -> HTMLResponse:
     store = services.store
     draft = store.get_draft(draft_id)
+    # The page's lease token, minted here so the render's own hold and the
+    # page's heartbeats and release are the same hold (issue #64).
+    page_token = secrets.token_hex(12)
+    lease: Lease | None
+    if request is not None and _opens_the_page(request):
+        # A top-level, same-origin load of the page is opening it: take the
+        # lease now, so the editor is protected before (or without) script.
+        lease = services.leases.touch(draft_id, UI_ACTOR_NAME, page_token)
+    else:
+        lease = services.leases.current(draft_id)
+    # Another identity's live lease makes the page read-only.
+    locked_by = lease if lease is not None and lease.holder != UI_ACTOR_NAME else None
     versions = [_dump(v) for v in store.list_versions(draft_id)]
     feedback = [_dump(f) for f in store.list_feedback(draft_id)]
     last_run = store.last_run(draft_id)
@@ -483,10 +510,66 @@ def _editor_response(
         banner=banner,
         came_back=came_back,
         **_offer_state(store, draft, preview_run),
+        locked_by=locked_by.holder if locked_by else None,
+        lease_page=page_token,
+        locked_since=locked_by.since.isoformat() if locked_by else None,
         notice=notice,
         notice_kind=notice_kind,
     )
     return HTMLResponse(html, status_code=status_code)
+
+
+def _opens_the_page(request: Request) -> bool:
+    """Whether this request is a person opening the edit page, per the
+    browser's own Fetch Metadata: a top-level document load from this site or
+    typed in. A cross-site `<img>` or link preview, a prefetch, or the
+    editor's own background fetch of the page never takes a lease (pre-PR
+    review); a client that sends no metadata at all counts as opening it."""
+    headers = request.headers
+    if "prefetch" in (headers.get("sec-purpose", "") + headers.get("purpose", "")).lower():
+        return False
+    dest = headers.get("sec-fetch-dest")
+    if dest is not None and dest != "document":
+        return False
+    site = headers.get("sec-fetch-site")
+    return site is None or site in ("same-origin", "none")
+
+
+def _page_token(request: Request) -> str:
+    """The open page's own lease token (`?page=`), minted by `editor.js`.
+    Anything that is not a short token counts as the page-less hold."""
+    token = request.query_params.get("page", "")
+    return token if _PAGE_TOKEN.fullmatch(token) else ""
+
+
+@router.post("/content/drafts/{draft_id}/lease")
+def draft_lease_heartbeat(
+    draft_id: str,
+    request: Request,
+    _origin: None = Depends(check_same_origin),
+    consumer: Consumer = Depends(require_ui_consumer),
+    services: Services = Depends(get_services),
+) -> JSONResponse:
+    """The open edit page's heartbeat (every `HEARTBEAT_SECONDS`). Renews this
+    viewer's lease, or reports whose it is; `mine` turning true is the page's
+    cue to reload out of read-only."""
+    services.store.get_draft(draft_id)  # 404 for a draft that does not exist
+    lease = services.leases.touch(draft_id, consumer.name, _page_token(request))
+    return JSONResponse({"mine": lease.holder == consumer.name, **lease.as_dict()})
+
+
+@router.post("/content/drafts/{draft_id}/lease/release")
+def draft_lease_release(
+    draft_id: str,
+    request: Request,
+    _origin: None = Depends(check_same_origin),
+    consumer: Consumer = Depends(require_ui_consumer),
+    services: Services = Depends(get_services),
+) -> JSONResponse:
+    """Best-effort release when the page closes (`sendBeacon`); a lease the
+    page never releases simply lapses."""
+    services.leases.release(draft_id, consumer.name, _page_token(request))
+    return JSONResponse({"released": True})
 
 
 @router.get("/content/drafts/{draft_id}", response_class=HTMLResponse)
@@ -500,7 +583,12 @@ def draft_editor(
         notice = "Import warnings: " + "; ".join(raw_warnings.split(_WARNING_SEP))
         notice_kind = "warning"
     return _editor_response(
-        services, draft_id, banner=banner_enabled(request), notice=notice, notice_kind=notice_kind
+        services,
+        draft_id,
+        banner=banner_enabled(request),
+        notice=notice,
+        notice_kind=notice_kind,
+        request=request,
     )
 
 
@@ -608,14 +696,15 @@ async def draft_save(
     body_text = _crlf_to_lf(form.get("body", ""))
     announcements = _build_announcements(form)
     try:
-        services.store.save_draft(
-            draft_id,
-            consumer.name,
-            base_version,
-            frontmatter,
-            body_text,
-            announcements=announcements,
-        )
+        with services.leases.writing(draft_id, consumer.name):
+            services.store.save_draft(
+                draft_id,
+                consumer.name,
+                base_version,
+                frontmatter,
+                body_text,
+                announcements=announcements,
+            )
     except ApiError as exc:
         # Only a stale base_version is the conflict this view exists for; a
         # draft with an open publish PR also saves as a 409
@@ -666,28 +755,6 @@ async def draft_save(
     return _editor_response(
         services, draft_id, banner=banner_enabled(request), notice="saved", notice_kind="ok"
     )
-
-
-@router.post("/content/drafts/{draft_id}/claim")
-def draft_claim(
-    draft_id: str,
-    _origin: None = Depends(check_same_origin),
-    consumer: Consumer = Depends(require_ui_consumer),
-    services: Services = Depends(get_services),
-) -> RedirectResponse:
-    services.store.set_claim(draft_id, consumer.name, held=True)
-    return RedirectResponse(f"/content/drafts/{draft_id}", status_code=303)
-
-
-@router.post("/content/drafts/{draft_id}/release")
-def draft_release(
-    draft_id: str,
-    _origin: None = Depends(check_same_origin),
-    consumer: Consumer = Depends(require_ui_consumer),
-    services: Services = Depends(get_services),
-) -> RedirectResponse:
-    services.store.set_claim(draft_id, consumer.name, held=False)
-    return RedirectResponse(f"/content/drafts/{draft_id}", status_code=303)
 
 
 @router.post("/content/drafts/{draft_id}/actions/{action}", response_class=HTMLResponse)

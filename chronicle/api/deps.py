@@ -13,6 +13,7 @@ from pathlib import Path
 
 from fastapi import Header, Request
 
+from .editor_lease import EditorLeases
 from .errors import ApiError
 from .store import Store
 from .tokens import UI_TOKEN_NAME, TokenStore, commit_author
@@ -23,7 +24,7 @@ class Consumer:
     """Who is acting: the token that authenticated, and the name it acts under.
 
     The `ui` token is the editor at the keyboard (ADR 004), so everything the
-    domain records about it (version author, commit author, claim holder) says
+    domain records about it (version author, commit author, editor lease) says
     `editor`. `token_name` stays raw because authorization asks a different
     question: which token is this, not who is behind it.
     """
@@ -45,6 +46,8 @@ class Services:
         self.store = Store.open(data_dir)
         self.tokens = TokenStore(self.store.state_dir)
         self.tokens.ensure_ui_token()
+        # The editor lock (issue #64, ADR 025): runtime state, in memory.
+        self.leases = EditorLeases()
 
     def close(self) -> None:
         self.store.close()

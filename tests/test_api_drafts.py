@@ -147,19 +147,12 @@ def test_title_is_required(client: TestClient, agent_token: str) -> None:
     assert response.json()["error"] == "title_required"
 
 
-def test_claim_is_advisory_and_surfaced(
-    client: TestClient, agent_token: str, ui_token: str
-) -> None:
+def test_the_advisory_claim_endpoints_are_gone(client: TestClient, agent_token: str) -> None:
+    # Issue #64 replaced the claim with the editor lock (ADR 025).
     draft_id = new_draft(client, agent_token)
-    claimed = client.post(f"/v1/drafts/{draft_id}/claim", headers=auth(agent_token))
-    assert claimed.json()["claim"]["author"] == "ghostwriter"
-
-    other = save(client, ui_token, draft_id, 0, "scott edits anyway")
-    assert other.status_code == 200
-    assert other.json()["claim"]["author"] == "ghostwriter"
-
-    released = client.post(f"/v1/drafts/{draft_id}/release", headers=auth(agent_token))
-    assert released.json()["claim"] is None
+    for path in ("claim", "release"):
+        response = client.post(f"/v1/drafts/{draft_id}/{path}", headers=auth(agent_token))
+        assert response.status_code in (404, 405)
 
 
 def test_reserved_action_is_403_for_an_agent_and_200_for_ui(

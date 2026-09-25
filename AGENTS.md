@@ -68,7 +68,7 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   `GIT_CONFIG_SYSTEM` to `/dev/null` on every call, because the api container
   and CI have no global git config and must never inherit the host's. The
   `ui` token acts as `editor` in everything the domain records (commit
-  author, version author, claim holder); that mapping lives in `Consumer`
+  author, version author, editor-lock holder); that mapping lives in `Consumer`
   (`chronicle/api/deps.py`), so the store receives the acting name already
   resolved and does no translation of its own. Records written before this
   name changed still say `scott` and are not rewritten; see ADR 014's
@@ -247,6 +247,18 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   the same dict `Store.act_on_draft` consults; adding a transition there is
   what makes it show up as a button, nothing in the UI layer needs updating
   to match.
+- **The editor lock is runtime state, and only a save checks it.**
+  `editor_lease.EditorLeases` (ADR 025) lives on `Services`, in memory: a
+  lease is never versioned, committed or backed up, and a restart forgets it.
+  A top-level same-origin load of the edit page takes the `editor` lease
+  under a server-minted page token (Fetch Metadata decides: an `<img>`,
+  cross-site link, prefetch or the editor's own refetch takes nothing);
+  `editor.js` heartbeats under that token every 30 seconds, releases it on
+  `pagehide`, and a lease lapses 2 minutes after its last page's beat.
+  `leases.writing` wraps the `/v1` `PUT`, `/v1` image attach and detach, and
+  the UI save route: it refuses another identity with 423 and holds off new
+  leases until the write lands. Reads, previews, feedback and actions never
+  check it.
 - **The editor's live render is client-side only, filled by `editor.js` from
   EasyMDE's own text, never by anything the server renders.** Every value a
   UI template does interpolate goes through `html.escape` first, same bar as
