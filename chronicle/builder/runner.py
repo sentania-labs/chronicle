@@ -20,7 +20,7 @@ from typing import Any
 from ..api import convert
 from ..api import digest as digest_mod
 from ..api.models import Draft, Run, now_stamp
-from ..api.store import Store
+from ..api.store import Store, text_fingerprint
 from . import hugo
 from .leases import Lease, LeaseDirectory
 from .settings import BuilderSettings
@@ -324,7 +324,16 @@ def build_one(
     installed = hugo.installed_version(settings.hugo_bin)
     site_version = site_hugo_version(store.data_dir)
     drift = site_version != "unknown" and installed != "unknown" and site_version != installed
-    store.start_run(run.id, settings.builder_id, installed, drift, built_version=draft.version_no)
+    store.start_run(
+        run.id,
+        settings.builder_id,
+        installed,
+        drift,
+        built_version=draft.version_no,
+        # The snapshot this build converts, so a save that lands before
+        # `start_run` and changes only announcements does not make it stale.
+        built_text=text_fingerprint(draft.frontmatter, draft.body),
+    )
 
     keepalive = BuildKeepAlive(
         store, settings, leases, lease, installed, check_writable(store.preview_dir)

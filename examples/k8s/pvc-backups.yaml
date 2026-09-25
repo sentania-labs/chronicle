@@ -1,0 +1,21 @@
+# Reference only, not the lab's deployment. See README.md in this directory.
+#
+# Scheduled backups' local-path target (issue #68, ADR 024): mounted at
+# /backups in the api container only. Chronicle refuses a local path under
+# /data, because a bundle on the data volume does not survive losing it; back
+# this claim with different storage from chronicle-data (an NFS share, another
+# storage class, or an S3-backed CSI driver). deployment.yaml references this
+# claim; to use only the S3 target, remove its volume and mount there too.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chronicle-backups
+  labels:
+    app.kubernetes.io/name: chronicle
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  # storageClassName intentionally unset: pick the cluster's storage class.

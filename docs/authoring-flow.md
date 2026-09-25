@@ -28,8 +28,9 @@ exact format and the crash-recovery argument), and for a claimed run:
    build's output directory (a single rename, never a remove-then-rename
    pair, so a request never sees a missing `<slug>/`; ADR 011)
    (`GET /v1/drafts/{id}/status` and the narrower
-   `GET /v1/drafts/{id}/preview` then carry `preview_url`) and moves the
-   draft to `previewed`. On failure, the previous preview tree, if any, is
+   `GET /v1/drafts/{id}/preview` then carry `preview_url`, and `status`
+   reports `has_current_preview`). The draft's status does not change
+   (ADR 023). On failure, the previous preview tree, if any, is
    left untouched, and the draft's status does not change.
 
 **Filename and `url` rules:** a draft imported with `from_post` keeps the

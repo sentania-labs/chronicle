@@ -1,4 +1,4 @@
-"""Starts and stops the publisher, watcher, and reconciliation threads.
+"""Starts and stops the publisher, watcher, reconciliation and backup threads.
 
 ADR 013: all three run inside the api process. Kept in one module so
 `main.py`'s bootstrap and shutdown stay a one-line call each, and so a test
@@ -13,7 +13,7 @@ import logging
 import threading
 from dataclasses import dataclass, field
 
-from . import publisher, reconcile, watcher
+from . import publisher, reconcile, scheduled_backup, watcher
 from .admin_deps import AdminServices
 from .deps import Services
 
@@ -77,7 +77,15 @@ def start(services: Services, admin: AdminServices) -> Background:
         name="chronicle-reconcile",
         daemon=True,
     )
-    background.threads = [publisher_thread, watcher_thread, reconcile_thread]
+    # Scheduled backups (issue #68, ADR 024): checks once a minute whether a
+    # run is due under the settings saved on /admin/backup.
+    backup_thread = threading.Thread(
+        target=scheduled_backup.run_loop,
+        args=(background.stop_event, admin.state_dir.parent, admin.state_dir, admin.instance_key),
+        name="chronicle-backup",
+        daemon=True,
+    )
+    background.threads = [publisher_thread, watcher_thread, reconcile_thread, backup_thread]
     for thread in background.threads:
         thread.start()
     return background

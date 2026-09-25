@@ -8,7 +8,9 @@ from chronicle.api.errors import ApiError
 from chronicle.api.models import DRAFT_STATUSES
 from chronicle.api.transitions import (
     DRAFT_TRANSITIONS,
+    PREVIEW_SUCCEEDED,
     RESERVED_ACTIONS,
+    RUN_OUTCOME_TRANSITIONS,
     SUBMISSION_TRANSITIONS,
     UI_ACTOR,
     resolve_draft,
@@ -43,6 +45,15 @@ def test_disallowed_draft_transitions_are_refused(status: str, action: str) -> N
         resolve_draft(status, action, actor_is_ui=True)
     assert caught.value.status_code == 409
     assert caught.value.code == "transition_not_allowed"
+
+
+def test_nothing_produces_or_leaves_previewed_any_more() -> None:
+    # Issue #70: a preview is a property of the draft, not a status. The
+    # status stays in the model only so a legacy record loads until
+    # `Store.migrate_previewed` moves it.
+    assert all(transition.to_status != "previewed" for transition in DRAFT_TRANSITIONS.values())
+    assert all(status != "previewed" for status, _action in DRAFT_TRANSITIONS)
+    assert all(outcome != PREVIEW_SUCCEEDED for _status, outcome in RUN_OUTCOME_TRANSITIONS)
 
 
 def test_every_status_in_the_model_has_a_disallowed_case_covered() -> None:

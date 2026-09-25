@@ -16,6 +16,7 @@ from __future__ import annotations
 import difflib
 import fcntl
 import functools
+import hashlib
 import json
 import logging
 import re
@@ -28,7 +29,7 @@ from typing import Any, cast
 
 import yaml
 
-from . import convert, gitrepo
+from . import announce, convert, gitrepo
 from . import digest as digest_mod
 from .atomic import write_atomic
 from .errors import ApiError
@@ -113,6 +114,24 @@ log = logging.getLogger("chronicle.api.store")
 
 def new_id() -> str:
     return uuid.uuid4().hex
+
+
+def text_fingerprint(frontmatter: dict[str, Any], body: str) -> str:
+    """A digest of what a build converts: frontmatter and body, never
+    announcements (ADR 021). `Run.built_text` holds it so a preview stays
+    current across a save that changes neither (issue #69)."""
+    payload = json.dumps({"frontmatter": frontmatter, "body": body}, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def preview_is_current(run: Run, draft: Draft) -> bool:
+    """Whether `run` (a preview) built the draft's current text. A run with
+    `built_text` compares text, so an announcement-only save keeps it
+    current; an older run falls back to its `built_version`, and a run with
+    neither predates both fields and counts."""
+    if run.built_text is not None:
+        return run.built_text == text_fingerprint(draft.frontmatter, draft.body)
+    return run.built_version is None or run.built_version == draft.version_no
 
 
 class StoreLock:
@@ -231,7 +250,72 @@ class Store:
             store.events_file.parent,
         ):
             path.mkdir(parents=True, exist_ok=True)
+        store.migrate_previewed()
         return store
+
+    def migrate_previewed(self) -> list[str]:
+        """Move every draft still at `previewed` back to the status it had
+        before its preview build (issue #70, ADR 023), and return their ids.
+
+        A build no longer changes a status, so `previewed` is never produced;
+        a record written before that still carries it. Runs from `Store.open`
+        against the index (one indexed query when there is nothing to do),
+        and again at the end of `reindex`, so a draft the index did not know
+        about at open time is still moved by the rebuild that finds it.
+        """
+        with self._lock:
+            return self._migrate_previewed_unlocked()
+
+    def _migrate_previewed_unlocked(self) -> list[str]:
+        """The status each draft came from is the `from_status` of its latest
+        `draft.preview_succeeded` event, which is always the change that put
+        it at `previewed` (that event was only written when the status
+        actually changed). `in_review` when there is no such event or it
+        names anything else. Idempotent: a second run finds nothing."""
+        ids = self.index.draft_ids("previewed")
+        if not ids:
+            return []
+        before: dict[str, str] = {}
+        if self.events_file.exists():
+            with self.events_file.open(encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    event = json.loads(line)
+                    if event.get("type") == f"draft.{PREVIEW_SUCCEEDED}":
+                        before[event.get("draft_id") or ""] = event.get("from_status") or ""
+        moved: list[str] = []
+        for draft_id in ids:
+            # The index is only a cache (ADR 006): a stale row naming a draft
+            # whose file is gone must not stop `Store.open`, or the api and
+            # `chronicle reindex` (the tool that repairs the index) could
+            # never start. The file decides; a row it contradicts is skipped.
+            try:
+                draft = self.get_draft(draft_id)
+            except ApiError:
+                continue
+            if draft.status != "previewed":
+                continue
+            target = before.get(draft_id, "")
+            if target not in ("drafting", "in_review"):
+                target = "in_review"
+            draft.status = target
+            self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
+            self._append_event(
+                type="draft.status_migrated",
+                actor="chronicle",
+                draft_id=draft_id,
+                from_status="previewed",
+                to_status=target,
+            )
+            self.index.upsert_draft(draft)
+            moved.append(draft_id)
+        if moved:
+            self._commit(
+                f"migrate {len(moved)} previewed draft(s) to their pre-preview status",
+                "chronicle",
+            )
+        return moved
 
     def close(self) -> None:
         self.index.close()
@@ -1034,7 +1118,11 @@ class Store:
         )
 
         from_status = draft.status
-        transition = resolve_save(draft.status)
+        # A save that changes only announcements leaves the status alone
+        # (issue #69): they never reach the post, so there is nothing to
+        # revise. The version still bumps so history keeps the change.
+        text_unchanged = frontmatter == draft.frontmatter and body == draft.body
+        transition = None if text_unchanged else resolve_save(draft.status)
         if transition is not None:
             draft.status = transition.to_status
         draft.frontmatter = frontmatter
@@ -1279,7 +1367,7 @@ class Store:
         """`act_on_draft`, first running whatever staging steps
         `transitions.plan_action` says stand between the draft's status and
         `action` (a `revise` before a preview of a published post, a `submit`
-        before approving a previewed one). Each step is an ordinary
+        before approving a draft with a current preview). Each step is an ordinary
         transition with its own event and commit, and all of them run under
         one lock so no other writer lands between them. With no plan it is
         exactly `act_on_draft`, refusal included; the `/v1` routes never call
@@ -1608,12 +1696,14 @@ class Store:
         hugo_version: str,
         toolchain_drift: bool,
         built_version: int | None = None,
+        built_text: str | None = None,
     ) -> Run:
         """Move a claimed run to `building` and stamp who is building it.
 
         `built_version` records the draft's `version_no` at the moment the
-        builder read it for this build, so `finish_run` can tell a build
-        that is still current from one the draft has since moved past.
+        builder read it for this build, and `built_text` the
+        `text_fingerprint` of that same snapshot, so `finish_run` can tell a
+        build that is still current from one the draft has since moved past.
         """
         run = self.get_run(run_id)
         run.status = "building"
@@ -1623,6 +1713,7 @@ class Store:
         run.hugo_version = hugo_version
         run.toolchain_drift = toolchain_drift
         run.built_version = built_version
+        run.built_text = built_text
         run.log_path = str(self.log_path_for(run_id).relative_to(self.data_dir))
         self._write_json(self._run_path(run_id), run.model_dump(mode="json"))
         self._append_event(
@@ -1649,13 +1740,14 @@ class Store:
         rejected, or saved back to `drafting`, while the build ran) is left
         exactly as it is.
 
-        A build only transitions the draft when the version it actually
-        built (`run.built_version`, stamped by `start_run`) still matches the
-        draft's current version. A draft saved again while the build ran is
-        left alone, the run is recorded `succeeded` with `result["stale"]`
-        set, and a `draft.preview_stale` event says the draft moved on,
-        because the generated preview reflects a version that is no longer
-        current (round C3 review).
+        A build only transitions the draft when the text it actually built
+        (`run.built_text`, stamped by `start_run`, or `run.built_version` on
+        an older run) still matches the draft's (`preview_is_current`). A
+        draft whose text was saved again while the build ran is left alone,
+        the run is recorded `succeeded` with `result["stale"]` set, and a
+        `draft.preview_stale` event says the draft moved on, because the
+        generated preview no longer reflects its current text (round C3
+        review).
         """
         run = self.get_run(run_id)
         run.status = "succeeded" if succeeded else "failed"
@@ -1706,7 +1798,7 @@ class Store:
             )
         if succeeded and run.kind == "preview":
             current = self.get_draft(run.draft_id)
-            if run.built_version is not None and current.version_no != run.built_version:
+            if not preview_is_current(run, current):
                 stale = True
             else:
                 transition = resolve_run_outcome(current.status, PREVIEW_SUCCEEDED)
@@ -2097,6 +2189,63 @@ class Store:
         return None
 
     @locked
+    def fill_announcement_links(self, draft_id: str, link: str, actor: str) -> Draft | None:
+        """Write the post's public link into its announcements (issue #71).
+
+        Called by the watcher once a publish PR's merge is observed. Writes a
+        new version authored `chronicle` carrying the same frontmatter and
+        body, so history keeps the change and a text-keyed check sees no edit;
+        never goes through `save_draft` and never touches the status. Returns
+        None, and writes nothing, when there is nothing to change: no
+        announcements, or the link already where it belongs (a retried merge).
+        """
+        draft = self.get_draft(draft_id)
+        if draft.status != "published":
+            # Checked under the lock: a save that revised the post after the
+            # merge was observed owns the announcements now.
+            return None
+        filled = announce.fill_links(draft.announcements, link, draft.announcement_link)
+        if filled == draft.announcements and draft.announcement_link == link:
+            return None
+        if filled == draft.announcements:
+            # Nothing to write into the text (every entry empty), but record
+            # the link so a later url change knows what to look for.
+            draft.announcement_link = link
+            self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
+            self._commit(f"draft {draft_id}: announcement link {link}", actor)
+            return draft
+        version = Version(
+            draft_id=draft_id,
+            version_no=draft.version_no + 1,
+            author="chronicle",
+            created_at=now_stamp(),
+            base_version=draft.version_no,
+            message="Fill the published link into the announcements",
+            frontmatter=draft.frontmatter,
+            body=draft.body,
+            announcements=filled,
+        )
+        self._write_json(
+            self._version_path(draft_id, version.version_no), version.model_dump(mode="json")
+        )
+        draft.announcements = filled
+        draft.announcement_link = link
+        draft.version_no = version.version_no
+        draft.updated_at = version.created_at
+        self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
+        self._append_event(
+            type="draft.announcements_linked",
+            actor=actor,
+            draft_id=draft_id,
+            from_status=draft.status,
+            to_status=draft.status,
+        )
+        self._commit(f"draft {draft_id}: version {version.version_no} by chronicle", actor)
+        self.index.upsert_draft(draft)
+        self.index.upsert_version(version)
+        return draft
+
+    @locked
     def observe_pr_outcome(
         self, draft_id: str, event: str, pr_number: int, actor: str = "github"
     ) -> Draft:
@@ -2483,6 +2632,9 @@ class Store:
                     self.index.add_event(Event.model_validate_json(line))
                     counts["events"] += 1
 
+        # A rebuilt index can surface a legacy `previewed` draft that the
+        # migration at open time never saw (ADR 023).
+        self._migrate_previewed_unlocked()
         return counts
 
 

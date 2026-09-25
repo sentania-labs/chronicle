@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import subprocess
 from pathlib import Path
 from typing import Any
 
+from . import scheduled_backup
 from .admin_deps import AdminServices
 from .deps import Services
 from .github_app import readiness_state
@@ -119,6 +121,35 @@ def reconcile_heartbeat(data_dir: Path) -> dict[str, Any] | None:
     return _read_heartbeat(data_dir, RECONCILE_HEARTBEAT_PATH)
 
 
+def scheduled_backup_summary(
+    admin: AdminServices, now: dt.datetime | None = None
+) -> dict[str, Any]:
+    """What `/admin` shows about scheduled backups (issue #68): the schedule,
+    the last success and failure, and whether the last success is more than
+    two intervals old (`overdue`, shown as a warning)."""
+    settings = scheduled_backup.load_settings(admin.state_dir)
+    status = scheduled_backup.load_status(admin.state_dir)
+    now = now or dt.datetime.now(tz=dt.UTC)
+    if settings.target == "s3":
+        where = f"s3://{settings.s3_bucket}/{settings.s3_prefix.strip('/')}".rstrip("/")
+    else:
+        where = settings.local_path or "-"
+    return {
+        "enabled": settings.enabled,
+        "schedule": (
+            f"{scheduled_backup.INTERVAL_CHOICES.get(settings.interval_hours, '?')} at "
+            f"{settings.time_of_day} America/Chicago, keep {settings.retention}"
+        ),
+        "target": where,
+        "last_success_at": status.get("last_success_at"),
+        "last_size_bytes": status.get("last_size_bytes"),
+        "last_location": status.get("last_location"),
+        "last_failure_at": status.get("last_failure_at"),
+        "last_error": status.get("last_error"),
+        "overdue": scheduled_backup.is_overdue(settings, status, now),
+    }
+
+
 def github_app_state(admin: AdminServices) -> str:
     """`readiness_state`, unless test-token mode is active (ADR 012).
 
@@ -185,6 +216,7 @@ def build_status(admin: AdminServices, services: Services) -> dict[str, Any]:
         "github_default_branch": app_record.default_branch if app_record else None,
         "last_digest_at": digest_status.get("finished_at") if digest_status else None,
         "last_backup_at": _last_backup_at(admin),
+        "scheduled_backup": scheduled_backup_summary(admin),
         "post_count": len(store.list_posts()),
         "toolchain": toolchain_summary(admin, builder_hb),
         "submissions_by_status": submissions_by_status,

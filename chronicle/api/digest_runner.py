@@ -91,7 +91,7 @@ def _installation_token(admin: AdminServices, installation_id: str) -> str:
 
 def refresh_from_target(
     store: Store, target: Any, actor: str, admin: AdminServices | None = None
-) -> None:
+) -> digest_mod.HugoConventions:
     """Fetch a repo target's default branch and apply the digest.
 
     Shared by the watcher (a merge just landed) and reconciliation (spec
@@ -106,7 +106,9 @@ def refresh_from_target(
     version or theme submodule change on main is reflected without waiting
     for someone to run a manual digest. The watcher's own call (right after
     observing a merge, before reconciliation runs again) omits `admin`,
-    since the reconcile pass that follows the same merge covers it.
+    since the reconcile pass that follows the same merge covers it; it
+    reads the returned conventions instead where it needs this merge's own
+    config (the public `baseURL` for announcements, issue #71).
 
     `token_provider()` runs before `site_clone_lock()` is taken: it is
     either instant (test-token mode) or one bounded GitHub API call
@@ -139,6 +141,7 @@ def refresh_from_target(
                     "conventions": conventions.as_dict(),
                 }
             )
+    return conventions
 
 
 def run(store: Store, actor: str, admin: AdminServices | None = None) -> DigestSummary:

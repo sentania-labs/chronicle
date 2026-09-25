@@ -75,8 +75,8 @@ ENV CHRONICLE_BUILD_VERSION="${BUILD_VERSION}"
 # owner on a from-empty volume. A Kubernetes PVC gets the same result from
 # the pod's fsGroup instead (see examples/k8s/deployment.yaml).
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin chronicle \
-    && mkdir -p /data /data/preview /data/builder-work \
-    && chown -R chronicle:chronicle /data
+    && mkdir -p /data /data/preview /data/builder-work /backups \
+    && chown -R chronicle:chronicle /data /backups
 
 # -----------------------------------------------------------------------------
 FROM base AS api

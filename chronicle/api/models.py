@@ -45,6 +45,8 @@ DRAFT_STATUSES = (
     "drafting",
     "in_review",
     "revision_requested",
+    # No longer produced (issue #70): kept so a record written before that
+    # still loads until `Store.migrate_previewed` moves it at startup.
     "previewed",
     "approved",
     "published",
@@ -178,6 +180,10 @@ class Draft(BaseModel):
     # part of the converted post, never sent anywhere by Chronicle. A record
     # written before this field existed loads with an empty mapping.
     announcements: dict[str, str] = {}
+    # The public link the watcher last filled into `announcements` (issue
+    # #71), so a later publish at a different url swaps it rather than
+    # adding a second one. None until a publish merge has filled one.
+    announcement_link: str | None = None
 
 
 class Version(BaseModel):
@@ -253,6 +259,10 @@ class Run(BaseModel):
     # so a `preview_succeeded` transition can be skipped when the draft has
     # since moved on to a newer version the build never saw (round C3 review).
     built_version: int | None = None
+    # `store.text_fingerprint` of the frontmatter and body at `built_version`,
+    # so an announcement-only save (issue #69) does not make the build stale.
+    # None on a run started before this field existed.
+    built_text: str | None = None
     # A publish run only: the draft's `version_no` when `approve` queued it,
     # which is the version the reviewer approved. The publisher refuses to
     # convert a draft that has moved past it (issue 41). None on a run queued

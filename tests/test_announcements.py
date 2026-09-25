@@ -20,7 +20,7 @@ from chronicle.api import convert
 from chronicle.api.deps import Services
 from chronicle.api.errors import ApiError
 from chronicle.api.models import Draft, Version, now_stamp
-from chronicle.api.store import Store
+from chronicle.api.store import Store, preview_is_current, text_fingerprint
 
 from .conftest import auth
 
@@ -489,3 +489,155 @@ def test_the_conflict_page_reload_form_carries_the_current_announcements(
     reloaded = client.post(f"/content/drafts/{draft_id}/save", data=reapply)
     assert reloaded.status_code == 200
     assert services.store.get_draft(draft_id).announcements == THREE
+
+
+# --- An announcement-only save changes no status (issue #69) -------------
+
+
+def _force_status(store: Store, draft_id: str, status: str) -> Draft:
+    draft = store.get_draft(draft_id)
+    draft.status = status
+    draft.slug = draft.slug or "announcing-things"
+    path = store.drafts_dir / draft_id / "draft.json"
+    path.write_text(json.dumps(draft.model_dump(mode="json")), encoding="utf-8")
+    return store.get_draft(draft_id)
+
+
+@pytest.mark.parametrize("status", ["published", "revision_requested"])
+def test_an_announcement_only_save_leaves_the_status_alone(store: Store, status: str) -> None:
+    draft, _warnings = store.create_draft("ghostwriter")
+    frontmatter = {**FRONTMATTER, "date": "2026-08-01T09:00:00-05:00"}
+    store.save_draft(draft.id, "ghostwriter", 0, frontmatter, "body")
+    before = _force_status(store, draft.id, status)
+    converted_before = convert.convert(before)
+
+    saved = store.save_draft(draft.id, "ghostwriter", 1, frontmatter, "body", announcements=THREE)
+
+    assert saved.status == status
+    assert saved.version_no == 2
+    assert store.get_version(draft.id, 2).announcements == THREE
+    after = convert.convert(store.get_draft(draft.id))
+    assert after == converted_before
+
+
+def test_a_body_change_on_a_published_draft_still_moves_it_to_drafting(store: Store) -> None:
+    draft, _warnings = store.create_draft("ghostwriter")
+    frontmatter = {**FRONTMATTER, "date": "2026-08-01T09:00:00-05:00"}
+    store.save_draft(draft.id, "ghostwriter", 0, frontmatter, "body")
+    _force_status(store, draft.id, "published")
+
+    saved = store.save_draft(
+        draft.id, "ghostwriter", 1, frontmatter, "new body", announcements=THREE
+    )
+
+    assert saved.status == "drafting"
+
+
+def _previewed_fresh_draft(store: Store) -> str:
+    """A new, undated draft through its real first preview: `_pin_slug` stamps
+    the slug and date onto the draft without writing a version, which is the
+    ordinary path the fingerprint on the run has to survive."""
+    draft, _warnings = store.create_draft("ghostwriter")
+    store.save_draft(draft.id, "ghostwriter", 0, {"title": "Fresh Post"}, "body")
+    _draft, run = store.act_on_draft(draft.id, "preview", "editor", True)
+    assert run is not None
+    built = store.get_draft(draft.id)
+    assert built.slug is not None and "date" in built.frontmatter
+    store.start_run(
+        run.id,
+        "builder-1",
+        "0.164.0",
+        False,
+        built_version=built.version_no,
+        built_text=text_fingerprint(built.frontmatter, built.body),
+    )
+    store.finish_run(run.id, "builder-1", True, {"preview_url": f"/preview/{built.slug}/"})
+    # A build never changes a status (issue #70); the preview is current.
+    assert store.get_draft(draft.id).status == "drafting"
+    return draft.id
+
+
+def test_an_announcement_only_save_keeps_the_preview_current(
+    client: TestClient, services: Services
+) -> None:
+    store = services.store
+    draft_id = _previewed_fresh_draft(store)
+    draft = store.get_draft(draft_id)
+    saved = store.save_draft(
+        draft_id,
+        "ghostwriter",
+        draft.version_no,
+        draft.frontmatter,
+        draft.body,
+        announcements=THREE,
+    )
+    assert saved.status == "drafting"
+    assert "Preview first" not in client.get(f"/content/drafts/{draft_id}").text
+
+    response = client.post(f"/content/drafts/{draft_id}/actions/approve")
+    assert response.status_code == 200
+    assert store.get_draft(draft_id).status == "approved"
+
+
+def test_a_text_save_after_announcements_still_makes_the_preview_stale(
+    client: TestClient, services: Services
+) -> None:
+    store = services.store
+    draft_id = _previewed_fresh_draft(store)
+    draft = store.get_draft(draft_id)
+    store.save_draft(
+        draft_id,
+        "ghostwriter",
+        draft.version_no,
+        draft.frontmatter,
+        draft.body,
+        announcements=THREE,
+    )
+    store.save_draft(draft_id, "ghostwriter", draft.version_no + 1, draft.frontmatter, "edited")
+    assert "Preview first" in client.get(f"/content/drafts/{draft_id}").text
+    assert client.post(f"/content/drafts/{draft_id}/actions/approve").status_code == 409
+
+
+def test_a_build_that_saw_an_announcement_only_save_land_is_not_stale(store: Store) -> None:
+    # The builder reads the draft, then calls `start_run`; an
+    # announcement-only save can land on either side of that call. Either
+    # way the build converted the current text, and `finish_run` must agree
+    # with the editor's "Preview first" that it is current.
+    draft, _warnings = store.create_draft("ghostwriter")
+    store.save_draft(draft.id, "ghostwriter", 0, {"title": "Fresh Post"}, "body")
+    _draft, run = store.act_on_draft(draft.id, "preview", "editor", True)
+    assert run is not None
+    snapshot = store.get_draft(draft.id)  # what the builder read and converts
+    store.save_draft(
+        draft.id,
+        "ghostwriter",
+        snapshot.version_no,
+        snapshot.frontmatter,
+        snapshot.body,
+        announcements=THREE,
+    )
+    store.start_run(
+        run.id,
+        "builder-1",
+        "0.164.0",
+        False,
+        built_version=snapshot.version_no,
+        built_text=text_fingerprint(snapshot.frontmatter, snapshot.body),
+    )
+    finished, _moved = store.finish_run(run.id, "builder-1", True, {"preview_url": "/preview/x/"})
+    assert not (finished.result or {}).get("stale")
+    current = store.get_draft(draft.id)
+    assert current.status == "drafting"
+    assert preview_is_current(finished, current)
+
+
+def test_an_announcement_only_save_writes_a_saved_event_not_a_revise(store: Store) -> None:
+    draft, _warnings = store.create_draft("ghostwriter")
+    frontmatter = {**FRONTMATTER, "date": "2026-08-01T09:00:00-05:00"}
+    store.save_draft(draft.id, "ghostwriter", 0, frontmatter, "body")
+    _force_status(store, draft.id, "published")
+    store.save_draft(draft.id, "ghostwriter", 1, frontmatter, "body", announcements=THREE)
+    events = store.events_file.read_text(encoding="utf-8").splitlines()
+    last = json.loads(events[-1])
+    assert last["type"] == "draft.saved"
+    assert last["from_status"] == last["to_status"] == "published"
