@@ -2655,7 +2655,7 @@ def _clean_material_text(text: str) -> str:
     """A submitter's text as the seeding heuristics should see it: no byte
     order mark and LF line endings, or a CRLF post's frontmatter fence would
     never match and the whole block would land in the body unannounced."""
-    return text.removeprefix("\ufeff").replace("\r\n", "\n")
+    return to_lf(text.removeprefix("\ufeff"))
 
 
 def _primary_material(materials: list[Material]) -> Material | None:

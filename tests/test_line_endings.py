@@ -127,3 +127,18 @@ def test_a_crlf_submission_seeds_an_lf_body(store: Store) -> None:
     draft, _ = store.create_draft("ghostwriter", from_submission=submission.id)
     assert "\r" not in draft.body
     assert "line one\nline two\n" in draft.body
+
+
+def test_a_lone_cr_submission_still_seeds_its_frontmatter(store: Store) -> None:
+    """Codex round: lone-CR text must be normalised before the frontmatter
+    fence is matched, not only after, or the whole block lands in the body."""
+    submission = store.create_submission(
+        "ghostwriter",
+        brief="b",
+        materials=[Material(name="post.md", text="---\rtitle: Lone CR\r---\rbody line\r")],
+        image_ids=[],
+    )
+    store.act_on_submission(submission.id, "claim", "ghostwriter")
+    draft, _ = store.create_draft("ghostwriter", from_submission=submission.id)
+    assert draft.frontmatter.get("title") == "Lone CR"
+    assert draft.body.strip() == "body line"
