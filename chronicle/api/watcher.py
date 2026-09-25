@@ -14,6 +14,8 @@ import logging
 import threading
 from typing import Any
 
+from . import announce
+from . import digest as digest_mod
 from .admin_deps import AdminServices
 from .digest_runner import refresh_from_target
 from .github_client import GitHubApiError
@@ -32,7 +34,7 @@ def _handle_merged(store: Store, target: RepoTarget, watch: WatchEntry) -> None:
     # Never deletes a Post record itself (digest's own no-delete rule,
     # AGENTS.md); the unpublish case right below is not digest, and knows
     # with certainty this specific removal is real.
-    refresh_from_target(store, target, WATCHER_ACTOR)
+    conventions = refresh_from_target(store, target, WATCHER_ACTOR)
     draft = store.get_draft(watch.draft_id)
     if watch.kind == "unpublish" and draft.slug:
         store.remove_post(draft.slug, WATCHER_ACTOR)
@@ -68,7 +70,35 @@ def _handle_merged(store: Store, target: RepoTarget, watch: WatchEntry) -> None:
             current_version=draft.version_no,
         )
     store.observe_pr_outcome(watch.draft_id, "merged", watch.pr_number, actor=WATCHER_ACTOR)
+    if watch.kind == "publish":
+        _fill_announcement_links(store, watch.draft_id, conventions)
     store.clear_watch(watch.draft_id, WATCHER_ACTOR, f"PR #{watch.pr_number} merged")
+
+
+def _fill_announcement_links(store: Store, draft_id: str, conventions: Any) -> None:
+    """Put the post's public link into its announcements (issue #71).
+
+    The base is the site's own production `baseURL` as this merge's refresh
+    just read it. Only a refresh that could not read the config at all (a
+    fallback read, or none) falls back to the last saved digest state: a
+    real read that found no usable `baseURL` means the site removed it, and
+    an old one must not be revived (Codex round). The path is the url the
+    publish run recorded. A site with no absolute `baseURL` leaves the announcements
+    alone. A failure here is logged, never raised: the merge is real and the
+    watch must still clear, and the fill is only a convenience.
+    """
+    try:
+        draft = store.get_draft(draft_id)
+        post_url = (draft.published or {}).get("url")
+        if getattr(conventions, "source", None) == "hugo_config":
+            base = conventions.baseurl
+        else:
+            base = digest_mod.read_base_url_from_state(store.data_dir)
+        if not isinstance(post_url, str) or not base:
+            return
+        store.fill_announcement_links(draft_id, announce.public_link(base, post_url), WATCHER_ACTOR)
+    except Exception:
+        log.exception("filling the published link into draft %s announcements failed", draft_id)
 
 
 def _handle_closed(store: Store, watch: WatchEntry) -> None:

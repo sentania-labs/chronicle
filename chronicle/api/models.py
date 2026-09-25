@@ -171,6 +171,10 @@ class Draft(BaseModel):
     # part of the converted post, never sent anywhere by Chronicle. A record
     # written before this field existed loads with an empty mapping.
     announcements: dict[str, str] = {}
+    # The public link the watcher last filled into `announcements` (issue
+    # #71), so a later publish at a different url swaps it rather than
+    # adding a second one. None until a publish merge has filled one.
+    announcement_link: str | None = None
 
 
 class Version(BaseModel):

@@ -29,7 +29,7 @@ from typing import Any, cast
 
 import yaml
 
-from . import convert, gitrepo
+from . import announce, convert, gitrepo
 from . import digest as digest_mod
 from .atomic import write_atomic
 from .errors import ApiError
@@ -2200,6 +2200,63 @@ class Store:
             if entry.action == "pr_closed" and entry.pr_number == pr_number:
                 return entry
         return None
+
+    @locked
+    def fill_announcement_links(self, draft_id: str, link: str, actor: str) -> Draft | None:
+        """Write the post's public link into its announcements (issue #71).
+
+        Called by the watcher once a publish PR's merge is observed. Writes a
+        new version authored `chronicle` carrying the same frontmatter and
+        body, so history keeps the change and a text-keyed check sees no edit;
+        never goes through `save_draft` and never touches the status. Returns
+        None, and writes nothing, when there is nothing to change: no
+        announcements, or the link already where it belongs (a retried merge).
+        """
+        draft = self.get_draft(draft_id)
+        if draft.status != "published":
+            # Checked under the lock: a save that revised the post after the
+            # merge was observed owns the announcements now.
+            return None
+        filled = announce.fill_links(draft.announcements, link, draft.announcement_link)
+        if filled == draft.announcements and draft.announcement_link == link:
+            return None
+        if filled == draft.announcements:
+            # Nothing to write into the text (every entry empty), but record
+            # the link so a later url change knows what to look for.
+            draft.announcement_link = link
+            self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
+            self._commit(f"draft {draft_id}: announcement link {link}", actor)
+            return draft
+        version = Version(
+            draft_id=draft_id,
+            version_no=draft.version_no + 1,
+            author="chronicle",
+            created_at=now_stamp(),
+            base_version=draft.version_no,
+            message="Fill the published link into the announcements",
+            frontmatter=draft.frontmatter,
+            body=draft.body,
+            announcements=filled,
+        )
+        self._write_json(
+            self._version_path(draft_id, version.version_no), version.model_dump(mode="json")
+        )
+        draft.announcements = filled
+        draft.announcement_link = link
+        draft.version_no = version.version_no
+        draft.updated_at = version.created_at
+        self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
+        self._append_event(
+            type="draft.announcements_linked",
+            actor=actor,
+            draft_id=draft_id,
+            from_status=draft.status,
+            to_status=draft.status,
+        )
+        self._commit(f"draft {draft_id}: version {version.version_no} by chronicle", actor)
+        self.index.upsert_draft(draft)
+        self.index.upsert_version(version)
+        return draft
 
     @locked
     def observe_pr_outcome(

@@ -778,7 +778,10 @@ ANNOUNCEMENT_LABELS = (("x", "X"), ("bluesky", "Bluesky"), ("linkedin", "LinkedI
 
 
 def _announcement_fields(
-    announcements: dict[str, Any], published: dict[str, Any] | None, form_id: str
+    announcements: dict[str, Any],
+    published: dict[str, Any] | None,
+    form_id: str,
+    public_link: str | None = None,
 ) -> str:
     """The edit page's announcements panel (ADR 021).
 
@@ -790,9 +793,13 @@ def _announcement_fields(
     """
     url = (published or {}).get("url")
     link = ""
-    if isinstance(url, str) and url:
-        # No configured public base URL exists anywhere in the service, so
-        # this is the site-relative path convert.post_url wrote, shown as is.
+    if public_link:
+        # The full link the watcher filled in on publish (issue #71).
+        link = f'<p class="announce-url">Published at <code>{escape(public_link)}</code></p>'
+    elif isinstance(url, str) and url:
+        # No public base URL is known (the site has no absolute baseURL, or
+        # no merge has filled one yet), so this is the site-relative path
+        # convert.post_url wrote, shown as is.
         link = f'<p class="announce-url">Published at <code>{escape(url)}</code></p>'
     rows = "".join(
         f'<label class="lat-label" for="announcement_{key}">{escape(label)}</label>'
@@ -943,7 +950,7 @@ def editor_page(
 <aside class="editor-side">
 {_post_info(draft, last_run, preview_url, post_url)}
 {_panel("frontmatter-panel", "Frontmatter", _frontmatter_fields(frontmatter, draft["images"], draft["slug"], draft_id, include_title=False, form_id=EDIT_FORM_ID), open_=False, refresh=False)}
-{_panel("announcements-panel", "Announcements", _announcement_fields(draft.get("announcements") or {}, draft.get("published"), EDIT_FORM_ID), open_=False, refresh=False)}
+{_panel("announcements-panel", "Announcements", _announcement_fields(draft.get("announcements") or {}, draft.get("published"), EDIT_FORM_ID, draft.get("announcement_link")), open_=False, refresh=False)}
 {_panel("feedback-panel", "Feedback", _feedback_log(feedback), open_=True, count=len(feedback))}
 {_panel("images-panel", "Images", _image_upload_form(draft["id"], draft["images"]), open_=True, count=len(draft["images"]))}
 {_panel("versions-panel", "Version history", _version_history(draft["id"], versions), open_=False, count=len(versions))}
