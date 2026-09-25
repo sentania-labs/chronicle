@@ -334,3 +334,79 @@ def test_a_multi_line_material_keeps_its_line_breaks_on_the_detail_page(
     submission_id = make_submission(client, agent_token)
     page = client.get(f"/content/submissions/{submission_id}").text
     assert "<strong>notes</strong>: line one<br>line two" in page
+
+
+# --- The list hides work that has moved on (issue #65) -------------------
+
+
+def _submit(client: TestClient, token: str, brief: str) -> str:
+    response = client.post(
+        "/v1/submissions", json={"brief": brief, "materials": []}, headers=auth(token)
+    )
+    assert response.status_code == 201
+    submission_id: str = response.json()["id"]
+    return submission_id
+
+
+def test_the_list_shows_only_new_and_claimed_by_default(
+    client: TestClient, agent_token: str, services: Services
+) -> None:
+    _submit(client, agent_token, "brief-new")
+    claimed = _submit(client, agent_token, "brief-claimed")
+    services.store.act_on_submission(claimed, "claim", "ghostwriter")
+    drafted = _submit(client, agent_token, "brief-drafted")
+    assert client.post(f"/content/submissions/{drafted}/draft").status_code == 200
+    discarded = _submit(client, agent_token, "brief-discarded")
+    assert client.post(f"/content/submissions/{discarded}/discard").status_code == 200
+
+    listing = client.get("/content/submissions").text
+    assert "brief-new" in listing and "brief-claimed" in listing
+    assert "brief-drafted" not in listing and "brief-discarded" not in listing
+    assert 'href="/content/submissions?show=all"' in listing
+    assert "Show all (2 drafted or discarded)" in listing
+
+    everything = client.get("/content/submissions?show=all").text
+    for brief in ("brief-new", "brief-claimed", "brief-drafted", "brief-discarded"):
+        assert brief in everything
+    assert 'href="/content/submissions">Show open only' in everything
+
+
+def test_a_drafted_submission_links_to_its_post(
+    client: TestClient, agent_token: str, services: Services
+) -> None:
+    submission_id = _submit(client, agent_token, "brief-to-draft")
+    client.post(f"/content/submissions/{submission_id}/draft")
+    draft_id = services.store.get_submission(submission_id).draft_id
+    assert draft_id is not None
+    link = f'href="/content/drafts/{draft_id}"'
+    assert link in client.get("/content/submissions?show=all").text
+    assert link in client.get(f"/content/submissions/{submission_id}").text
+
+
+def test_an_unknown_show_value_reads_as_the_default(client: TestClient, agent_token: str) -> None:
+    submission_id = _submit(client, agent_token, "brief-gone")
+    client.post(f"/content/submissions/{submission_id}/discard")
+    assert "brief-gone" not in client.get("/content/submissions?show=bogus").text
+
+
+def test_the_api_list_still_returns_every_status(client: TestClient, agent_token: str) -> None:
+    submission_id = _submit(client, agent_token, "brief-api")
+    client.post(f"/content/submissions/{submission_id}/discard")
+    listed = client.get("/v1/submissions", headers=auth(agent_token)).json()["submissions"]
+    assert submission_id in {item["id"] for item in listed}
+
+
+def test_show_all_survives_pagination(
+    client: TestClient, agent_token: str, services: Services
+) -> None:
+    from chronicle.api.pagination import PAGE_SIZE
+
+    for n in range(PAGE_SIZE + 1):
+        submission_id = _submit(client, agent_token, f"brief-{n}")
+        services.store.act_on_submission(submission_id, "discard", "ghostwriter")
+    everything = client.get("/content/submissions?show=all").text
+    assert 'href="/content/submissions?page=2&show=all"' in everything
+    # Nothing open: the default view is empty but still offers the toggle.
+    default = client.get("/content/submissions").text
+    assert "<td colspan=7>none</td>" in default
+    assert f"Show all ({PAGE_SIZE + 1} drafted or discarded)" in default
