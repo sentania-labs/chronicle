@@ -487,8 +487,8 @@ def drafts_board_page(
 # --- Editor ---------------------------------------------------------------
 
 # The edit form is `<form id="edit-form">` and everything that belongs to it
-# but sits beside the editor (the frontmatter panel in the sidebar, the sticky
-# Save button) joins it with `form="edit-form"`. The sidebar's own forms
+# but sits beside the editor (the frontmatter and announcements tabs in the
+# sidebar, the sticky Save button) joins it with `form="edit-form"`. The sidebar's own forms
 # (detach, upload) cannot nest inside it, so the sidebar is a sibling.
 EDIT_FORM_ID = "edit-form"
 
@@ -739,9 +739,38 @@ def _post_info(
         if primary_url
         else ""
     )
+    return f'<section id="post-info" data-refresh>{preview_link}{_run_status(last_run)}</section>'
+
+
+def _side_tabs(tabs: list[tuple[str, str, str]]) -> str:
+    """The edit page's side panel as tabs (issue #66): Status, Frontmatter,
+    Announcements, instead of stacked cards that pushed Announcements far
+    down a long post's column.
+
+    Without script every tab panel shows, one after another, so nothing is
+    unreachable; `editor.js` hides all but the chosen one and remembers the
+    choice per viewer. The panels hold form fields joined to the edit form by
+    `form=`, so a hidden tab's fields still save with it. Each tab's contents
+    keep their own ids (`post-info` stays a `data-refresh` region), and the
+    tab wrapper is never swapped, so a refresh cannot undo the chosen tab."""
+    # The first tab starts selected, so a screen reader hears a coherent tab
+    # list even before (or without) script; `editor.js` then moves it to the
+    # viewer's remembered tab.
+    buttons = "".join(
+        f'<button type="button" class="lat-tab{" is-on" if index == 0 else ""}" role="tab" '
+        f'id="side-tab-{key}" data-side-tab="{key}" aria-controls="side-panel-{key}" '
+        f'aria-selected="{"true" if index == 0 else "false"}">{escape(label)}</button>'
+        for index, (key, label, _inner) in enumerate(tabs)
+    )
+    panels = "".join(
+        f'<div class="side-tab-panel" role="tabpanel" id="side-panel-{key}" '
+        f'aria-labelledby="side-tab-{key}" data-side-panel="{key}">{inner}</div>'
+        for key, _label, inner in tabs
+    )
     return (
-        '<section id="post-info" data-refresh class="lat-card panel">'
-        f"{preview_link}{_run_status(last_run)}</section>"
+        '<section id="side-tabs" class="lat-card panel side-tabs">'
+        f'<div class="lat-tabs" role="tablist" aria-label="Post details">{buttons}</div>'
+        f"{panels}</section>"
     )
 
 
@@ -752,16 +781,15 @@ def _panel(
     *,
     open_: bool,
     count: int | None = None,
-    refresh: bool = True,
 ) -> str:
     """A collapsible sidebar panel. `data-refresh` marks it as one the editor
     swaps for the server's fresh copy after a save or an upload, so what the
-    panel shows never lags the record. The frontmatter panel opts out: it
-    holds form fields the visitor may be typing into."""
+    panel shows never lags the record. The form-field tabs (`_side_tabs`) are
+    not panels and never refresh: they hold fields the visitor may be typing
+    into."""
     badge = f' <span class="count lat-pill"><b>{count}</b></span>' if count is not None else ""
-    marker = " data-refresh" if refresh else ""
     return (
-        f'<details id="{panel_id}"{marker} class="lat-card panel"{" open" if open_ else ""}>'
+        f'<details id="{panel_id}" data-refresh class="lat-card panel"{" open" if open_ else ""}>'
         f"<summary>{escape(title)}{badge}</summary>{inner}</details>"
     )
 
@@ -934,7 +962,11 @@ def editor_page(
     image_dir_value = draft.get("image_dir")
     image_dir_attr = f' data-image-dir="{escape(image_dir_value)}"' if image_dir_value else ""
     body = f"""
-<div id="editor-app" data-draft-id="{draft_id}" data-version="{draft["version_no"]}"{image_dir_attr} data-lease-seconds="{HEARTBEAT_SECONDS}" data-lease-page="{escape(lease_page)}"{' data-read-only="1"' if locked_by else ""}>
+<div id="editor-app" data-draft-id="{draft_id}" data-version="{draft["version_no"]}"{
+        image_dir_attr
+    } data-lease-seconds="{HEARTBEAT_SECONDS}" data-lease-page="{escape(lease_page)}"{
+        ' data-read-only="1"' if locked_by else ""
+    }>
 <div id="backup-banner" class="backup-banner {ui_chrome.banner_class("warn")}" role="alert" hidden>
 <span id="backup-banner-text"></span>
 <button type="button" id="backup-restore" class="lat-btn">Restore</button>
@@ -956,16 +988,60 @@ def editor_page(
 <label class="lat-label" for="title">Title</label>
 <input type="text" class="lat-input" id="title" name="title" value="{escape(title_value)}" required>
 <label class="lat-label" for="body">Body (markdown)</label>
-<textarea class="lat-textarea" id="body" name="body" data-editor="markdown">{escape(draft["body"])}</textarea>
+<textarea class="lat-textarea" id="body" name="body" data-editor="markdown">{
+        escape(draft["body"])
+    }</textarea>
 </form>
 </div>
 <aside class="editor-side">
-{_post_info(draft, last_run, preview_url, post_url)}
-{_panel("frontmatter-panel", "Frontmatter", _frontmatter_fields(frontmatter, draft["images"], draft["slug"], draft_id, include_title=False, form_id=EDIT_FORM_ID), open_=False, refresh=False)}
-{_panel("announcements-panel", "Announcements", _announcement_fields(draft.get("announcements") or {}, draft.get("published"), EDIT_FORM_ID, draft.get("announcement_link")), open_=False, refresh=False)}
+{
+        _side_tabs(
+            [
+                ("status", "Status", _post_info(draft, last_run, preview_url, post_url)),
+                (
+                    "frontmatter",
+                    "Frontmatter",
+                    _frontmatter_fields(
+                        frontmatter,
+                        draft["images"],
+                        draft["slug"],
+                        draft_id,
+                        include_title=False,
+                        form_id=EDIT_FORM_ID,
+                    ),
+                ),
+                (
+                    "announcements",
+                    "Announcements",
+                    _announcement_fields(
+                        draft.get("announcements") or {},
+                        draft.get("published"),
+                        EDIT_FORM_ID,
+                        draft.get("announcement_link"),
+                    ),
+                ),
+            ]
+        )
+    }
 {_panel("feedback-panel", "Feedback", _feedback_log(feedback), open_=True, count=len(feedback))}
-{_panel("images-panel", "Images", _image_upload_form(draft["id"], draft["images"]), open_=True, count=len(draft["images"]))}
-{_panel("versions-panel", "Version history", _version_history(draft["id"], versions), open_=False, count=len(versions))}
+{
+        _panel(
+            "images-panel",
+            "Images",
+            _image_upload_form(draft["id"], draft["images"]),
+            open_=True,
+            count=len(draft["images"]),
+        )
+    }
+{
+        _panel(
+            "versions-panel",
+            "Version history",
+            _version_history(draft["id"], versions),
+            open_=False,
+            count=len(versions),
+        )
+    }
 </aside>
 </div>
 </div>

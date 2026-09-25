@@ -194,6 +194,12 @@ details#published > summary { cursor: pointer; font-weight: 600; padding: var(--
 #pr-open-notice:not([hidden]) { margin: 0 0 var(--space-7); }
 
 .editor-layout { display: grid; grid-template-columns: minmax(0, 1fr) 24rem; gap: var(--space-7); align-items: start; }
+/* Phone width (issue #66): the side column stacks under the editor instead
+   of holding a fixed 24rem beside it and pushing the page sideways. */
+@media (max-width: 56rem) {
+  .editor-layout { grid-template-columns: minmax(0, 1fr); }
+  .editor-side textarea, .editor-side input, .editor-side select { max-width: 100%; }
+}
 .editor-side > .lat-card { margin-bottom: var(--space-7); }
 .editor-side > .lat-card:last-child { margin-bottom: 0; }
 .editor-side summary {
@@ -324,3 +330,10 @@ details#published > summary { cursor: pointer; font-weight: 600; padding: var(--
 }
 .editor-preview-side table, .editor-preview table { border-collapse: collapse; }
 .editor-preview-side hr, .editor-preview hr { border: 0; border-top: 1px solid var(--line); }
+
+/* The edit page's side panel as tabs (issue #66). The tab row wraps at
+   phone width rather than scrolling sideways; without script every panel
+   shows in turn, and editor.js hides all but the chosen one. */
+.side-tabs > .lat-tabs { flex-wrap: wrap; margin-bottom: var(--space-5); }
+.side-tabs .lat-tab { padding: 8px 8px; white-space: nowrap; }
+.side-tab-panel[hidden] { display: none; }
