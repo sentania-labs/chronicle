@@ -108,6 +108,13 @@ and `test` jobs run; `make build` builds all three Docker targets locally.
   transition. Never decide a status anywhere else: that table is the whole
   lifecycle. A save whose frontmatter and body equal the draft's current ones
   (announcements only, issue #69) skips `revise` and keeps its status.
+- **A draft's body is LF, always.** `Draft.body` and `Version.body` convert
+  CRLF and a lone CR to LF when a record loads and when it is written
+  (`models.to_lf`, issue #51), and `save_draft` compares the incoming body
+  in that form. A record stored with CRLF before this rule is read as LF,
+  with no backfill. A publish of a post that is CRLF on main therefore
+  commits it as LF once, and a preview built from a CRLF body before this
+  rule reads as stale until it is rebuilt (its `built_text` hashed the CR).
 - **Announcements live on the draft, never in frontmatter and never in the
   post.** `Draft.announcements` and `Version.announcements` (ADR 021) hold
   suggested social text under exactly the three keys in
