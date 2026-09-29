@@ -1,11 +1,26 @@
-"""What every UI route needs: the ui-token consumer, and a CSRF door.
+"""What every UI route needs: the consumer behind the call, and a CSRF door.
+
+With legacy consumer tokens this is `require_ui_consumer`, which reads the
+`ui` token from disk and returns `Consumer(token_name=UI_TOKEN_NAME)`
+(`is_ui` is `True`, `role` is `"editor"`).
+
+When OIDC is configured (step 1 of issue #81), the UI backend stops
+relying on the `ui` token for authorisation and instead derives a
+`Consumer` from the signed OIDC session cookie: `Consumer(token_name=...,
+role=session_role)`.  A separate dependency (`require_oidc_session`)
+performs that lookup; routes that use it replace their `Depends`
+accordingly (see `routes/ui.py` draft_actions).
+
+Regardless of the source, the returned `Consumer` always carries the
+correct `role` so that `transitions.py` and `ui_actions.py` can use a
+single `actor_role` gate instead of the legacy `actor_is_ui` boolean.
 
 ADR 014: the UI backend never holds a session and the browser never holds a
-token. It authenticates its own calls into the domain layer the same way any
+token.  It authenticates its own calls into the domain layer the same way any
 other consumer would, except the bearer value is read fresh from
 `data/state/ui_token.txt` on every request instead of an Authorization
 header, so a rotation (or a revoke on `/admin/tokens`) takes effect on the
-next click, not on next restart. `Consumer(token_name=UI_TOKEN_NAME)` is the
+next click, not on next restart.  `Consumer(token_name=UI_TOKEN_NAME)` is the
 same type `require_consumer` returns for a real bearer call, so
 `consumer.name` resolves to `editor` and `consumer.is_ui` is `True` exactly as
 spec section 11 requires.
@@ -33,7 +48,10 @@ def require_ui_consumer(request: Request) -> Consumer:
         # working the moment that happens, not keep acting as a name no
         # token backs any more.
         raise ApiError(503, "ui_token_revoked", "the ui token is revoked or unavailable")
-    return Consumer(token_name=UI_TOKEN_NAME)
+    from .deps import _resolve_consumer_role
+
+    role = _resolve_consumer_role(UI_TOKEN_NAME)
+    return Consumer(token_name=UI_TOKEN_NAME, role=role)
 
 
 def get_settings(request: Request) -> Settings:

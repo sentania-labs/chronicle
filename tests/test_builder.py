@@ -101,7 +101,7 @@ def _make_draft(store: Store) -> str:
 
 
 def _queue_preview(store: Store, draft_id: str) -> str:
-    _, run = store.act_on_draft(draft_id, "preview", "ghostwriter", actor_is_ui=False)
+    _, run = store.act_on_draft(draft_id, "preview", "ghostwriter", actor_role="contributor")
     assert run is not None
     return run.id
 
@@ -224,7 +224,7 @@ def test_failed_build_leaves_draft_and_previous_preview_intact(
 
     # Now force a failure and confirm the previous tree survives untouched.
     monkeypatch.setenv("CHRONICLE_FAKE_HUGO_FAIL", "1")
-    _, second_run = store.act_on_draft(draft_id, "preview", "ghostwriter", actor_is_ui=False)
+    _, second_run = store.act_on_draft(draft_id, "preview", "ghostwriter", actor_role="contributor")
     assert second_run is not None
     _build(store, builder_settings, second_run)
 
@@ -765,7 +765,7 @@ def test_swap_has_no_404_window_while_a_new_build_replaces_the_old_one(
     try:
         for _ in range(20):
             _, second_run = store.act_on_draft(
-                draft_id, "preview", "ghostwriter", actor_is_ui=False
+                draft_id, "preview", "ghostwriter", actor_role="contributor"
             )
             assert second_run is not None
             _build(store, builder_settings, second_run)
@@ -791,7 +791,7 @@ def test_failed_build_after_a_symlink_swap_leaves_the_old_preview_live(
     live_target = destination.resolve()
 
     monkeypatch.setenv("CHRONICLE_FAKE_HUGO_FAIL", "1")
-    _, second_run = store.act_on_draft(draft_id, "preview", "ghostwriter", actor_is_ui=False)
+    _, second_run = store.act_on_draft(draft_id, "preview", "ghostwriter", actor_role="contributor")
     assert second_run is not None
     _build(store, builder_settings, second_run)
 

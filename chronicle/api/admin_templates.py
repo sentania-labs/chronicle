@@ -623,6 +623,8 @@ def tokens_page(
     return page("Tokens", body, notice, "ok" if minted else "error", active=TOKENS_TAB)
 
 
+
+
 def _short(sha: Any) -> str:
     text = str(sha or "")
     return text[:12] if text else "-"
@@ -816,3 +818,122 @@ pushed to the default branch.</p>
 {modules_html}
 """
     return page("Toolchain", body, notice=notice, notice_kind=notice_kind, active=TOOLCHAIN_TAB)
+
+
+def settings_page(
+    *,
+    issuer: str = "",
+    client_id: str = "",
+    redirect_uri: str = "",
+    scopes: str = "",
+    groups_claim: str = "groups",
+    group_role_map: dict[str, str] | None = None,
+    discovery_result: dict | None = None,
+    discovery_error: str | None = None,
+    errors: dict[str, str] | None = None,
+    success: str | None = None,
+) -> str:
+    """Admin settings page for OIDC configuration."""
+    import json
+
+    group_rows = group_role_map or {}
+
+    group_rows_html = ""
+    if group_rows:
+        for gname, grole in group_rows.items():
+            group_rows_html += (
+                '<div class="settings-row" data-role="' + grole + '">\n'
+                '<input type="text" name="gname"\n'
+                ' value="' + escape(gname) + '" placeholder="Group name"\n'
+                ' style="margin-right: 8px;">\n'
+                '<select name="grole">\n'
+                + '<option value="reader"' + (' selected' if grole == "reader" else '') + '>reader</option>\n'
+                + '<option value="contributor"' + (' selected' if grole == "contributor" else '') + '>contributor</option>\n'
+                + '<option value="editor"' + (' selected' if grole == "editor" else '') + '>editor</option>\n'
+                + '<option value="admin"' + (' selected' if grole == "admin" else '') + '>admin</option>\n'
+                '</select>\n'
+                '<button type="button" class="remove-group-btn"\n'
+                ' onclick="removeGroupRow(this)">Remove</button>\n'
+                '</div>\n'
+            )
+
+    discovery_html = ""
+    if discovery_result and discovery_result.get("status") == "ok":
+        discovery_html = '<div class="notice ok">Discovery succeeded.</div>\n'
+        discovery_html += '<pre>' + json.dumps(discovery_result.get("data", {}), indent=2) + '</pre>\n'
+    if discovery_error:
+        discovery_html += '<div class="notice error">Discovery failed: ' + escape(discovery_error) + '</div>\n'
+
+    error_html = ""
+    if errors:
+        for field, msg in errors.items():
+            error_html += '<div class="notice error">' + escape(msg) + '</div>\n'
+
+    select_options_js = json.dumps(["reader", "contributor", "editor", "admin"])
+
+    notice_html = ""
+    if success:
+        notice_html = '<p class="notice ok lat-banner">' + escape(success) + '</p>'
+
+    body = f"""
+{notice_html}
+{error_html}
+{discovery_html}
+<form method="post" action="/admin/settings">
+<h3>OIDC Configuration</h3>
+<p>Configure the OpenID Connect provider so members of a group can sign in to Chronicle.</p>
+
+<label>Issuer URL<br>
+<input type="text" name="issuer" value="{escape(issuer)}" style="width: 100%;"></label><br><br>
+
+<label>Client ID<br>
+<input type="text" name="client_id" value="{escape(client_id)}" style="width: 100%;"></label><br><br>
+
+<label>Client Secret<br>
+<input type="password" name="client_secret" style="width: 100%;" placeholder="Enter secret (write-only)"></label><br><br>
+
+<label>Redirect URI<br>
+<input type="text" name="redirect_uri" value="{escape(redirect_uri)}" style="width: 100%;"></label><br><br>
+
+<label>Scopes (comma-separated)<br>
+<input type="text" name="scopes" value="{escape(scopes)}" style="width: 100%;"></label><br><br>
+
+<label>Groups claim name<br>
+<input type="text" name="groups_claim_name" value="{escape(groups_claim)}" style="width: 100%;"></label><br><br>
+
+<h3>Group &rarr; Role Mapping</h3>
+<p>Each group that signs in maps to a Chronicle role. A person gets the highest role among all their groups.</p>
+<div id="group-rows">
+{group_rows_html if group_rows_html else '<p class="notice">No groups configured yet.</p>'}
+</div>
+<button type="button" onclick="addGroupRow()">+ Add group</button><br><br>
+
+<button type="submit" class="lat-btn">Save settings</button>
+</form>
+
+<form method="post" action="/admin/settings/test-discovery">
+<label>Issuer URL for test<br>
+<input type="text" name="issuer" value="{escape(issuer)}" style="width: 100%;"></label>
+<button type="submit" class="lat-btn lat-btn--secondary">Test discovery</button>
+</form>
+
+<script>
+function removeGroupRow(btn) {{
+    var row = btn.closest(".settings-row");
+    if (row) row.remove();
+}}
+function addGroupRow() {{
+    var div = document.createElement("div");
+    div.className = "settings-row";
+    var opts = {select_options_js};
+    var html = '<input type="text" name="gname" placeholder="Group name" style="margin-right: 8px;">';
+    html += '<select name="grole">';
+    opts.forEach(function(r) {{ html += '<option value="' + r + '">' + r + '</option>'; }});
+    html += '</select> ';
+    html += '<button type="button" class="remove-group-btn" onclick="removeGroupRow(this)">Remove</button>';
+    div.innerHTML = html;
+    document.getElementById("group-rows").appendChild(div);
+}}
+</script>
+"""
+    return page("OIDC Settings", body, notice_html, "", active=TOKENS_TAB)

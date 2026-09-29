@@ -86,8 +86,8 @@ def _fake_repo(monkeypatch: pytest.MonkeyPatch) -> publisher.RepoTarget:
 def _approved_and_published(store: Store, target: publisher.RepoTarget, ops: FakeRepoOps) -> Draft:
     draft, _ = store.create_draft("scott")
     store.save_draft(draft.id, "scott", 0, {"title": "A Post"}, "Body.\n")
-    store.act_on_draft(draft.id, "submit", "scott", True)
-    draft, run = store.act_on_draft(draft.id, "approve", "scott", True)
+    store.act_on_draft(draft.id, "submit", "scott", actor_role="editor")
+    draft, run = store.act_on_draft(draft.id, "approve", "scott", actor_role="editor")
     assert run is not None
     publisher.run_one(store, target, run)
     watch = store.get_watch(draft.id)
@@ -404,8 +404,8 @@ def test_publisher_treats_a_digest_created_record_as_an_update(store: Store) -> 
     store.save_draft(
         draft.id, "scott", draft.version_no, {**draft.frontmatter, "title": "Hello v2"}, "New.\n"
     )
-    store.act_on_draft(draft.id, "submit", "scott", True)
-    _, run = store.act_on_draft(draft.id, "approve", "scott", True)
+    store.act_on_draft(draft.id, "submit", "scott", actor_role="editor")
+    _, run = store.act_on_draft(draft.id, "approve", "scott", actor_role="editor")
     assert run is not None
 
     target, ops = _target()

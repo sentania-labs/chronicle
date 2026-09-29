@@ -912,6 +912,7 @@ def editor_page(
     post_url: str | None = None,
     *,
     banner: bool,
+    actor_role: str = "contributor",
     came_back: bool = False,
     has_preview: bool = False,
     publish_pr_open: bool = False,
@@ -946,6 +947,7 @@ def editor_page(
         publish_pr_open=publish_pr_open,
         publish_run_active=publish_run_active,
         unpublish_pr_open=unpublish_pr_open,
+        actor_role=actor_role,
     )
     details = status_details(
         draft["status"],

@@ -820,7 +820,7 @@ def test_editor_save_with_a_cleared_date_field_keeps_the_pinned_stamp(
     can omit the key; once the slug is pinned, clearing it must not lose the
     stamp `_pin_slug` wrote."""
     draft_id = make_draft(services, "drafting", title="Dated post")
-    services.store.act_on_draft(draft_id, "preview", "ghostwriter", actor_is_ui=False)
+    services.store.act_on_draft(draft_id, "preview", "ghostwriter", actor_role="contributor")
     draft = services.store.get_draft(draft_id)
     stamped = draft.frontmatter["date"]
     assert stamped
@@ -1802,7 +1802,7 @@ def test_feedback_log_renders_line_breaks_without_opening_an_html_hole(
     client: TestClient, services: Services
 ) -> None:
     draft_id = make_draft(services, "in_review")
-    services.store.act_on_draft(draft_id, "request_revision", "editor", True, feedback=NOTE)
+    services.store.act_on_draft(draft_id, "request_revision", "editor", actor_role="editor", feedback=NOTE)
 
     html = client.get(f"/content/drafts/{draft_id}").text
     log = html[html.index('<ul class="chr-log">') :]

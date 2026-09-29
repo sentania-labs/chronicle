@@ -59,7 +59,7 @@ def test_real_hugo_builds_two_posts_with_rewritten_images(store: Store) -> None:
     )
     image, _ = store.put_image(png_bytes(), "fresh.png")
     store.attach_image(draft.id, image.image_id, "inline", "ghostwriter")
-    _, run = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+    _, run = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_role="contributor")
     assert run is not None
 
     settings = _fixture_settings(store.data_dir, store.data_dir / "builder-work")

@@ -31,8 +31,8 @@ def _target() -> tuple[publisher.RepoTarget, FakeRepoOps]:
 def _approved_draft(store: Store):
     draft, _ = store.create_draft("scott")
     store.save_draft(draft.id, "scott", 0, {"title": "A Post"}, "Body.\n")
-    store.act_on_draft(draft.id, "submit", "scott", True)
-    draft, run = store.act_on_draft(draft.id, "approve", "scott", True)
+    store.act_on_draft(draft.id, "submit", "scott", actor_role="editor")
+    draft, run = store.act_on_draft(draft.id, "approve", "scott", actor_role="editor")
     return draft, run
 
 
@@ -75,7 +75,7 @@ def test_unpublish_merge_removes_post_record(store: Store) -> None:
     )
     assert store.get_post(slug) is not None
 
-    draft2, unpub_run = store.act_on_draft(draft.id, "unpublish", "scott", True)
+    draft2, unpub_run = store.act_on_draft(draft.id, "unpublish", "scott", actor_role="editor")
     assert unpub_run is not None
     publisher.run_one(store, target, unpub_run)
     watch2 = store.get_watch(draft.id)

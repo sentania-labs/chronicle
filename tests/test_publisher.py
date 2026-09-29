@@ -33,8 +33,8 @@ def _approved_draft(store: Store, *, summary: str = "") -> tuple:
     if summary:
         frontmatter["summary"] = summary
     store.save_draft(draft.id, "scott", 0, frontmatter, "Hello, world.\n")
-    store.act_on_draft(draft.id, "submit", "scott", True)
-    draft, run = store.act_on_draft(draft.id, "approve", "scott", True)
+    store.act_on_draft(draft.id, "submit", "scott", actor_role="editor")
+    draft, run = store.act_on_draft(draft.id, "approve", "scott", actor_role="editor")
     assert run is not None and run.kind == "publish"
     return draft, run
 
@@ -80,7 +80,7 @@ def test_pr_body_links_the_post_first_and_the_preview_site_second(store: Store) 
     the site root alone."""
     draft, _ = store.create_draft("scott")
     store.save_draft(draft.id, "scott", 0, {"title": "My First Post"}, "Hello, world.\n")
-    _, preview_run = store.act_on_draft(draft.id, "preview", "scott", True)
+    _, preview_run = store.act_on_draft(draft.id, "preview", "scott", actor_role="editor")
     assert preview_run is not None
     store.finish_run(
         preview_run.id,
@@ -92,8 +92,8 @@ def test_pr_body_links_the_post_first_and_the_preview_site_second(store: Store) 
             "slug": "my-first-post",
         },
     )
-    store.act_on_draft(draft.id, "submit", "scott", True)
-    draft, run = store.act_on_draft(draft.id, "approve", "scott", True)
+    store.act_on_draft(draft.id, "submit", "scott", actor_role="editor")
+    draft, run = store.act_on_draft(draft.id, "approve", "scott", actor_role="editor")
     assert run is not None
     target, ops = _target()
     publisher.run_one(store, target, run)
@@ -113,7 +113,7 @@ def test_pr_body_derives_the_post_link_when_the_run_predates_post_url(store: Sto
     still links the post itself rather than only the preview site's root."""
     draft, _ = store.create_draft("scott")
     store.save_draft(draft.id, "scott", 0, {"title": "My First Post"}, "Hello, world.\n")
-    _, preview_run = store.act_on_draft(draft.id, "preview", "scott", True)
+    _, preview_run = store.act_on_draft(draft.id, "preview", "scott", actor_role="editor")
     assert preview_run is not None
     store.finish_run(
         preview_run.id,
@@ -121,8 +121,8 @@ def test_pr_body_derives_the_post_link_when_the_run_predates_post_url(store: Sto
         succeeded=True,
         result={"preview_url": "https://x/preview/my-first-post/", "slug": "my-first-post"},
     )
-    store.act_on_draft(draft.id, "submit", "scott", True)
-    draft, run = store.act_on_draft(draft.id, "approve", "scott", True)
+    store.act_on_draft(draft.id, "submit", "scott", actor_role="editor")
+    draft, run = store.act_on_draft(draft.id, "approve", "scott", actor_role="editor")
     assert run is not None
     stamp = draft.frontmatter["date"][:7].replace("-", "/")
     derived = f"https://x/preview/my-first-post/{stamp}/my-first-post/"
@@ -267,8 +267,8 @@ def test_first_publish_writes_date_republish_keeps_it(
         {"title": "My First Post"},
         "Updated body.\n",
     )
-    store.act_on_draft(draft.id, "submit", "scott", True)
-    draft2, run2 = store.act_on_draft(draft.id, "approve", "scott", True)
+    store.act_on_draft(draft.id, "submit", "scott", actor_role="editor")
+    draft2, run2 = store.act_on_draft(draft.id, "approve", "scott", actor_role="editor")
     assert run2 is not None
     publisher.run_one(store, target, run2)
 
@@ -295,7 +295,7 @@ def test_unpublish_deletes_exactly_what_publish_wrote(
     watcher.check_one(store, target, watch)
     assert store.get_draft(draft.id).status == "published"
 
-    draft3, unpublish_run = store.act_on_draft(draft.id, "unpublish", "scott", True)
+    draft3, unpublish_run = store.act_on_draft(draft.id, "unpublish", "scott", actor_role="editor")
     assert unpublish_run is not None and unpublish_run.kind == "unpublish"
     publisher.run_one(store, target, unpublish_run)
 
@@ -336,7 +336,7 @@ def test_reapprove_after_failed_publish_queues_a_new_run(store: Store) -> None:
     publisher.run_one(store, target, run)
     assert store.get_draft(draft.id).status == "in_review"
 
-    draft2, run2 = store.act_on_draft(draft.id, "approve", "scott", True)
+    draft2, run2 = store.act_on_draft(draft.id, "approve", "scott", actor_role="editor")
     assert draft2.status == "approved"
     assert run2 is not None and run2.kind == "publish"
 
@@ -352,7 +352,7 @@ def test_reapprove_is_rejected_while_a_publish_pr_is_still_open(store: Store) ->
     assert store.get_watch(draft.id) is not None
 
     with pytest.raises(Exception) as excinfo:
-        store.act_on_draft(draft.id, "approve", "scott", True)
+        store.act_on_draft(draft.id, "approve", "scott", actor_role="editor")
     assert getattr(excinfo.value, "status_code", None) == 409
 
 
@@ -463,8 +463,8 @@ def test_republish_deletes_an_image_detached_since_the_last_publish(
         {"title": "Has An Image", "featureImage": "cover.png"},
         "Body with an image.\n",
     )
-    store.act_on_draft(draft.id, "submit", "scott", True)
-    draft, run = store.act_on_draft(draft.id, "approve", "scott", True)
+    store.act_on_draft(draft.id, "submit", "scott", actor_role="editor")
+    draft, run = store.act_on_draft(draft.id, "approve", "scott", actor_role="editor")
     assert run is not None
 
     target, ops = _target()
@@ -488,8 +488,8 @@ def test_republish_deletes_an_image_detached_since_the_last_publish(
         {"title": "Has An Image"},
         "Body without the image now.\n",
     )
-    store.act_on_draft(draft.id, "submit", "scott", True)
-    draft, run2 = store.act_on_draft(draft.id, "approve", "scott", True)
+    store.act_on_draft(draft.id, "submit", "scott", actor_role="editor")
+    draft, run2 = store.act_on_draft(draft.id, "approve", "scott", actor_role="editor")
     assert run2 is not None
     publisher.run_one(store, target, run2)
 
@@ -533,8 +533,8 @@ def test_detach_is_refused_while_a_publish_run_is_in_flight(store: Store) -> Non
     image, _ = store.put_image(png_bytes(), "kept.png")
     store.attach_image(draft.id, image.image_id, "inline", "scott")
     store.save_draft(draft.id, "scott", 0, {"title": "T"}, "![kept](kept.png)\n")
-    store.act_on_draft(draft.id, "submit", "scott", True)
-    store.act_on_draft(draft.id, "approve", "scott", True)
+    store.act_on_draft(draft.id, "submit", "scott", actor_role="editor")
+    store.act_on_draft(draft.id, "approve", "scott", actor_role="editor")
 
     with pytest.raises(ApiError) as caught:
         store.detach_image(draft.id, image.image_id, "ghostwriter")
@@ -550,8 +550,8 @@ def test_publish_gate_reads_durable_files_when_the_index_lacks_the_run(store: St
     kept, _ = store.put_image(png_bytes(), "kept.png")
     store.attach_image(draft.id, kept.image_id, "inline", "scott")
     store.save_draft(draft.id, "scott", 0, {"title": "T"}, "![kept](kept.png)\n")
-    store.act_on_draft(draft.id, "submit", "scott", True)
-    _, run = store.act_on_draft(draft.id, "approve", "scott", True)
+    store.act_on_draft(draft.id, "submit", "scott", actor_role="editor")
+    _, run = store.act_on_draft(draft.id, "approve", "scott", actor_role="editor")
     assert run is not None
     other, _ = store.put_image(png_bytes((9, 9, 9)), "other.png")
 
@@ -570,7 +570,7 @@ def test_publish_gate_reads_durable_files_when_the_index_lacks_the_run(store: St
         store.detach_image(draft.id, kept.image_id, "ghostwriter")
     assert detached.value.code == "publish_run_in_progress"
     with pytest.raises(ApiError) as reapproved:
-        store.act_on_draft(draft.id, "approve", "scott", True)
+        store.act_on_draft(draft.id, "approve", "scott", actor_role="editor")
     assert reapproved.value.code == "publish_run_in_progress"
 
     fresh = store.get_draft(draft.id)
@@ -606,7 +606,7 @@ def test_save_between_unpublish_and_its_run_is_refused(
     in that window was accepted, moved the draft to `drafting`, and the unpublish
     run then found a draft that was no longer published."""
     draft, target, ops = _published_draft(store, monkeypatch)
-    _, unpublish_run = store.act_on_draft(draft.id, "unpublish", "scott", True)
+    _, unpublish_run = store.act_on_draft(draft.id, "unpublish", "scott", actor_role="editor")
     assert unpublish_run is not None and unpublish_run.kind == "unpublish"
     version = store.get_draft(draft.id).version_no
 
@@ -669,7 +669,7 @@ def test_unclaimed_publish_run_times_out_and_the_draft_is_usable_again(store: St
 
     saved = store.save_draft(draft.id, "scott", version, {"title": "My First Post"}, "edit\n")
     assert saved.version_no == version + 1
-    _, again = store.act_on_draft(draft.id, "approve", "scott", True)
+    _, again = store.act_on_draft(draft.id, "approve", "scott", actor_role="editor")
     assert again is not None and again.id != run.id
 
 
@@ -677,7 +677,7 @@ def test_unclaimed_unpublish_run_times_out_and_the_post_stays_published(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     draft, _, _ = _published_draft(store, monkeypatch)
-    _, run = store.act_on_draft(draft.id, "unpublish", "scott", True)
+    _, run = store.act_on_draft(draft.id, "unpublish", "scott", actor_role="editor")
     assert run is not None
     version = store.get_draft(draft.id).version_no
 
@@ -704,7 +704,7 @@ def test_queue_timeout_leaves_building_and_preview_runs_alone(store: Store) -> N
     store.start_run(run.id, publisher.PUBLISHER_ACTOR, hugo_version="", toolchain_drift=False)
     other, _ = store.create_draft("scott")
     store.save_draft(other.id, "scott", 0, {"title": "Other"}, "x\n")
-    _, preview = store.act_on_draft(other.id, "preview", "scott", True)
+    _, preview = store.act_on_draft(other.id, "preview", "scott", actor_role="editor")
     assert preview is not None and preview.kind == "preview"
 
     assert publisher.expire_unclaimed_runs(store, 1, now=_later(10_000)) == []

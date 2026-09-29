@@ -193,7 +193,7 @@ def act_on_draft(
         draft_id,
         action,
         consumer.name,
-        consumer.is_ui,
+        consumer.role,
         payload.feedback if payload else None,
     )
     return {"draft": _dump(draft), "run_id": run.id if run else None}
