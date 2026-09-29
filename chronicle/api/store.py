@@ -1352,10 +1352,10 @@ class Store:
         draft_id: str,
         action: str,
         actor: str,
-        actor_is_ui: bool,
+        actor_role: str,
         feedback: str | None = None,
     ) -> tuple[Draft, Run | None]:
-        return self._act_on_draft_unlocked(draft_id, action, actor, actor_is_ui, feedback)
+        return self._act_on_draft_unlocked(draft_id, action, actor, actor_role, feedback)
 
     @locked
     def act_on_draft_staged(
@@ -1363,7 +1363,7 @@ class Store:
         draft_id: str,
         action: str,
         actor: str,
-        actor_is_ui: bool,
+        actor_role: str,
         feedback: str | None = None,
         guard: Callable[[Draft], str | None] | None = None,
     ) -> tuple[Draft, Run | None]:
@@ -1387,26 +1387,26 @@ class Store:
             refusal = guard(draft)
             if refusal is not None:
                 raise ApiError(409, "offer_unavailable", refusal)
-        steps = plan_action(draft.status, action, actor_is_ui) or (action,)
+        steps = plan_action(draft.status, action, actor_role) or (action,)
         if len(steps) > 1 and action in ("preview", "approve") and draft.slug is None:
             # The one refusal the final step can raise that a staging step
             # cannot: find it out before anything is written, on a copy that
             # is never saved, so a refused click leaves the status alone.
             self._pin_slug(draft)
         for step in steps[:-1]:
-            self._act_on_draft_unlocked(draft_id, step, actor, actor_is_ui)
-        return self._act_on_draft_unlocked(draft_id, action, actor, actor_is_ui, feedback)
+            self._act_on_draft_unlocked(draft_id, step, actor, actor_role)
+        return self._act_on_draft_unlocked(draft_id, action, actor, actor_role, feedback)
 
     def _act_on_draft_unlocked(
         self,
         draft_id: str,
         action: str,
         actor: str,
-        actor_is_ui: bool,
+        actor_role: str,
         feedback: str | None = None,
     ) -> tuple[Draft, Run | None]:
         draft = self.get_draft(draft_id)
-        transition = resolve_draft(draft.status, action, actor_is_ui)
+        transition = resolve_draft(draft.status, action, actor_role)
         if action == "approve" and draft.status == "approved":
             # A re-approve after a failed publish run, or simply approving
             # again: only safe when there is nothing already in flight for

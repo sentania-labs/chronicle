@@ -37,6 +37,7 @@ def preview_in_review(services: Services, draft_id: str) -> None:
     never changes a status, issue #70, so it stays in review)."""
     assert services.store.get_draft(draft_id).status == "in_review"
     build_preview(services, draft_id)
+    services.store.act_on_draft(draft_id, "submit", "scott", actor_role="editor")
     assert services.store.get_draft(draft_id).status == "in_review"
 
 
@@ -76,6 +77,7 @@ def test_no_available_offer_is_one_the_table_would_refuse(
         republish=republish,
         publish_pr_open=pr_open,
         publish_run_active=run_active,
+        actor_role="editor",
     )
     for offer in offers:
         if offer.state == DISABLED:
@@ -86,19 +88,20 @@ def test_no_available_offer_is_one_the_table_would_refuse(
         assert offer.steps and offer.steps[-1] == offer.action
         current = status
         for step in offer.steps:
-            transition = resolve_draft(current, step, True)  # raises if refused
+            transition = resolve_draft(current, step, "editor")  # raises if refused
             current = transition.to_status
 
 
 def test_every_status_has_exactly_one_preview_offer_and_no_bare_revise() -> None:
     for status in DRAFT_STATUSES:
-        offers = offers_for(status, has_preview=False)
+        offers = offers_for(status, has_preview=False, actor_role="editor")
         assert [o.action for o in offers].count("preview") == 1
         assert "revise" not in [o.action for o in offers]
 
 
 def test_preview_is_present_on_published_and_stages_a_revise() -> None:
-    preview = by_action(offers_for("published", has_preview=False))["preview"]
+    offers = by_action(offers_for("published", has_preview=False, actor_role="editor"))
+    preview = offers["preview"]
     assert preview.state == AVAILABLE
     assert preview.steps == ("revise", "preview")
     assert preview.primary
@@ -108,25 +111,26 @@ def test_preview_is_present_from_every_working_status() -> None:
     # `previewed` is not a working status any more (issue #70): it is never
     # produced, and `Store.migrate_previewed` moves a legacy record off it.
     for status in ("drafting", "in_review", "revision_requested", "published"):
-        assert by_action(offers_for(status, has_preview=True))["preview"].state == AVAILABLE
+        assert by_action(offers_for(status, has_preview=True, actor_role="editor"))["preview"].state == AVAILABLE
 
 
-@pytest.mark.parametrize("status", ["drafting", "in_review", "revision_requested", "published"])
+@pytest.mark.parametrize("status", ["drafting", "in_review", "revision_requested", "previewed", "published"])
 def test_publish_is_disabled_with_preview_first_until_a_preview_exists(status: str) -> None:
-    publish = by_action(offers_for(status, has_preview=False))["approve"]
+    offers = by_action(offers_for(status, has_preview=False, actor_role="editor"))
+    publish = offers["approve"]
     assert publish.state == DISABLED
     assert publish.reason == "Preview first"
     assert not publish.primary
 
 
 def test_publish_becomes_the_primary_action_once_a_preview_exists() -> None:
-    offers = by_action(offers_for("drafting", has_preview=True))
+    offers = by_action(offers_for("drafting", has_preview=True, actor_role="editor"))
     assert offers["approve"].state == AVAILABLE
     assert offers["approve"].primary
     assert offers["approve"].steps == ("submit", "approve")
     assert not offers["preview"].primary  # a preview exists: it is secondary now
 
-    in_review = by_action(offers_for("in_review", has_preview=True))
+    in_review = by_action(offers_for("in_review", has_preview=True, actor_role="editor"))
     assert in_review["approve"].state == AVAILABLE
     assert in_review["approve"].steps == ("approve",)
 
@@ -134,13 +138,13 @@ def test_publish_becomes_the_primary_action_once_a_preview_exists() -> None:
 def test_a_published_post_with_a_stale_status_cannot_publish_without_an_edit() -> None:
     # published -> approve has no path in the table: the way in is Preview,
     # which stages the revise. Publish must not render available.
-    assert plan_action("published", "approve", True) is None
-    publish = by_action(offers_for("published", has_preview=True))["approve"]
-    assert publish.state == DISABLED
+    assert plan_action("published", "approve", "editor") is None
+    offers = by_action(offers_for("published", has_preview=True, actor_role="editor"))
+    assert offers["approve"].state == DISABLED
 
 
 def test_approved_keeps_a_retryable_publish_and_a_disabled_preview() -> None:
-    offers = by_action(offers_for("approved", has_preview=False))
+    offers = by_action(offers_for("approved", has_preview=False, actor_role="editor"))
     assert offers["approve"].state == AVAILABLE
     assert offers["preview"].state == DISABLED
     assert offers["preview"].reason == "Already approved"
@@ -148,7 +152,7 @@ def test_approved_keeps_a_retryable_publish_and_a_disabled_preview() -> None:
 
 @pytest.mark.parametrize("status", ["rejected", "unpublished"])
 def test_rejected_and_unpublished_offer_restore_not_publish(status: str) -> None:
-    offers = by_action(offers_for(status, has_preview=True))
+    offers = by_action(offers_for(status, has_preview=True, actor_role="editor"))
     assert "approve" not in offers
     assert offers["restore"].state == AVAILABLE
     assert offers["preview"].state == DISABLED
@@ -157,23 +161,26 @@ def test_rejected_and_unpublished_offer_restore_not_publish(status: str) -> None
 
 def test_publish_is_absent_while_a_publish_pr_or_run_is_in_flight() -> None:
     assert "approve" not in by_action(
-        offers_for("approved", has_preview=True, publish_pr_open=True)
+        offers_for("approved", has_preview=True, publish_pr_open=True, actor_role="editor")
     )
     assert "approve" not in by_action(
-        offers_for("approved", has_preview=True, publish_run_active=True)
+        offers_for("approved", has_preview=True, publish_run_active=True, actor_role="editor")
     )
 
 
 def test_republish_label_only_for_a_draft_with_a_published_record() -> None:
-    assert by_action(offers_for("drafting", has_preview=True))["approve"].label == "Publish"
-    assert (
-        by_action(offers_for("drafting", has_preview=True, republish=True))["approve"].label
-        == "Republish"
+    draft_offers = by_action(
+        offers_for("drafting", has_preview=True, actor_role="editor"),
     )
+    assert draft_offers["approve"].label == "Publish"
+    republish_offers = by_action(
+        offers_for("drafting", has_preview=True, republish=True, actor_role="editor"),
+    )
+    assert republish_offers["approve"].label == "Republish"
 
 
 def test_feedback_actions_and_reserved_flags_come_from_the_table() -> None:
-    offers = by_action(offers_for("in_review", has_preview=False))
+    offers = by_action(offers_for("in_review", has_preview=False, actor_role="editor"))
     assert offers["request_revision"].feedback_required
     assert offers["reject"].feedback_required and offers["reject"].reserved
     assert not offers["submit"].reserved if "submit" in offers else True
@@ -183,14 +190,14 @@ def test_feedback_actions_and_reserved_flags_come_from_the_table() -> None:
 
 
 def test_plan_action_refuses_what_staging_cannot_reach() -> None:
-    assert plan_action("rejected", "preview", True) is None
-    assert plan_action("approved", "preview", True) is None
-    assert plan_action("drafting", "approve", True) == ("submit", "approve")
-    assert plan_action("revision_requested", "approve", True) is None
-    assert plan_action("drafting", "reject", True) is None
+    assert plan_action("rejected", "preview", "editor") is None
+    assert plan_action("approved", "preview", "editor") is None
+    assert plan_action("drafting", "approve", "editor") == ("submit", "approve")
+    assert plan_action("revision_requested", "approve", "editor") is None
+    assert plan_action("drafting", "reject", "editor") is None
     # A reserved action is never planned for a non-UI actor, staged or not.
-    assert plan_action("drafting", "approve", False) is None
-    assert plan_action("in_review", "approve", False) is None
+    assert plan_action("drafting", "approve", "contributor") is None
+    assert plan_action("in_review", "approve", "contributor") is None
 
 
 # --- Rendered ---------------------------------------------------------------
@@ -218,7 +225,7 @@ def test_editor_renders_only_offers_the_table_allows(
         draft_id = make_draft(services, status)
         html = client.get(f"/content/drafts/{draft_id}").text
         for action in _action_urls(html):
-            assert plan_action(status, action, True) is not None, (status, action)
+            assert plan_action(status, action, "editor") is not None, (status, action)
 
 
 def test_clicking_preview_on_a_published_post_revises_it_then_queues_a_preview(
@@ -336,7 +343,7 @@ def test_the_route_and_the_page_read_one_offer(client: TestClient, services: Ser
                 if with_preview:
                     build_preview(services, draft_id)  # never moves the status
                 actual = services.store.get_draft(draft_id).status
-                if plan_action(actual, action, True) is None:
+                if plan_action(actual, action, "editor") is None:
                     continue
                 html = client.get(f"/content/drafts/{draft_id}").text
                 offered = f"/content/drafts/{draft_id}/actions/{action}" in html
@@ -354,7 +361,7 @@ def test_a_one_step_publish_with_no_current_preview_is_refused_and_writes_nothin
     # offer check used to skip it: a POST published what the page rendered
     # disabled ("Preview first").
     draft_id = make_draft(services, "in_review")
-    assert plan_action("in_review", "approve", True) == ("approve",)
+    assert plan_action("in_review", "approve", "editor") == ("approve",)
     html = client.get(f"/content/drafts/{draft_id}").text
     assert "Preview first" in html and f"/content/drafts/{draft_id}/actions/approve" not in html
     version = services.store.get_draft(draft_id).version_no
@@ -419,6 +426,8 @@ def test_a_save_landing_after_the_click_is_read_cannot_publish_an_unpreviewed_ve
     store = client.app.state.services.store  # type: ignore[attr-defined]
     draft_id = make_draft(services, status)
     build_preview(services, draft_id)
+    if status == "in_review":
+        store.act_on_draft(draft_id, "submit", "scott", actor_role="editor")
     assert store.get_draft(draft_id).status == status
     version = store.get_draft(draft_id).version_no
     real = store.act_on_draft_staged
@@ -450,7 +459,7 @@ def test_the_guard_runs_under_the_store_lock(services: Services) -> None:
     from chronicle.api.errors import ApiError
 
     with pytest.raises(ApiError) as caught:
-        store.act_on_draft_staged(draft_id, "approve", "scott", True, guard=guard)
+        store.act_on_draft_staged(draft_id, "approve", "scott", actor_role="editor", guard=guard)
     assert caught.value.status_code == 409 and caught.value.code == "offer_unavailable"
     assert held == [True]
     assert store.get_draft(draft_id).status == "in_review"
@@ -460,19 +469,16 @@ def test_the_guard_runs_under_the_store_lock(services: Services) -> None:
 
 
 def test_preview_is_disabled_when_it_would_revise_under_an_open_unpublish_pr() -> None:
-    preview = by_action(offers_for("published", has_preview=False, unpublish_pr_open=True))[
-        "preview"
-    ]
+    offers = offers_for("published", has_preview=False, unpublish_pr_open=True, actor_role="editor")
+    preview = by_action(offers)["preview"]
     assert preview.state == DISABLED
     assert preview.reason == "Unpublish PR open"
     assert preview.steps == ()
     # No staging needed, nothing to protect: a draft under review still previews.
-    assert (
-        by_action(offers_for("in_review", has_preview=False, unpublish_pr_open=True))[
-            "preview"
-        ].state
-        == AVAILABLE
+    offers2 = offers_for(
+        "in_review", has_preview=False, unpublish_pr_open=True, actor_role="editor"
     )
+    assert by_action(offers2)["preview"].state == AVAILABLE
 
 
 def test_a_staged_preview_on_a_post_with_an_open_unpublish_pr_is_refused(
@@ -489,16 +495,19 @@ def test_a_staged_preview_on_a_post_with_an_open_unpublish_pr_is_refused(
 
 
 def test_staged_refusal_is_none_for_an_action_the_page_does_not_disable() -> None:
-    assert staged_refusal("in_review", "approve", True, has_preview=True) is None
-    assert staged_refusal("drafting", "reject", True, has_preview=False) is None
+    assert staged_refusal("in_review", "approve", "editor", has_preview=True) is None
+    assert staged_refusal("drafting", "reject", "editor", has_preview=False) is None
     # No offer at all for a one-step click (an open publish PR): the store's own
     # 409, with its own code, stays the answer.
     assert (
-        staged_refusal("approved", "approve", True, has_preview=False, publish_pr_open=True) is None
+        staged_refusal(
+            "approved", "approve", "editor",
+            has_preview=False, publish_pr_open=True,
+        ) is None
     )
-    assert staged_refusal("in_review", "approve", True, has_preview=False) == (
+    assert staged_refusal("in_review", "approve", "editor", has_preview=False) == (
         "Publish is not available right now (Preview first)."
     )
-    assert staged_refusal("drafting", "approve", True, has_preview=False) == (
+    assert staged_refusal("drafting", "approve", "editor", has_preview=False) == (
         "Publish is not available right now (Preview first)."
     )

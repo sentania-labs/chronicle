@@ -329,8 +329,8 @@ def _seeded_draft_at_version_two(store: Store) -> str:
     fm = {"title": "Why the lab drifted"}
     store.save_draft(draft.id, "ghostwriter", 0, fm, "first\n")
     store.save_draft(draft.id, "ghostwriter", 1, fm, "second\n")
-    store.act_on_draft(draft.id, "submit", "ghostwriter", False)
-    store.act_on_draft(draft.id, "request_revision", "scott", True, feedback="tighten the intro")
+    store.act_on_draft(draft.id, "submit", "ghostwriter", actor_role="contributor")
+    store.act_on_draft(draft.id, "request_revision", "scott", actor_role="editor", feedback="tighten the intro")
     return draft.id
 
 

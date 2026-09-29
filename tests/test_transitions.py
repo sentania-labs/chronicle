@@ -34,7 +34,7 @@ DISALLOWED = [
 @pytest.mark.parametrize(("status", "action"), sorted(DRAFT_TRANSITIONS))
 def test_every_allowed_draft_transition_resolves(status: str, action: str) -> None:
     expected = DRAFT_TRANSITIONS[(status, action)]
-    resolved = resolve_draft(status, action, actor_is_ui=True)
+    resolved = resolve_draft(status, action, actor_role="editor")
     assert resolved is expected
     assert resolved.to_status in DRAFT_STATUSES
 
@@ -42,7 +42,7 @@ def test_every_allowed_draft_transition_resolves(status: str, action: str) -> No
 @pytest.mark.parametrize(("status", "action"), DISALLOWED)
 def test_disallowed_draft_transitions_are_refused(status: str, action: str) -> None:
     with pytest.raises(ApiError) as caught:
-        resolve_draft(status, action, actor_is_ui=True)
+        resolve_draft(status, action, actor_role="editor")
     assert caught.value.status_code == 409
     assert caught.value.code == "transition_not_allowed"
 
@@ -63,7 +63,7 @@ def test_every_status_in_the_model_has_a_disallowed_case_covered() -> None:
 @pytest.mark.parametrize("action", RESERVED_ACTIONS)
 def test_reserved_actions_refuse_a_non_ui_actor(action: str) -> None:
     with pytest.raises(ApiError) as caught:
-        resolve_draft("in_review", action, actor_is_ui=False)
+        resolve_draft("in_review", action, actor_role="contributor")
     assert caught.value.status_code == 403
     assert caught.value.extra["action"] == action
 

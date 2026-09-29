@@ -43,6 +43,23 @@ from .routes.admin import cleanup_stale_backup_uploads
 from .routes.admin import router as admin_router
 from .routes.ui import router as ui_router
 
+# OIDC routes are built lazily at app creation so they can access the
+# app's oidc_settings_manager state, which doesn't exist until create_app().
+
+
+def oidc_router() -> APIRouter:  # noqa: F821
+    """Build the OIDC authorization/callback router.
+
+    Returns an APIRouter mounting ``/oidc/authorize`` and ``/oidc/callback``.
+    """
+    from fastapi import APIRouter
+
+    from .routes import oidc as oidc_routes
+
+    router = APIRouter(prefix="/oidc", tags=["oidc"])
+    router.include_router(oidc_routes.router)
+    return router
+
 STATIC_DIR = Path(__file__).parent / "static"
 
 log = logging.getLogger("chronicle.api")
@@ -312,6 +329,8 @@ def _bootstrap(app: FastAPI) -> None:
     app.state.services = None
     app.state.admin_services = None
     app.state.background = None
+    app.state.oidc_settings_manager = None
+    app.state.oidc_client = None
     path = os.environ.get(DATA_DIR_ENV)
     # Bootstrap never creates the data directory itself: an unmounted volume
     # must stay visibly unready rather than be papered over with an empty one.
@@ -322,6 +341,16 @@ def _bootstrap(app: FastAPI) -> None:
         app.state.services = services
         app.state.admin_services = admin_services
         app.state.background = started_background
+        # Initialize OIDC settings from the database.
+        from .oidc_settings import OidcSettingsManager
+        from .settings_db import SettingsDB
+
+        settings_db = SettingsDB(Path(path))
+        oidc_mgr = OidcSettingsManager(settings_db)
+        app.state.oidc_settings_manager = oidc_mgr
+        from .oidc_client import OidcClient
+
+        app.state.oidc_client = OidcClient(oidc_mgr)
     except (OSError, sqlite3.Error, subprocess.CalledProcessError) as exc:
         # A read-only or missing mount is a real operational state, not a
         # crash: readyz reports it and the process stays up to say so.
@@ -421,6 +450,9 @@ def create_app() -> FastAPI:
     app.include_router(admin_router)
     app.include_router(admin_api_router)
     app.include_router(ui_router)
+    # OIDC routes sit behind the same CORS/CSP but are anonymous:
+    # /oidc/authorize and /oidc/callback have no token or session.
+    app.include_router(oidc_router())
     # No CDN, no network fetch at page load (AGENTS.md): vendored JS/CSS is
     # served from this same process, never fetched from anywhere else.
     app.mount("/static", RevalidatingStaticFiles(directory=STATIC_DIR), name="static")

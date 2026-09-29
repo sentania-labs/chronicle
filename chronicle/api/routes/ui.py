@@ -469,6 +469,7 @@ def _editor_response(
     draft_id: str,
     *,
     banner: bool,
+    consumer: Consumer | None = None,
     notice: str | None = None,
     notice_kind: str = "error",
     status_code: int = 200,
@@ -500,6 +501,7 @@ def _editor_response(
     came_back = came_back_from_review(
         draft.status, request_seq=request_seq, answered_seq=answered_seq
     )
+    actor_role = consumer.role if consumer is not None else "contributor"
     html = tpl.editor_page(
         _dump(draft),
         versions,
@@ -508,6 +510,7 @@ def _editor_response(
         preview_url,
         post_url,
         banner=banner,
+        actor_role=actor_role,
         came_back=came_back,
         **_offer_state(store, draft, preview_run),
         locked_by=locked_by.holder if locked_by else None,
@@ -574,7 +577,10 @@ def draft_lease_release(
 
 @router.get("/content/drafts/{draft_id}", response_class=HTMLResponse)
 def draft_editor(
-    draft_id: str, request: Request, services: Services = Depends(get_services)
+    draft_id: str,
+    request: Request,
+    services: Services = Depends(get_services),
+    consumer: Consumer = Depends(require_ui_consumer),
 ) -> HTMLResponse:
     raw_warnings = request.query_params.get("warnings")
     notice = None
@@ -586,6 +592,7 @@ def draft_editor(
         services,
         draft_id,
         banner=banner_enabled(request),
+        consumer=consumer,
         notice=notice,
         notice_kind=notice_kind,
         request=request,
@@ -717,6 +724,7 @@ async def draft_save(
                 services,
                 draft_id,
                 banner=banner_enabled(request),
+                consumer=consumer,
                 notice=exc.message,
                 notice_kind="error",
                 status_code=exc.status_code,
@@ -753,7 +761,12 @@ async def draft_save(
         )
         return HTMLResponse(html, status_code=409)
     return _editor_response(
-        services, draft_id, banner=banner_enabled(request), notice="saved", notice_kind="ok"
+        services,
+        draft_id,
+        banner=banner_enabled(request),
+        consumer=consumer,
+        notice="saved",
+        notice_kind="ok",
     )
 
 
@@ -779,7 +792,7 @@ async def draft_action(
             return staged_refusal(
                 draft.status,
                 action,
-                consumer.is_ui,
+                consumer.role,
                 republish=bool(draft.published),
                 **_offer_state(
                     services.store, draft, services.store.last_run(draft.id, kind="preview")
@@ -787,13 +800,14 @@ async def draft_action(
             )
 
         services.store.act_on_draft_staged(
-            draft_id, action, consumer.name, consumer.is_ui, feedback, guard=guard
+            draft_id, action, consumer.name, consumer.role, feedback, guard=guard
         )
     except ApiError as exc:
         return _editor_response(
             services,
             draft_id,
             banner=banner_enabled(request),
+            consumer=consumer,
             notice=exc.message,
             notice_kind="error",
             status_code=exc.status_code,
@@ -854,6 +868,7 @@ async def draft_image_upload(
             services,
             draft_id,
             banner=banner_enabled(request),
+            consumer=consumer,
             notice=exc.message,
             notice_kind="error",
             status_code=exc.status_code,
@@ -874,7 +889,7 @@ async def draft_image_upload(
                 "url": tpl.image_url(draft_id, record.image_id),
             }
         )
-    return _editor_response(services, draft_id, banner=banner_enabled(request))
+    return _editor_response(services, draft_id, banner=banner_enabled(request), consumer=consumer)
 
 
 @router.get("/content/drafts/{draft_id}/images/{image_id}/file")
@@ -960,7 +975,7 @@ def preview_rebuild(
     services: Services = Depends(get_services),
 ) -> Any:
     try:
-        services.store.act_on_draft(draft_id, "preview", consumer.name, consumer.is_ui)
+        services.store.act_on_draft(draft_id, "preview", consumer.name, consumer.role)
     except ApiError as exc:
         # `tpl.page`'s own `notice` argument already escapes; the body here
         # must never repeat that message unescaped (a round C5 review found

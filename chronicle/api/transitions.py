@@ -124,12 +124,12 @@ SUBMISSION_TRANSITIONS: dict[tuple[str, str], Transition] = {
 }
 
 
-def resolve_draft(status: str, action: str, actor_is_ui: bool) -> Transition:
-    if action in RESERVED_ACTIONS and not actor_is_ui:
+def resolve_draft(status: str, action: str, actor_role: str) -> Transition:
+    if action in RESERVED_ACTIONS and not _is_editor_role(actor_role):
         raise ApiError(
             403,
             "action_reserved",
-            f"action {action!r} is reserved for the ui token",
+            f"action {action!r} requires editor role",
             action=action,
         )
     transition = DRAFT_TRANSITIONS.get((status, action))
@@ -142,6 +142,16 @@ def resolve_draft(status: str, action: str, actor_is_ui: bool) -> Transition:
             action=action,
         )
     return transition
+
+
+def _is_editor_role(role: str) -> bool:
+    """True when *role* is editor or above (admin)."""
+    from .roles import ROLES
+
+    try:
+        return ROLES.index(role) >= ROLES.index("editor")
+    except ValueError:
+        return False
 
 
 # The actions a click may run first, per requested action, so that the click
@@ -163,17 +173,17 @@ STAGING_ACTIONS: dict[str, tuple[str, ...]] = {
 }
 
 
-def plan_action(status: str, action: str, actor_is_ui: bool) -> tuple[str, ...] | None:
+def plan_action(status: str, action: str, actor_role: str) -> tuple[str, ...] | None:
     """The actions to run, in order, for `action` to happen from `status`.
 
     `(action,)` when it is legal as it stands, a longer tuple ending in
     `action` when only staging steps (STAGING_ACTIONS) stand in the way, and
-    None when there is no such path. Every step is checked against
+    None when there is no such path.  Every step is checked against
     DRAFT_TRANSITIONS, including the reserved-actor rule, so a plan is a
     sequence `resolve_draft` will accept one step at a time; an offer built
     from it can never be one the table would refuse.
     """
-    if action in RESERVED_ACTIONS and not actor_is_ui:
+    if action in RESERVED_ACTIONS and not _is_editor_role(actor_role):
         return None
     allowed = STAGING_ACTIONS.get(action, ())
     frontier: list[tuple[str, tuple[str, ...]]] = [(status, ())]
@@ -186,7 +196,7 @@ def plan_action(status: str, action: str, actor_is_ui: bool) -> tuple[str, ...] 
             transition = DRAFT_TRANSITIONS.get((current, stage))
             if transition is None or transition.feedback_required or transition.run_kind:
                 continue
-            if stage in RESERVED_ACTIONS and not actor_is_ui:
+            if stage in RESERVED_ACTIONS and not _is_editor_role(actor_role):
                 continue
             if transition.to_status in seen:
                 continue

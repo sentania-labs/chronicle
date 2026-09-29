@@ -31,7 +31,7 @@ def seed(store: Store) -> dict[str, str]:
     store.save_draft(draft.id, "scott", 1, FRONTMATTER, "second body", message="tightened")
     image, _ = store.put_image(png_bytes(), "feature.png")
     store.attach_image(draft.id, image.image_id, "feature", "ghostwriter")
-    _, run = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+    _, run = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_role="contributor")
     assert run is not None
     return {"submission": submission.id, "draft": draft.id, "image": image.image_id, "run": run.id}
 
@@ -63,9 +63,9 @@ def test_every_write_is_one_commit(store: Store) -> None:
 def test_feedback_lands_in_the_same_commit_as_the_status_change(store: Store) -> None:
     draft, _ = store.create_draft("ghostwriter")
     store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
-    store.act_on_draft(draft.id, "submit", "ghostwriter", actor_is_ui=False)
+    store.act_on_draft(draft.id, "submit", "ghostwriter", actor_role="contributor")
     store.act_on_draft(
-        draft.id, "request_revision", "ui", actor_is_ui=True, feedback="tighten the opening"
+        draft.id, "request_revision", "ui", actor_role="editor", feedback="tighten the opening"
     )
 
     feedback_file = store.feedback_dir / f"{draft.id}.md"
@@ -97,14 +97,14 @@ def test_revision_answer_seqs_orders_a_request_against_what_answers_it(store: St
     Both are None for a draft with neither kind of event yet."""
     draft, _ = store.create_draft("ghostwriter")
     store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
-    store.act_on_draft(draft.id, "submit", "ghostwriter", actor_is_ui=False)
+    store.act_on_draft(draft.id, "submit", "ghostwriter", actor_role="contributor")
     seqs = store.index.revision_answer_seqs([draft.id])
     request_seq, answered_seq = seqs[draft.id]
     assert request_seq is None
     assert answered_seq is not None
 
     store.act_on_draft(
-        draft.id, "request_revision", "editor", actor_is_ui=True, feedback="tighten it"
+        draft.id, "request_revision", "editor", actor_role="editor", feedback="tighten it"
     )
     seqs = store.index.revision_answer_seqs([draft.id])
     request_seq, answered_seq_after_request = seqs[draft.id]
@@ -115,7 +115,7 @@ def test_revision_answer_seqs_orders_a_request_against_what_answers_it(store: St
     # A resubmit is a newer answer than the request, in the same table.
     current_version = store.get_draft(draft.id).version_no
     store.save_draft(draft.id, "ghostwriter", current_version, FRONTMATTER, "revised body")
-    store.act_on_draft(draft.id, "submit", "ghostwriter", actor_is_ui=False)
+    store.act_on_draft(draft.id, "submit", "ghostwriter", actor_role="contributor")
     seqs = store.index.revision_answer_seqs([draft.id])
     request_seq_final, answered_seq_final = seqs[draft.id]
     assert request_seq_final == request_seq
@@ -262,7 +262,7 @@ def test_list_submissions_is_a_snapshot_under_the_store_lock(store: Store) -> No
 def test_slug_is_pinned_at_first_preview_and_stays(store: Store) -> None:
     draft, _ = store.create_draft("ghostwriter")
     store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
-    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_role="contributor")
     assert previewed.slug == "a-post-about-drift"
 
     store.save_draft(draft.id, "ghostwriter", 1, FRONTMATTER, "more body")
@@ -272,7 +272,7 @@ def test_slug_is_pinned_at_first_preview_and_stays(store: Store) -> None:
 def test_slug_pin_sets_image_dir_from_slug_when_no_url(store: Store) -> None:
     draft, _ = store.create_draft("ghostwriter")
     store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
-    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_role="contributor")
     assert previewed.image_dir == "a-post-about-drift"
 
 
@@ -283,7 +283,7 @@ def test_slug_pin_stamps_a_missing_date(store: Store) -> None:
 
     draft, _ = store.create_draft("ghostwriter")
     store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
-    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_role="contributor")
     stamped = previewed.frontmatter.get("date")
     assert isinstance(stamped, str) and stamped
     parsed = datetime.fromisoformat(stamped)
@@ -295,14 +295,14 @@ def test_slug_pin_never_overwrites_a_hand_set_date(store: Store) -> None:
     store.save_draft(
         draft.id, "ghostwriter", 0, {**FRONTMATTER, "date": "2020-01-01T00:00:00-06:00"}, "body"
     )
-    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_role="contributor")
     assert previewed.frontmatter["date"] == "2020-01-01T00:00:00-06:00"
 
 
 def test_slug_pin_stamps_the_date_once_and_a_later_save_never_moves_it(store: Store) -> None:
     draft, _ = store.create_draft("ghostwriter")
     store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
-    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_role="contributor")
     stamped = previewed.frontmatter["date"]
     store.save_draft(draft.id, "ghostwriter", 1, {**FRONTMATTER, "date": stamped}, "more body")
     assert store.get_draft(draft.id).frontmatter["date"] == stamped
@@ -315,7 +315,7 @@ def test_a_pinned_drafts_save_without_date_keeps_the_stamped_value(store: Store)
     from it."""
     draft, _ = store.create_draft("ghostwriter")
     store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
-    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_role="contributor")
     stamped = previewed.frontmatter["date"]
 
     no_date_frontmatter = {k: v for k, v in FRONTMATTER.items() if k != "date"}
@@ -326,7 +326,7 @@ def test_a_pinned_drafts_save_without_date_keeps_the_stamped_value(store: Store)
 def test_a_pinned_drafts_save_with_a_different_hand_set_date_wins(store: Store) -> None:
     draft, _ = store.create_draft("ghostwriter")
     store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
-    store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+    store.act_on_draft(draft.id, "preview", "ghostwriter", actor_role="contributor")
 
     saved = store.save_draft(
         draft.id, "ghostwriter", 1, {**FRONTMATTER, "date": "2020-01-01T00:00:00-06:00"}, "more"
@@ -363,7 +363,7 @@ def test_slug_pin_falls_back_when_an_older_save_left_an_unusable_url(store: Stor
     record.frontmatter = {"title": "Probe", "url": "/a/.."}
     record.title = "Probe"
     store._write_json(store._draft_path(draft.id), record.model_dump(mode="json"))
-    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", False)
+    previewed, _ = store.act_on_draft(draft.id, "preview", "ghostwriter", actor_role="contributor")
     assert previewed.image_dir == "probe"
 
 
@@ -372,7 +372,7 @@ def test_slug_pin_refuses_when_image_dir_exists_on_main(store: Store) -> None:
     draft, _ = store.create_draft("ghostwriter")
     store.save_draft(draft.id, "ghostwriter", 0, FRONTMATTER, "body")
     with pytest.raises(ApiError) as excinfo:
-        store.act_on_draft(draft.id, "preview", "ghostwriter", actor_is_ui=False)
+        store.act_on_draft(draft.id, "preview", "ghostwriter", actor_role="contributor")
     assert excinfo.value.status_code == 409
     assert excinfo.value.code == "image_dir_collision"
 
@@ -380,7 +380,7 @@ def test_slug_pin_refuses_when_image_dir_exists_on_main(store: Store) -> None:
 def test_slug_pin_refuses_when_another_draft_already_pins_the_image_dir(store: Store) -> None:
     first, _ = store.create_draft("ghostwriter")
     store.save_draft(first.id, "ghostwriter", 0, FRONTMATTER, "body")
-    store.act_on_draft(first.id, "preview", "ghostwriter", actor_is_ui=False)
+    store.act_on_draft(first.id, "preview", "ghostwriter", actor_role="contributor")
 
     second, _ = store.create_draft("ghostwriter")
     store.save_draft(
@@ -391,7 +391,7 @@ def test_slug_pin_refuses_when_another_draft_already_pins_the_image_dir(store: S
         "body",
     )
     with pytest.raises(ApiError) as excinfo:
-        store.act_on_draft(second.id, "preview", "ghostwriter", actor_is_ui=False)
+        store.act_on_draft(second.id, "preview", "ghostwriter", actor_role="contributor")
     assert excinfo.value.status_code == 409
     assert excinfo.value.code == "image_dir_collision"
 

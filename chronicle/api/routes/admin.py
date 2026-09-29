@@ -50,6 +50,7 @@ from ..digest_runner import run as run_digest
 from ..errors import ApiError
 from ..github_client import GitHubApiError, build_manifest, manifest_target_url
 from ..models import RECONCILE_RESOLUTIONS
+from ..oidc_settings import OidcSettingsManager, SettingsValidationError
 from ..publisher import PublishFailed, build_repo_target
 from ..reconcile import run_once_logged as run_reconcile
 from ..tokens import RESERVED_TOKEN_NAMES
@@ -570,6 +571,138 @@ def tokens_reenable_ui(
 ) -> HTMLResponse:
     token = services.tokens.reenable_ui_token()
     return HTMLResponse(tpl.tokens_page(_token_rows(services), minted=token))
+
+
+# --- OIDC settings ---------------------------------------------------------
+
+@router.get("/settings", response_class=HTMLResponse)
+def oidc_settings_html(
+    admin: AdminServices = Depends(require_admin_session_html),
+) -> HTMLResponse:
+    oidc_mgr: OidcSettingsManager = admin.services.app.state.oidc_settings_manager  # type: ignore[union-attr]
+    if oidc_mgr is None:
+        # Settings DB not initialized yet
+        return HTMLResponse(tpl.settings_page())
+    config = oidc_mgr.reload()
+    return HTMLResponse(
+        tpl.settings_page(
+            issuer=config.issuer,
+            client_id=config.client_id,
+            redirect_uri=config.redirect_uri,
+            scopes=", ".join(config.scopes) if config.scopes else "",
+            groups_claim=config.groups_claim_name,
+            group_role_map=config.group_role_map,
+            configured=config.is_configured,
+            discovery_result=None,
+        )
+    )
+
+
+@router.post("/settings", response_class=HTMLResponse)
+async def oidc_settings_save(
+    request: Request,
+    admin: AdminServices = Depends(require_admin_session_html),
+) -> HTMLResponse:
+    oidc_mgr: OidcSettingsManager = admin.services.app.state.oidc_settings_manager  # type: ignore[union-attr]
+    if oidc_mgr is None:
+        return HTMLResponse("OIDC settings not available", status_code=503)
+
+    form = await _form(request)
+    issuer = form.get("issuer", "")
+    client_id = form.get("client_id", "")
+    client_secret = form.get("client_secret", "")
+    redirect_uri = form.get("redirect_uri", "")
+    scopes_str = form.get("scopes", "")
+    scopes = [s.strip() for s in scopes_str.split(",") if s.strip()]
+    groups_claim = form.get("groups_claim_name", "groups")
+    group_rows_raw = form.get("group_rows", "")  # JSON array of {"group": "...", "role": "..."}
+    import json
+
+    try:
+        group_rows: list[tuple[str, str]] = [
+            (r["group"], r["role"])
+            for r in json.loads(group_rows_raw)
+            if r.get("group") and r.get("role")
+        ]
+    except (json.JSONDecodeError, KeyError):
+        group_rows = []
+
+    try:
+        oidc_mgr.save(
+            issuer=issuer,
+            client_id=client_id,
+            client_secret=client_secret,
+            redirect_uri=redirect_uri,
+            scopes=scopes,
+            groups_claim_name=groups_claim,
+            group_role_map=group_rows,
+        )
+    except SettingsValidationError as exc:
+        return HTMLResponse(
+            tpl.settings_page(
+                issuer=issuer,
+                client_id=client_id,
+                redirect_uri=redirect_uri,
+                scopes=scopes_str,
+                groups_claim=groups_claim,
+                group_role_map={r[0]: r[1] for r in group_rows},
+                configured=False,
+                discovery_result=None,
+                errors=exc.errors,
+            ),
+            status_code=422,
+        )
+
+    # Reload and show success
+    config = oidc_mgr.reload()
+    return HTMLResponse(
+        tpl.settings_page(
+            issuer=config.issuer,
+            client_id=config.client_id,
+            redirect_uri=config.redirect_uri,
+            scopes=", ".join(config.scopes) if config.scopes else "",
+            groups_claim=config.groups_claim_name,
+            group_role_map=config.group_role_map,
+            configured=config.is_configured,
+            discovery_result=None,
+            success="OIDC settings saved",
+        )
+    )
+
+
+@router.post("/settings/test-discovery", response_class=HTMLResponse)
+async def oidc_settings_test_discovery(
+    request: Request,
+    admin: AdminServices = Depends(require_admin_session_html),
+) -> HTMLResponse:
+    oidc_mgr: OidcSettingsManager = admin.services.app.state.oidc_settings_manager  # type: ignore[union-attr]
+    if oidc_mgr is None:
+        return HTMLResponse("OIDC settings not available", status_code=503)
+
+    form = await _form(request)
+    issuer = form.get("issuer", "")
+
+    if not issuer:
+        return HTMLResponse(
+            tpl.settings_page(errors={"issuer": "required for discovery test"}), status_code=422
+        )
+
+    # Temporarily set the issuer for discovery test
+    try:
+        result = oidc_mgr.test_discovery()
+        return HTMLResponse(
+            tpl.settings_page(
+                issuer=issuer,
+                discovery_result=result,
+            )
+        )
+    except ApiError as exc:
+        return HTMLResponse(
+            tpl.settings_page(
+                issuer=issuer,
+                discovery_error=exc.message,
+            )
+        )
 
 
 # --- Backup and restore (spec section 13, ADR 016) -------------------------

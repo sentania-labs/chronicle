@@ -54,7 +54,11 @@ def offers_for(
     publish_pr_open: bool = False,
     publish_run_active: bool = False,
     unpublish_pr_open: bool = False,
+    actor_role: str = "contributor",
 ) -> list[Offer]:
+    from .roles import ROLES
+
+    editor = ROLES.index("editor") <= ROLES.index(actor_role)
     """The editor's action offers for a draft in `status`, in display order.
 
     `has_preview` means a preview of the draft's current text has been built.
@@ -67,7 +71,7 @@ def offers_for(
     """
     offers: list[Offer] = []
 
-    preview_plan = plan_action(status, "preview", True)
+    preview_plan = plan_action(status, "preview", actor_role)
     if preview_plan is not None and unpublish_pr_open and len(preview_plan) > 1:
         offers.append(Offer("preview", "Preview", DISABLED, reason="Unpublish PR open"))
     elif preview_plan is not None:
@@ -83,12 +87,19 @@ def offers_for(
         republish=republish,
         publish_pr_open=publish_pr_open,
         publish_run_active=publish_run_active,
+        actor_role=actor_role,
     )
     if publish is not None:
         offers.append(publish)
 
     for (from_status, action), transition in DRAFT_TRANSITIONS.items():
         if from_status != status or action in _SPECIAL:
+            continue
+        # Reserved actions (approve, request_revision, reject, restore,
+        # unpublish) require editor role; the table already gates them in
+        # resolve_draft, but the offer should only show when the current
+        # consumer can actually act.
+        if action in RESERVED_ACTIONS and not editor:
             continue
         offers.append(
             Offer(
@@ -115,7 +126,9 @@ def _publish_offer(
     republish: bool,
     publish_pr_open: bool,
     publish_run_active: bool,
+    actor_role: str = "contributor",
 ) -> Offer | None:
+
     label = "Republish" if republish else "Publish"
     if status in ("rejected", "unpublished"):
         # Restore is the way back, and it is offered on its own; a disabled
@@ -130,7 +143,7 @@ def _publish_offer(
         # or was never observed); it was allowed through review without a
         # preview gate and stays retryable.
         return Offer("approve", label, DISABLED, reason="Preview first", reserved=True)
-    plan = plan_action(status, "approve", True)
+    plan = plan_action(status, "approve", actor_role)
     if plan is None:
         reason = (
             "Save an edit first" if status in ("published", "revision_requested") else "Not yet"
@@ -142,7 +155,7 @@ def _publish_offer(
 def staged_refusal(
     status: str,
     action: str,
-    actor_is_ui: bool,
+    actor_role: str,
     *,
     has_preview: bool,
     republish: bool = False,
@@ -154,13 +167,14 @@ def staged_refusal(
 
     A click that stages (its plan is more than the action itself) is allowed
     only if the editor offers it as available for this same state, so the page
-    and the route cannot disagree about what a click does. A single legal step
-    is held to the same offer when the page renders one for it and disabled
-    (Publish on a draft in review with no current preview); with no offer at
-    all it stays a plain table lookup in the store, which is where the refusals
-    the table cannot see (an open publish PR) keep their own error codes.
+    and the route cannot disagree about what a click does.  A single legal
+    step is held to the same offer when the page renders one for it and
+    disabled (Publish on a draft in review with no current preview); with no
+    offer at all it stays a plain table lookup in the store, which is where
+    the refusals the table cannot see (an open publish PR) keep their own
+    error codes.
     """
-    plan = plan_action(status, action, actor_is_ui)
+    plan = plan_action(status, action, actor_role)
     if plan is None:
         return None
     offer = next(
@@ -173,6 +187,7 @@ def staged_refusal(
                 publish_pr_open=publish_pr_open,
                 publish_run_active=publish_run_active,
                 unpublish_pr_open=unpublish_pr_open,
+                actor_role=actor_role,
             )
             if candidate.action == action
         ),
