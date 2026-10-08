@@ -34,7 +34,7 @@ dependencies = [
     "cryptography>=42",
     # Signs the App JWT (RS256) used to authenticate to GitHub as the App
     # itself, before an installation token exists.
-    "pyjwt>=2.8",
+    "pyjwt>=2.15.0",
     # The GitHub client and the digest command both make outbound HTTPS
     # calls; httpx's base_url and transport options are what let tests point
     # both at a mock instead of the network.
