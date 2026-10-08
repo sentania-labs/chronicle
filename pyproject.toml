@@ -42,6 +42,17 @@ dependencies = [
     # Post frontmatter on the real blog is YAML between `---` fences; TOML
     # frontmatter (`+++`) is parsed with the stdlib's tomllib instead.
     "pyyaml>=6.0",
+    # Browser sign-in through OIDC (issue 81, ADR 027): the authorization
+    # code flow's protocol pieces (PKCE challenge, grant and token request
+    # encoding, client authentication, id token claim validation) come from
+    # Authlib rather than being hand-rolled. joserfc is Authlib's own JOSE
+    # engine and a hard dependency of it; it is declared here because
+    # `chronicle/api/oidc.py` imports it directly to verify the id token's
+    # signature (Authlib 1.8 verifies its own id tokens the same way and
+    # marks its older `authlib.jose` deprecated), the same rule the pydantic
+    # entry above follows.
+    "authlib>=1.8.0",
+    "joserfc>=1.7",
 ]
 
 [project.scripts]

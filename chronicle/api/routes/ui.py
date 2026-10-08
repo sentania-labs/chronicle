@@ -4,9 +4,11 @@ Every mutating route here calls the same `Store` methods the `/v1` routes
 call, through a `Consumer` built from the ui token the same way a real bearer
 call would be (`require_ui_consumer`), so every version, event, and commit
 this surface produces is authored `editor` (ADR 014's amendment; records
-written before that change still say `scott`). Nothing here touches a
-session cookie or `/admin`; nothing under `/admin` is reachable from here
-either.
+written before that change still say `scott`). Nothing here touches the
+admin session cookie or `/admin`; nothing under `/admin` is reachable from
+here either. When OIDC sign-in is configured (ADR 027) the router carries a
+session gate and the signed-in person's name becomes the actor the records
+show, through the same `Consumer`; the credential is still the ui token.
 """
 
 from __future__ import annotations
@@ -31,11 +33,22 @@ from ..pagination import Page, paginate
 from ..store import Store, preview_is_current
 from ..tokens import UI_COMMIT_AUTHOR as UI_ACTOR_NAME
 from ..ui_actions import staged_refusal
-from ..ui_deps import banner_enabled, check_same_origin, get_services, require_ui_consumer
+from ..ui_deps import (
+    check_same_origin,
+    get_services,
+    page_chrome,
+    require_ui_consumer,
+    require_ui_session,
+    ui_actor,
+)
 from ..ui_status import came_back_from_review, parse_status_filter
 from ..ui_time import sort_key
 
-router = APIRouter(tags=["ui"])
+# ADR 027: when OIDC is configured every route here needs a session, as a
+# dependency on the whole router (the shape `/v1` uses for its consumer
+# token) so a new route cannot forget it. With OIDC unset the dependency is a
+# no-op and the surface is exactly ADR 014's.
+router = APIRouter(tags=["ui"], dependencies=[Depends(require_ui_session)])
 
 _READ_CHUNK_BYTES = 64 * 1024
 
@@ -126,7 +139,7 @@ def submissions_list(
     return HTMLResponse(
         tpl.submissions_list_page(
             pg,
-            banner=banner_enabled(request),
+            **page_chrome(request),
             show_all=show_all,
             hidden=len(everything) - len(shown),
         )
@@ -166,7 +179,7 @@ def _submission_response(
     html = tpl.submission_detail_page(
         dumped,
         images,
-        banner=banner_enabled(request),
+        **page_chrome(request),
         missing_image_ids=missing,
         notice=notice,
         notice_kind=notice_kind,
@@ -429,7 +442,7 @@ def drafts_board(
     )
     return HTMLResponse(
         tpl.drafts_board_page(
-            active_rows, archive_pg, status_filter=status, q=q, banner=banner_enabled(request)
+            active_rows, archive_pg, status_filter=status, q=q, **page_chrome(request)
         )
     )
 
@@ -469,11 +482,15 @@ def _editor_response(
     draft_id: str,
     *,
     banner: bool,
+    signed_in: str | None = None,
+    viewer: str = UI_ACTOR_NAME,
     notice: str | None = None,
     notice_kind: str = "error",
     status_code: int = 200,
     request: Request | None = None,
 ) -> HTMLResponse:
+    """`viewer` is the identity the lease is taken and compared under: the
+    signed-in person's name under OIDC, else `editor` (`ui_deps.ui_actor`)."""
     store = services.store
     draft = store.get_draft(draft_id)
     # The page's lease token, minted here so the render's own hold and the
@@ -483,11 +500,11 @@ def _editor_response(
     if request is not None and _opens_the_page(request):
         # A top-level, same-origin load of the page is opening it: take the
         # lease now, so the editor is protected before (or without) script.
-        lease = services.leases.touch(draft_id, UI_ACTOR_NAME, page_token)
+        lease = services.leases.touch(draft_id, viewer, page_token)
     else:
         lease = services.leases.current(draft_id)
     # Another identity's live lease makes the page read-only.
-    locked_by = lease if lease is not None and lease.holder != UI_ACTOR_NAME else None
+    locked_by = lease if lease is not None and lease.holder != viewer else None
     versions = [_dump(v) for v in store.list_versions(draft_id)]
     feedback = [_dump(f) for f in store.list_feedback(draft_id)]
     last_run = store.last_run(draft_id)
@@ -508,6 +525,7 @@ def _editor_response(
         preview_url,
         post_url,
         banner=banner,
+        signed_in=signed_in,
         came_back=came_back,
         **_offer_state(store, draft, preview_run),
         locked_by=locked_by.holder if locked_by else None,
@@ -585,7 +603,8 @@ def draft_editor(
     return _editor_response(
         services,
         draft_id,
-        banner=banner_enabled(request),
+        **page_chrome(request),
+        viewer=ui_actor(request),
         notice=notice,
         notice_kind=notice_kind,
         request=request,
@@ -716,7 +735,8 @@ async def draft_save(
             return _editor_response(
                 services,
                 draft_id,
-                banner=banner_enabled(request),
+                **page_chrome(request),
+                viewer=consumer.name,
                 notice=exc.message,
                 notice_kind="error",
                 status_code=exc.status_code,
@@ -748,12 +768,15 @@ async def draft_save(
                 if name not in ("body", "base_version") and isinstance(value, str)
             },
         }
-        html = tpl.conflict_page(
-            _dump(current), attempted, diff_summary, banner=banner_enabled(request)
-        )
+        html = tpl.conflict_page(_dump(current), attempted, diff_summary, **page_chrome(request))
         return HTMLResponse(html, status_code=409)
     return _editor_response(
-        services, draft_id, banner=banner_enabled(request), notice="saved", notice_kind="ok"
+        services,
+        draft_id,
+        **page_chrome(request),
+        viewer=consumer.name,
+        notice="saved",
+        notice_kind="ok",
     )
 
 
@@ -793,7 +816,8 @@ async def draft_action(
         return _editor_response(
             services,
             draft_id,
-            banner=banner_enabled(request),
+            **page_chrome(request),
+            viewer=consumer.name,
             notice=exc.message,
             notice_kind="error",
             status_code=exc.status_code,
@@ -810,9 +834,7 @@ def draft_diff(
     services: Services = Depends(get_services),
 ) -> HTMLResponse:
     diff_text = services.store.diff_between(draft_id, from_, to)
-    return HTMLResponse(
-        tpl.diff_page(draft_id, from_, to, diff_text, banner=banner_enabled(request))
-    )
+    return HTMLResponse(tpl.diff_page(draft_id, from_, to, diff_text, **page_chrome(request)))
 
 
 def _wants_json(request: Request) -> bool:
@@ -853,7 +875,8 @@ async def draft_image_upload(
         return _editor_response(
             services,
             draft_id,
-            banner=banner_enabled(request),
+            **page_chrome(request),
+            viewer=consumer.name,
             notice=exc.message,
             notice_kind="error",
             status_code=exc.status_code,
@@ -874,7 +897,7 @@ async def draft_image_upload(
                 "url": tpl.image_url(draft_id, record.image_id),
             }
         )
-    return _editor_response(services, draft_id, banner=banner_enabled(request))
+    return _editor_response(services, draft_id, **page_chrome(request), viewer=consumer.name)
 
 
 @router.get("/content/drafts/{draft_id}/images/{image_id}/file")
@@ -948,7 +971,7 @@ def preview_list(request: Request, services: Services = Depends(get_services)) -
                 "toolchain_drift": run.toolchain_drift,
             }
         )
-    return HTMLResponse(tpl.preview_list_page(rows, banner=banner_enabled(request)))
+    return HTMLResponse(tpl.preview_list_page(rows, **page_chrome(request)))
 
 
 @router.post("/content/previews/{draft_id}/rebuild", response_class=HTMLResponse)
@@ -966,7 +989,7 @@ def preview_rebuild(
         # must never repeat that message unescaped (a round C5 review found
         # this reflecting an unescaped draft_id straight back in the page).
         return HTMLResponse(
-            tpl.page("Rebuild failed", "", banner=banner_enabled(request), notice=exc.message),
+            tpl.page("Rebuild failed", "", **page_chrome(request), notice=exc.message),
             status_code=exc.status_code,
         )
     return RedirectResponse("/content/previews", status_code=303)
@@ -983,6 +1006,4 @@ def run_log(
     except ApiError:
         draft = None
     post_url = services.store.resolve_run_post_url(run, draft)
-    return HTMLResponse(
-        tpl.run_log_page(_dump(run), log_text, post_url, banner=banner_enabled(request))
-    )
+    return HTMLResponse(tpl.run_log_page(_dump(run), log_text, post_url, **page_chrome(request)))

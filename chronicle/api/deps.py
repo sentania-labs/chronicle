@@ -27,13 +27,19 @@ class Consumer:
     domain records about it (version author, commit author, editor lease) says
     `editor`. `token_name` stays raw because authorization asks a different
     question: which token is this, not who is behind it.
+
+    `actor` is set only by the UI backend, and only when a person has signed
+    in through OIDC (ADR 027): the credential is still the `ui` token, so
+    `is_ui` and every authorization answer are unchanged, but the records
+    name the person. A `/v1` bearer call never sets it.
     """
 
     token_name: str
+    actor: str | None = None
 
     @property
     def name(self) -> str:
-        return commit_author(self.token_name)
+        return self.actor or commit_author(self.token_name)
 
     @property
     def is_ui(self) -> bool:

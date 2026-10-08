@@ -36,7 +36,9 @@ state/
 
 Never present, and refused if found (`chronicle backup restore` treats an
 unlisted member as tampering): `state/instance.key`, `state/claim-code`,
-`state/ui_token.txt`, `preview/`, `site/`, `builder-work/`,
+`state/ui_token.txt`, `state/oidc-client-secret`, `state/oidc-session.key`
+(ADR 027: the secret is the deployer's to mount again, and a fresh session
+key only means everyone signs in again), `preview/`, `site/`, `builder-work/`,
 `repo/index/` (the derived SQLite cache, ADR 006; `chronicle reindex`
 rebuilds it after restore, so shipping it would only go stale).
 

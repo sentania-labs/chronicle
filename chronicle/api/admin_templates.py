@@ -256,8 +256,21 @@ password of at least 12 characters.</p>
     return page("Claim Chronicle", body, notice)
 
 
-def login_page(notice: str | None = None) -> str:
-    body = """
+def login_page(notice: str | None = None, *, oidc_href: str | None = None) -> str:
+    """`oidc_href` (ADR 027) is the sign-in start for an instance with OIDC
+    configured, offered above the password form, which stays as break-glass."""
+    oidc_html = (
+        f"""
+<div class="lat-card chr-narrow">
+<p><a class="lat-btn lat-btn--primary" href="{escape(oidc_href)}">Sign in with your account</a></p>
+<p>The password below is the break-glass path for when the identity provider is unavailable.</p>
+</div>
+"""
+        if oidc_href
+        else ""
+    )
+    body = f"""
+{oidc_html}
 <form method="post" class="lat-card chr-narrow" action="/admin/login">
 <label class="lat-label" for="password">Password</label>
 <input type="password" class="lat-input" id="password" name="password" required
