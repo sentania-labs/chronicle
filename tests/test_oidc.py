@@ -33,7 +33,7 @@ from joserfc.jwk import RSAKey
 from chronicle.api import gitrepo
 from chronicle.api import settings as settings_mod
 from chronicle.api.main import create_app
-from chronicle.api.oidc import OidcAuth
+from chronicle.api.oidc import OidcAuth, ProviderIdentity, display_name
 from chronicle.api.oidc_session import (
     LOGIN_COOKIE_NAME,
     SESSION_COOKIE_NAME,
@@ -42,6 +42,7 @@ from chronicle.api.oidc_session import (
     Principal,
 )
 from chronicle.api.settings import OidcMisconfigured, Settings
+from chronicle.api.tokens import RESERVED_TOKEN_NAMES
 from tests.conftest import ADMIN_PASSWORD, auth, claim_and_login
 
 ISSUER = "https://idp.test/application/o/chronicle/"
@@ -427,12 +428,13 @@ def test_callback_without_a_started_attempt_is_refused(oidc_client: TestClient) 
 def test_provider_error_text_is_never_written_into_the_page(
     oidc_client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:
-    start_sign_in(oidc_client)
+    started = start_sign_in(oidc_client)
+    state = dict(parse_qsl(urlsplit(started.headers["location"]).query))["state"]
     payload = "<script>alert(1)</script>"
     with caplog.at_level("WARNING", logger="chronicle.api.oidc"):
         response = oidc_client.get(
             "/auth/oidc/callback",
-            params={"error": "access_denied<img>", "error_description": payload},
+            params={"error": "access_denied<img>", "error_description": payload, "state": state},
             follow_redirects=False,
         )
     assert response.status_code == 400
@@ -441,6 +443,43 @@ def test_provider_error_text_is_never_written_into_the_page(
     assert "refused the sign-in (an error)" in response.text
     # The provider's words are in the log for the operator, not on the page.
     assert any(payload in record.message for record in caplog.records)
+
+
+def test_error_callback_without_the_attempts_state_cannot_cancel_the_sign_in(
+    oidc_client: TestClient, idp: FakeIdp, caplog: pytest.LogCaptureFixture
+) -> None:
+    started = start_sign_in(oidc_client)
+    callback = idp.authorize(started.headers["location"])
+    # A cross-site link to the callback carrying a provider error, with no
+    # state or the wrong one: refused, not logged as a provider refusal, and
+    # the attempt in progress survives it.
+    for params in ({"error": "access_denied"}, {"error": "access_denied", "state": "forged"}):
+        with caplog.at_level("WARNING", logger="chronicle.api.oidc"):
+            forged = oidc_client.get("/auth/oidc/callback", params=params, follow_redirects=False)
+        assert forged.status_code == 400
+        assert "did not match the attempt" in forged.text
+        assert "set-cookie" not in forged.headers
+        assert oidc_client.cookies.get(LOGIN_COOKIE_NAME)
+    assert not any("refused the sign-in" in record.message for record in caplog.records)
+    finished = oidc_client.get(callback, follow_redirects=False)
+    assert finished.status_code == 303
+    assert session_cookie(oidc_client)
+
+
+def test_reserved_subject_is_never_the_actor_name() -> None:
+    for reserved in sorted(RESERVED_TOKEN_NAMES):
+        identity = ProviderIdentity(
+            issuer=ISSUER, subject=reserved, preferred_username=None, email=None, groups=()
+        )
+        assert display_name(identity) == f"oidc:{reserved}"
+        both_reserved = ProviderIdentity(
+            issuer=ISSUER, subject=reserved, preferred_username="ui", email="editor", groups=()
+        )
+        assert display_name(both_reserved) == f"oidc:{reserved}"
+    plain = ProviderIdentity(
+        issuer=ISSUER, subject="subject-0001", preferred_username=None, email=None, groups=()
+    )
+    assert display_name(plain) == "subject-0001"
 
 
 def test_code_exchange_refusal_is_readable(oidc_client: TestClient, idp: FakeIdp) -> None:

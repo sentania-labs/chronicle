@@ -116,11 +116,15 @@ class ProviderIdentity:
 def display_name(identity: ProviderIdentity) -> str:
     """The name the records carry for this person: `preferred_username`,
     else the email, else the subject itself. The two names the ui token's
-    own writes reserve (`ui`, `editor`) fall back to the subject too, so a
-    person's account can never masquerade as the unauthenticated editor."""
+    own writes reserve (`ui`, `editor`) are never used: a username or email
+    equal to one falls back, and a subject equal to one is prefixed with
+    `oidc:`, so a person's account can never masquerade as the
+    unauthenticated editor."""
     for candidate in (identity.preferred_username, identity.email):
         if candidate and candidate not in RESERVED_TOKEN_NAMES:
             return candidate
+    if identity.subject in RESERVED_TOKEN_NAMES:
+        return f"oidc:{identity.subject}"
     return identity.subject
 
 

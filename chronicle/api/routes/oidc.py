@@ -72,9 +72,12 @@ def _safe_next(value: str | None) -> str:
     return DEFAULT_NEXT
 
 
-def _refusal(message: str, status_code: int, *, retry: bool = True) -> HTMLResponse:
+def _refusal(
+    message: str, status_code: int, *, retry: bool = True, clear_attempt: bool = True
+) -> HTMLResponse:
     response = HTMLResponse(tpl.sign_in_error_page(message, retry=retry), status_code=status_code)
-    clear_login_cookie(response)
+    if clear_attempt:
+        clear_login_cookie(response)
     return response
 
 
@@ -104,16 +107,26 @@ def callback(
             "this sign-in attempt has expired or was not started in this browser; start again",
             400,
         )
+    # State first, for an error callback too: a response that does not carry
+    # this attempt's state is not the provider answering it, so it neither
+    # ends the attempt (the login cookie stays for the real callback) nor is
+    # logged as a provider refusal. A cross-site link to the callback cannot
+    # cancel someone's sign-in this way.
+    if not state or not secrets.compare_digest(state, attempt.state):
+        log.warning("oidc: callback state did not match the attempt that started it")
+        return _refusal(
+            "the sign-in response did not match the attempt that started it; start again",
+            400,
+            clear_attempt=False,
+        )
     if error:
         description = request.query_params.get("error_description", "")
         log.warning("oidc: the provider refused the sign-in: %s %s", error, description)
         code_text = error if set(error) <= _ERROR_CODE_CHARS else "an error"
         return _refusal(f"the identity provider refused the sign-in ({code_text})", 400)
-    if not code or not state or not secrets.compare_digest(state, attempt.state):
-        log.warning("oidc: callback state did not match the attempt that started it")
-        return _refusal(
-            "the sign-in response did not match the attempt that started it; start again", 400
-        )
+    if not code:
+        log.warning("oidc: callback carried the attempt's state but no code")
+        return _refusal("the sign-in response carried no authorization code; start again", 400)
     try:
         identity = auth.client.complete(code, attempt)
     except OidcError as exc:

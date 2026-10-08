@@ -45,6 +45,9 @@ They are the only two routes added without one, and the reason is the
 nature of the flow, not convenience: `start` mints a fresh `state`, `nonce`
 and PKCE verifier, seals them in a short-lived cookie and redirects to the
 provider; `callback` is where the provider returns the browser with a code.
+`callback` compares `state` before anything else, a provider error included:
+a response without this attempt's state is refused without ending the
+attempt, so a cross-site link to the callback cannot cancel a sign-in.
 Both run before a session can exist because they are what produces one.
 Neither reads or writes any record under the data directory, neither takes
 a bearer token, and both answer 404 in the usual error envelope unless OIDC
@@ -110,7 +113,8 @@ other. Deleting the key file and restarting ends every session at once.
 
 A person is their issuer plus subject. The name the records carry is the
 provider's `preferred_username`, else the email, else the subject (and
-never `ui` or `editor`, the ui token's own names), because Scott reads
+never `ui` or `editor`, the ui token's own names: a subject equal to one
+is written as `oidc:ui` or `oidc:editor`), because Scott reads
 `git log` and a UUID there helps nobody; the log line that admits every
 sign-in writes the identity beside that name and the roles granted, so the
 name is always traceable. The roles are whatever the person's groups map
