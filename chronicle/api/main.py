@@ -1,14 +1,18 @@
 """The Chronicle API service process.
 
-`/healthz` and `/readyz` are the only anonymous routes, forever. Everything
+`/healthz` and `/readyz` are the only anonymous routes, with the two ADR 027
+names as the one amendment: `/auth/oidc/start` and `/auth/oidc/callback`,
+the browser sign-in's own entry and return, which by their nature run before
+a session exists and answer 404 unless OIDC is configured. Everything
 under `/v1` requires a consumer token (spec sections 6 and 11, ADR 004).
 `/admin` requires a claimed instance and a signed session cookie instead
-(ADR 004, ADR 008); it is mounted separately from `/v1` and shares none of
-its dependencies. `/readyz` says the api can do its job: the data directory
-named by CHRONICLE_DATA_DIR exists and is writable, git is on PATH, the
-derived index opens at the schema version this code expects, and the GitHub
-App is honestly reported not configured, configured but unverified, verified
-at a time, or failing with the last error class.
+(ADR 004, ADR 008), or an OIDC session carrying the admin role (ADR 027);
+it is mounted separately from `/v1` and shares none of its dependencies.
+`/readyz` says the api can do its job: the data directory named by
+CHRONICLE_DATA_DIR exists and is writable, git is on PATH, the derived index
+opens at the schema version this code expects, and the GitHub App is
+honestly reported not configured, configured but unverified, verified at a
+time, or failing with the last error class.
 """
 
 from __future__ import annotations
@@ -37,11 +41,14 @@ from .admin_deps import AdminAuthRedirect, AdminServices, admin_redirect_handler
 from .deps import Services
 from .errors import ApiError, api_error_handler, http_error_handler, validation_error_handler
 from .index import SCHEMA_VERSION
+from .oidc import OidcAuth
 from .routes import build_v1_router
 from .routes.admin import api_router as admin_api_router
 from .routes.admin import cleanup_stale_backup_uploads
 from .routes.admin import router as admin_router
+from .routes.oidc import router as oidc_router
 from .routes.ui import router as ui_router
+from .ui_deps import SignInRedirect, sign_in_redirect_handler
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -280,7 +287,9 @@ def _index_check(services: Services | None) -> Check:
     return Check(name="index", ok=True, detail=f"schema version {found}")
 
 
-def _start_services(path: Path) -> tuple[Services, AdminServices, background.Background]:
+def _start_services(
+    path: Path,
+) -> tuple[Services, AdminServices, OidcAuth | None, background.Background]:
     services = Services(path)
     # The index is derived and the backup bundle carries none (ADR 006), so
     # a restored data directory would otherwise come up ready while serving
@@ -300,17 +309,23 @@ def _start_services(path: Path) -> tuple[Services, AdminServices, background.Bac
             "admin: a claim code exists at %s; visit /admin to claim this instance",
             admin_services.credentials.claim_code_path,
         )
+    # ADR 027: None unless CHRONICLE_OIDC_* is set, and a misconfiguration
+    # (OidcMisconfigured) propagates out of create_app the way a stray test
+    # token does, so the process refuses to start rather than guess. Built
+    # before the background threads so a refusal leaves none of them running.
+    oidc = OidcAuth.build(path, admin_services.settings)
     # ADR 013: the publisher, watcher, and reconcile loops run inside this
     # process, started once here so every caller of create_app (the real
     # server and the test suite alike) exercises the same background
     # behaviour rather than a test-only stand-in.
     started_background = background.start(services, admin_services)
-    return services, admin_services, started_background
+    return services, admin_services, oidc, started_background
 
 
 def _bootstrap(app: FastAPI) -> None:
     app.state.services = None
     app.state.admin_services = None
+    app.state.oidc = None
     app.state.background = None
     path = os.environ.get(DATA_DIR_ENV)
     # Bootstrap never creates the data directory itself: an unmounted volume
@@ -318,9 +333,10 @@ def _bootstrap(app: FastAPI) -> None:
     if not path or not os.path.isdir(path):
         return
     try:
-        services, admin_services, started_background = _start_services(Path(path))
+        services, admin_services, oidc, started_background = _start_services(Path(path))
         app.state.services = services
         app.state.admin_services = admin_services
+        app.state.oidc = oidc
         app.state.background = started_background
     except (OSError, sqlite3.Error, subprocess.CalledProcessError) as exc:
         # A read-only or missing mount is a real operational state, not a
@@ -350,6 +366,7 @@ def quiesce_for_restore(app: FastAPI) -> None:
         app.state.services.close()
     app.state.services = None
     app.state.admin_services = None
+    app.state.oidc = None
     app.state.background = None
 
 
@@ -365,11 +382,13 @@ def resume_after_restore(app: FastAPI) -> None:
     if not path or not os.path.isdir(path):
         app.state.services = None
         app.state.admin_services = None
+        app.state.oidc = None
         app.state.background = None
         return
-    services, admin_services, started_background = _start_services(Path(path))
+    services, admin_services, oidc, started_background = _start_services(Path(path))
     app.state.services = services
     app.state.admin_services = admin_services
+    app.state.oidc = oidc
     app.state.background = started_background
 
 
@@ -409,6 +428,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, validation_error_handler)
     app.add_exception_handler(StarletteHTTPException, http_error_handler)
     app.add_exception_handler(AdminAuthRedirect, admin_redirect_handler)
+    app.add_exception_handler(SignInRedirect, sign_in_redirect_handler)
     app.add_middleware(
         BodySizeLimitMiddleware,
         max_bytes=MAX_REQUEST_BODY_BYTES,
@@ -421,6 +441,9 @@ def create_app() -> FastAPI:
     app.include_router(admin_router)
     app.include_router(admin_api_router)
     app.include_router(ui_router)
+    # ADR 027: the sign-in start and callback, outside `/v1` and outside the
+    # UI router's own session gate, since they are what produces a session.
+    app.include_router(oidc_router)
     # No CDN, no network fetch at page load (AGENTS.md): vendored JS/CSS is
     # served from this same process, never fetched from anywhere else.
     app.mount("/static", RevalidatingStaticFiles(directory=STATIC_DIR), name="static")

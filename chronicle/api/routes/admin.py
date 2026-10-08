@@ -37,6 +37,7 @@ from ..admin_auth import (
 from ..admin_deps import (
     AdminServices,
     InstallationToken,
+    admin_actor,
     clear_session_cookie,
     get_admin_services,
     require_admin_session_html,
@@ -50,6 +51,8 @@ from ..digest_runner import run as run_digest
 from ..errors import ApiError
 from ..github_client import GitHubApiError, build_manifest, manifest_target_url
 from ..models import RECONCILE_RESOLUTIONS
+from ..oidc import current_principal, get_oidc
+from ..oidc_session import clear_session_cookie as clear_oidc_session_cookie
 from ..publisher import PublishFailed, build_repo_target
 from ..reconcile import run_once_logged as run_reconcile
 from ..tokens import RESERVED_TOKEN_NAMES
@@ -106,10 +109,23 @@ async def claim_submit(
 
 
 @router.get("/login", response_class=HTMLResponse)
-def login_form(admin: AdminServices = Depends(get_admin_services)) -> HTMLResponse:
+def login_form(
+    request: Request, admin: AdminServices = Depends(get_admin_services)
+) -> HTMLResponse:
     if not admin.credentials.is_claimed():
         return RedirectResponse("/admin/claim", status_code=303)  # type: ignore[return-value]
-    return HTMLResponse(tpl.login_page())
+    # ADR 027: with OIDC configured the page offers it first; the password
+    # stays underneath as the break-glass path. A person signed in without
+    # the admin role is told so, rather than left guessing why they bounced.
+    oidc_href = "/auth/oidc/start?next=/admin" if get_oidc(request) is not None else None
+    principal = current_principal(request)
+    notice = None
+    if principal is not None and not principal.is_admin:
+        notice = (
+            f"signed in as {principal.name}, whose groups grant no admin role;"
+            " use the password below, or ask for the role and sign in again"
+        )
+    return HTMLResponse(tpl.login_page(notice, oidc_href=oidc_href))
 
 
 @router.post("/login")
@@ -163,6 +179,10 @@ async def change_password_submit(
 def logout(admin: AdminServices = Depends(get_admin_services)) -> Any:
     response = RedirectResponse("/admin/login", status_code=303)
     clear_session_cookie(response)
+    # An admin who arrived through OIDC is signed out of Chronicle too (the
+    # browser's session at the provider is theirs to end); a cookie that was
+    # never set is simply cleared again.
+    clear_oidc_session_cookie(response)
     return response
 
 
@@ -490,7 +510,7 @@ async def resolve_flag(
     services: Services = Depends(get_services),
 ) -> Any:
     form = await _form(request)
-    services.store.resolve_flag(flag_id, form.get("resolution", ""), "admin")
+    services.store.resolve_flag(flag_id, form.get("resolution", ""), admin_actor(request))
     return RedirectResponse("/admin", status_code=303)
 
 
@@ -502,6 +522,7 @@ class FlagResolve(BaseModel):
 def resolve_flag_json(
     flag_id: str,
     payload: FlagResolve,
+    request: Request,
     admin: AdminServices = Depends(require_admin_session_json),
     services: Services = Depends(get_services),
 ) -> dict[str, Any]:
@@ -511,7 +532,7 @@ def resolve_flag_json(
             "resolution_unknown",
             f"resolution must be one of {', '.join(RECONCILE_RESOLUTIONS)}",
         )
-    flag = services.store.resolve_flag(flag_id, payload.resolution, "admin")
+    flag = services.store.resolve_flag(flag_id, payload.resolution, admin_actor(request))
     return flag.model_dump(mode="json")
 
 

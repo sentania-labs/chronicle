@@ -27,18 +27,24 @@ __all__ = [
     "encrypt",
     "instance_id",
     "load_or_create_instance_key",
+    "load_or_create_key",
 ]
 
 
 def load_or_create_instance_key(state_dir: Path) -> bytes:
-    """Read the instance key, creating it exclusively on first start.
+    """Read the instance key, creating it exclusively on first start."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    return load_or_create_key(state_dir / INSTANCE_KEY_FILE_NAME)
+
+
+def load_or_create_key(path: Path) -> bytes:
+    """Read a 32-byte random key at `path`, creating it exclusively if absent.
 
     `O_EXCL` makes the create-or-read race safe across processes the same way
     `TokenStore` uses a flock: whichever process's `os.open` wins writes the
-    key, and the loser reads back what won.
+    key, and the loser reads back what won. The instance key and the OIDC
+    session key (ADR 027) are both made this way.
     """
-    state_dir.mkdir(parents=True, exist_ok=True)
-    path = state_dir / INSTANCE_KEY_FILE_NAME
     try:
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:

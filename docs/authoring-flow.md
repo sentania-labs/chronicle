@@ -193,7 +193,12 @@ Because there is no login, a banner on every content and preview page says
 so: "This Chronicle instance is internal-only and unauthenticated. Anyone
 who can reach it on the network can create, edit, and act on content." It
 is on by default; `CHRONICLE_UI_BANNER=0` turns it off for an operator who
-has already put the whole thing behind their own auth proxy.
+has already put the whole thing behind their own auth proxy. With browser
+sign-in configured (`CHRONICLE_OIDC_*`, ADR 027, "Browser sign-in" in
+[docs/operations.md](operations.md)) the banner is not shown at all, every
+content and preview page needs a session, the header names the signed-in
+person with a Sign out button, and everything the UI writes is authored by
+that person rather than `editor`.
 
 Every timestamp the content and preview pages show is local clock time,
 `America/Chicago` by default (`CHRONICLE_UI_TIMEZONE` overrides it with any

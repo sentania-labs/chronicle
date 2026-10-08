@@ -13,14 +13,18 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - **No em-dashes anywhere.** Code, comments, docs, commit messages, PR
   bodies. `make prose-check` (`ci/prose-check.sh`) is the gate; it builds the
   character from its own bytes so the checker does not trip itself.
-- **Every API path requires a consumer token.** `/healthz` and `/readyz` are
-  the only unauthenticated routes, forever. There is no anonymous path into
-  `/v1`, reads included, ever, for any consumer, the UI included. The UI
-  backend authenticates with its own `ui` consumer token; browsers never
-  hold one. As of round C1 this is enforced code, not just spec intent
-  (sections 6 and 11): the whole `/v1` router carries the consumer-token
-  dependency, so a new route cannot opt out of it by forgetting. See
-  [docs/decisions/004-ui-no-login-consumer-token.md](docs/decisions/004-ui-no-login-consumer-token.md).
+- **Every API path requires a consumer token.** `/healthz`, `/readyz`, and
+  the two ADR 027 routes (`/auth/oidc/start`, `/auth/oidc/callback`, which
+  exist to produce a session and answer 404 unless OIDC is configured) are
+  the only unauthenticated routes; any further one needs an ADR first.
+  There is no anonymous path into `/v1`, reads included, ever, for any
+  consumer, the UI included. The UI backend authenticates with its own `ui`
+  consumer token; browsers never hold one. As of round C1 this is enforced
+  code, not just spec intent (sections 6 and 11): the whole `/v1` router
+  carries the consumer-token dependency, so a new route cannot opt out of
+  it by forgetting. See
+  [docs/decisions/004-ui-no-login-consumer-token.md](docs/decisions/004-ui-no-login-consumer-token.md)
+  and its ADR 027 amendment.
   FastAPI's own schema routes (`/docs`, `/redoc`, `/openapi.json`,
   `/docs/oauth2-redirect`) are disabled in `create_app` for the same reason;
   they come back in a later round only if placed behind the consumer-token
@@ -32,7 +36,21 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   (`chronicle/api/admin_deps.py`), mounted separately from `build_v1_router()`
   and never imported by a content route; a session cookie authenticates
   nothing under `/v1`, and a bearer token authenticates nothing under
-  `/admin`.
+  `/admin`. As of ADR 027 an OIDC session whose roles include `admin` is
+  accepted there too (checked first); the password and claim-code flows are
+  the break-glass path and stay untouched.
+- **Browser sign-in is all-or-nothing, and the UI router carries the gate.**
+  With no `CHRONICLE_OIDC_*` set, the content UI is exactly ADR 014's (no
+  login, banner on, writes authored `editor`). With any set, all the
+  required ones must be (`settings.OidcSettings`, or the api refuses to
+  start), the client secret is read from a file under the data directory
+  (never an environment value), `ui_deps.require_ui_session` on the whole UI
+  router demands a session, and `Consumer.actor` carries the signed-in
+  person's name so the records say who did what while the credential into
+  the store is still the `ui` token. A person is issuer plus subject; roles
+  come only from the group-to-role mapping, recomputed at every sign-in,
+  and no group name lives in code or a default. See
+  [docs/decisions/027-oidc-browser-sign-in.md](docs/decisions/027-oidc-browser-sign-in.md).
 - **Reconciliation produces flags only, never automatic correction.** A
   mismatch between main and Chronicle's records is surfaced on the admin
   status page for Scott to resolve; nothing in the reconciler deletes or

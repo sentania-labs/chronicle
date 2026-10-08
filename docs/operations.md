@@ -34,6 +34,8 @@ data/
     claim-code                     one-time admin claim code; deleted once claimed
     admin.json                     argon2 password hash and session signing secret
     instance.key                   32 random bytes; encrypts github-app.json; never backed up
+    oidc-client-secret             the OIDC client secret, mounted by the deployer (ADR 027); never backed up
+    oidc-session.key               32 random bytes sealing browser sessions (ADR 027); never backed up
     github-app.json                GitHub App record, secrets encrypted at rest (ADR 008)
     digest-status.json             last digest's counts and timestamps, not secret
     toolchain.json                 last digest's Hugo version and theme commits, 0644
@@ -162,6 +164,106 @@ since `editor` is the identity the `ui` token's writes carry. `/admin`
 itself is the status page: last digest, post count, toolchain drift, App and
 repo connection state, submissions and drafts by status, disk use, and git
 health.
+
+## Browser sign-in (OIDC)
+
+Off unless configured, and then all-or-nothing (ADR 027). With nothing set,
+the content and preview pages need no login and show the "internal-only and
+unauthenticated" banner, exactly as before. With the settings below set,
+every content and preview page needs a session from your identity provider,
+`/admin` accepts a session whose groups grant the `admin` role, and every
+version, event, feedback entry and git commit the UI writes is authored by
+the signed-in person instead of `editor`. The admin password (and the claim
+code before it) keep working throughout as the break-glass path, and the
+`/admin/login` page offers both. Nothing changes for `/v1` consumer tokens,
+the `ui` token, or the GitHub App: a browser session authenticates nothing
+under `/v1`.
+
+The settings, all `CHRONICLE_OIDC_*`. Setting any of them without the three
+required ones makes the api refuse to start, with the reason in its log.
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `CHRONICLE_OIDC_ISSUER` | yes | The provider's issuer URL, exactly as its discovery document states it (trailing slash included). Discovery is read from `<issuer>/.well-known/openid-configuration`. |
+| `CHRONICLE_OIDC_CLIENT_ID` | yes | The client id the provider registered for Chronicle. |
+| `CHRONICLE_OIDC_GROUP_ROLES` | yes | Group-to-role mapping: `group=role` pairs separated by commas, or a JSON object (`{"Group, With Commas": "admin"}`). The roles are `admin` (opens `/admin` and the content UI) and `editor` (the content UI). Group names are matched exactly. A person in no mapped group is refused and gets no session. |
+| `CHRONICLE_OIDC_CLIENT_SECRET_FILE` | no | Path of the file holding the client secret. Default `state/oidc-client-secret`, relative to the data directory; an absolute path must still resolve under it. The secret is never an environment value. The file is read on every sign-in, so rotating it needs no restart. |
+| `CHRONICLE_OIDC_REDIRECT_URI` | no | The callback the provider sends the browser back to. Default `${CHRONICLE_EXTERNAL_URL}/auth/oidc/callback`; register the same value at the provider. |
+| `CHRONICLE_OIDC_SCOPES` | no | Space or comma separated. Default `openid profile email`; `openid` is always included. |
+| `CHRONICLE_OIDC_GROUPS_CLAIM` | no | The claim carrying the person's groups, read from the id token, else from userinfo. Default `groups`. |
+
+Two anonymous routes exist for the flow and nothing else: `GET
+/auth/oidc/start` (sends the browser to the provider) and `GET
+/auth/oidc/callback` (where it comes back). Both answer 404 until OIDC is
+configured. The session is a twelve-hour `HttpOnly` cookie sealed with
+`state/oidc-session.key`; roles are whatever the person's groups map to at
+the moment they sign in, re-read at every sign-in and never refreshed inside
+a session. To end every session at once, delete `state/oidc-session.key` and
+restart the api; everyone signs in again.
+
+A person is identified by issuer plus subject. The name the records show is
+the provider's `preferred_username` (else the email, else the subject); the
+api logs `oidc: sign-in allowed: issuer=... subject=... as 'name' with roles
+[...]` at every sign-in, so a name in `git log` is always traceable to the
+account behind it. Keep consumer token names and people's usernames apart:
+a token issued as `scott` and a person named `scott` author alike.
+
+### Example: Authentik
+
+Any standards-compliant provider works the same way; Authentik is the one
+spelled out here.
+
+1. In Authentik, create an **OAuth2/OpenID Provider**: client type
+   *Confidential*, redirect URI `https://chronicle.example.internal/auth/oidc/callback`,
+   signing key any RSA or EC key (not HS256), and the default scope mappings
+   `openid`, `profile`, `email`. Authentik's `profile` scope already carries
+   the `groups` claim with the person's group names. Note the client id and
+   client secret, and the provider's issuer URL from its overview page
+   (`https://auth.example.internal/application/o/chronicle/`, trailing slash
+   included).
+2. Create an **Application** bound to that provider, and bind the groups that
+   should reach Chronicle (say `chronicle-admins` and `chronicle-editors`) so
+   nobody outside them even reaches the consent screen.
+3. Put the client secret in a file under the data directory, mode 0600. In
+   Kubernetes, mount a Secret as that one file:
+
+   ```yaml
+   # In the api container of examples/k8s/deployment.yaml
+   env:
+     - name: CHRONICLE_OIDC_ISSUER
+       value: https://auth.example.internal/application/o/chronicle/
+     - name: CHRONICLE_OIDC_CLIENT_ID
+       value: REPLACE_ME_CLIENT_ID
+     - name: CHRONICLE_OIDC_GROUP_ROLES
+       value: chronicle-admins=admin,chronicle-editors=editor
+   volumeMounts:
+     - name: oidc-client-secret
+       mountPath: /data/state/oidc-client-secret
+       subPath: client-secret
+       readOnly: true
+   volumes:
+     - name: oidc-client-secret
+       secret:
+         secretName: chronicle-oidc-client-secret   # key: client-secret
+         defaultMode: 0400
+   ```
+
+   With Compose, write the file into the data volume
+   (`docker compose exec api sh -c 'umask 077; cat > /data/state/oidc-client-secret'`)
+   and set the three variables on the `api` service.
+4. Restart the api. The log says `oidc: client secret file ... does not
+   exist` if the mount is wrong, and the api refuses to start outright on a
+   mapping or path mistake. Open the instance: `/content/drafts` now sends
+   you to Authentik and back; `/admin/login` shows "Sign in with your
+   account" above the password form.
+
+If the provider is unreachable, the sign-in start page says so and links to
+`/admin/login`, where the password still works; nothing else in the api
+depends on the provider being up. If a mapping change locks everyone out of
+the content UI, fix `CHRONICLE_OIDC_GROUP_ROLES` and restart; to fall back
+to the pre-sign-in behaviour entirely, unset every `CHRONICLE_OIDC_*`
+variable and restart (the UI is then open to the network again, banner and
+all, so do that only where ADR 014's assumptions still hold).
 
 ## Backup and restore
 

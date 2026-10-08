@@ -15,6 +15,8 @@
 
 .lat-header { height: var(--chr-header-h); padding-block: 0; flex-wrap: nowrap; }
 .chr-brand { font-size: 14px; letter-spacing: -0.01em; }
+/* The signed-in name beside Sign out in the header (ADR 027). */
+.chr-user { font-size: 13px; color: var(--ink-muted); }
 .chr-header-end { margin-left: auto; display: flex; align-items: center; gap: var(--space-4); }
 form.inline { display: inline; margin: 0; }
 

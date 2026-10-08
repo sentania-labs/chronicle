@@ -4,6 +4,10 @@ Deliberately its own module, parallel to `deps.py`'s consumer-token wiring:
 content routes under `/v1` never import this, and this module never touches
 `require_consumer`, so a session cookie can never authenticate a `/v1` call
 and a bearer token can never authenticate `/admin`.
+
+ADR 027: an OIDC session whose roles include `admin` is accepted here too,
+checked first; the password session (and the claim code before it) stays
+the break-glass path and is untouched when no OIDC session is present.
 """
 
 from __future__ import annotations
@@ -29,6 +33,8 @@ from .admin_auth import (
 from .errors import ApiError
 from .github_app import GitHubAppStore
 from .github_client import GitHubClient
+from .oidc import current_principal
+from .oidc_session import Principal
 from .settings import Settings
 
 DIGEST_STATUS_FILE_NAME = "digest-status.json"
@@ -135,9 +141,24 @@ def _cookie_session_valid(request: Request, admin: AdminServices) -> bool:
         return False
 
 
+def oidc_admin(request: Request) -> Principal | None:
+    """The signed-in person, if their roles include `admin` (ADR 027)."""
+    principal = current_principal(request)
+    return principal if principal is not None and principal.is_admin else None
+
+
+def admin_actor(request: Request) -> str:
+    """Who an admin action is recorded as: the signed-in admin's name, else
+    `admin`, the password session's fixed name."""
+    principal = oidc_admin(request)
+    return principal.name if principal is not None else "admin"
+
+
 def require_admin_session_html(request: Request) -> AdminServices:
     """HTML admin pages: unauthenticated visits redirect instead of erroring."""
     admin = get_admin_services(request)
+    if oidc_admin(request) is not None:
+        return admin
     if not admin.credentials.is_claimed():
         raise AdminAuthRedirect("/admin/claim")
     if not _cookie_session_valid(request, admin):
@@ -148,6 +169,8 @@ def require_admin_session_html(request: Request) -> AdminServices:
 def require_admin_session_json(request: Request) -> AdminServices:
     """/admin/api routes: unauthenticated calls get a plain 401, like /v1."""
     admin = get_admin_services(request)
+    if oidc_admin(request) is not None:
+        return admin
     if not admin.credentials.is_claimed():
         raise ApiError(401, "admin_not_claimed", "this instance has not been claimed yet")
     if not _cookie_session_valid(request, admin):

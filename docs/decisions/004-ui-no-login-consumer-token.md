@@ -46,3 +46,19 @@ Requiring a login on the content and preview tabs now was rejected by
 Scott's explicit decision (spec section 17): the merge gate on GitHub is the
 actual control, and a login screen on an internal-only instance would add
 friction without adding a real boundary at this stage.
+
+## Amendment, 2026-10-08: browser sign-in through OIDC (ADR 027)
+
+The decision text above is left as written; two of its statements have
+been amended by [ADR 027](027-oidc-browser-sign-in.md). First, the content
+UI can now require a sign-in: when `CHRONICLE_OIDC_*` is configured, every
+UI route needs a session produced by the lab's identity provider, and the
+`ui` token's writes are authored by the signed-in person rather than
+`editor`. When it is not configured, nothing above changes. Second, the
+list of anonymous routes is no longer only `/healthz` and `/readyz`:
+`/auth/oidc/start` and `/auth/oidc/callback` need no credential, because
+they are what produces one, and they answer 404 unless OIDC is configured.
+"Browsers never hold a token" still holds; a browser holds a session cookie
+that authenticates nothing under `/v1`. The consequence this record
+predicted, that adding login later would touch only the UI and leave the
+API's authentication model alone, is what happened.

@@ -69,11 +69,49 @@ def _nav(active: str | None) -> str:
     return ui_chrome.tabs(NAV_LINKS, active, label="Sections")
 
 
+# Sign out is a POST (it ends a session), a real form and button in the header
+# beside the theme control, the shape Admin's Log out already has.
+def _session_controls(signed_in: str | None) -> str:
+    if not signed_in:
+        return ""
+    return (
+        f'<span class="chr-user">Signed in as <strong>{escape(signed_in)}</strong></span>'
+        '<form class="inline" method="post" action="/auth/oidc/logout">'
+        '<button type="submit" class="lat-btn lat-btn--ghost">Sign out</button></form>'
+    )
+
+
+def sign_in_error_page(message: str, *, retry: bool = True) -> str:
+    """A sign-in that did not produce a session (ADR 027). `message` is the
+    flow's own wording, escaped here like every other value; the provider's
+    text is never written into the page unescaped. Admins are told about the
+    break-glass path, since a down provider is exactly when they need it."""
+    retry_html = (
+        '<p><a class="lat-btn lat-btn--primary" href="/auth/oidc/start">Try signing in again</a></p>'
+        if retry
+        else ""
+    )
+    body = f"""<div class="lat-card chr-narrow">
+{retry_html}
+<p>Administrators can still <a href="/admin/login">log in to Admin with the password</a>.</p>
+</div>"""
+    return page("Sign-in failed", body, banner=False, notice=message)
+
+
+def signed_out_page() -> str:
+    body = """<div class="lat-card chr-narrow">
+<p>Your Chronicle session has ended in this browser.</p>
+<p><a class="lat-btn lat-btn--primary" href="/auth/oidc/start">Sign in again</a></p>
+</div>"""
+    return page("Signed out", body, banner=False)
+
+
 def page(
     title: str,
     body: str,
     *,
     banner: bool,
+    signed_in: str | None = None,
     active: str | None = None,
     notice: str | None = None,
     notice_kind: str = "error",
@@ -84,7 +122,9 @@ def page(
     `*_TAB` constants), which is what marks it current in the tab strip.
     `editor` is the full editor page (EasyMDE and editor.js); `editor_backup`
     is the conflict page, which only needs editor.js to keep the visitor's
-    attempted text in the browser."""
+    attempted text in the browser. `signed_in` is the name of the person an
+    OIDC session belongs to (ADR 027), shown in the header beside a Sign out
+    button; None (no sign-in configured) renders the header as before."""
     # The internal-only warning is about exposure, so it is a `warn` banner,
     # placed directly under the header as Lattice asks for a whole-screen one.
     banner_html = (
@@ -96,6 +136,7 @@ def page(
     # EasyMDE's own sheet sits between Lattice and `style.css`, so Chronicle's
     # overrides of it win on order as well as on specificity.
     head = ui_chrome.head(extra_stylesheets=EDITOR_HEAD if editor else "", scripts=HEAD_SCRIPTS)
+    header = ui_chrome.header("Chronicle", trailing=_session_controls(signed_in))
     if editor:
         scripts = EDITOR_SCRIPTS
     elif editor_backup:
@@ -105,7 +146,7 @@ def page(
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{escape(title)}</title>{head}</head>
 <body{' class="wide"' if editor else ""}>
-{ui_chrome.header("Chronicle")}
+{header}
 <div class="chr-page">
 {banner_html}
 {_nav(active)}
@@ -185,7 +226,12 @@ def _draft_link(submission: dict[str, Any]) -> str:
 
 
 def submissions_list_page(
-    pg: Page[dict[str, Any]], *, banner: bool, show_all: bool = False, hidden: int = 0
+    pg: Page[dict[str, Any]],
+    *,
+    banner: bool,
+    signed_in: str | None = None,
+    show_all: bool = False,
+    hidden: int = 0,
 ) -> str:
     if not pg.items:
         rows = "<tr><td colspan=7>none</td></tr>"
@@ -219,7 +265,7 @@ def submissions_list_page(
 {_table(heads, rows)}
 {_pagination_links(pg, "/content/submissions", extra="&show=all" if show_all else "")}
 """
-    return page("Submissions", body, banner=banner, active=SUBMISSIONS_TAB)
+    return page("Submissions", body, banner=banner, signed_in=signed_in, active=SUBMISSIONS_TAB)
 
 
 def _submission_edit_form(submission: dict[str, Any]) -> str:
@@ -262,6 +308,7 @@ def submission_detail_page(
     images: list[dict[str, Any]],
     *,
     banner: bool,
+    signed_in: str | None = None,
     missing_image_ids: list[str] | None = None,
     notice: str | None = None,
     notice_kind: str | None = None,
@@ -361,6 +408,7 @@ created: {escape(local_time(submission["created_at"]))}, claimed by: {escape(sub
         f"Submission {submission['id']}",
         body,
         banner=banner,
+        signed_in=signed_in,
         active=SUBMISSIONS_TAB,
         notice=notice,
         notice_kind=notice_kind or ("ok" if notice else "error"),
@@ -446,6 +494,7 @@ def drafts_board_page(
     status_filter: str | None,
     q: str,
     banner: bool,
+    signed_in: str | None = None,
 ) -> str:
     """Work in flight (every status but `published`) in full above, then the
     published archive in its own collapsed section. Only the archive is paged:
@@ -481,7 +530,7 @@ def drafts_board_page(
 {_pagination_links(archive, "/content/drafts", extra=extra, anchor="published")}
 </details>
 """
-    return page("Posts", body, banner=banner, active=POSTS_TAB)
+    return page("Posts", body, banner=banner, signed_in=signed_in, active=POSTS_TAB)
 
 
 # --- Editor ---------------------------------------------------------------
@@ -912,6 +961,7 @@ def editor_page(
     post_url: str | None = None,
     *,
     banner: bool,
+    signed_in: str | None = None,
     came_back: bool = False,
     has_preview: bool = False,
     publish_pr_open: bool = False,
@@ -1050,6 +1100,7 @@ def editor_page(
         f"Post: {draft['title'] or '(untitled)'}",
         body,
         banner=banner,
+        signed_in=signed_in,
         active=POSTS_TAB,
         notice=notice,
         notice_kind=notice_kind,
@@ -1063,6 +1114,7 @@ def conflict_page(
     diff_summary: str,
     *,
     banner: bool,
+    signed_in: str | None = None,
 ) -> str:
     """A stale save: never overwrites. Shows the current server version in a
     form ready to reapply on top of, and the visitor's own attempted text in
@@ -1116,6 +1168,7 @@ pane on the right, so copy anything you need from it now.</span></p>
         "Save conflict",
         body,
         banner=banner,
+        signed_in=signed_in,
         active=POSTS_TAB,
         notice_kind="conflict",
         editor_backup=True,
@@ -1151,7 +1204,13 @@ def _attempted_frontmatter_summary(frontmatter: dict[str, Any]) -> str:
 
 
 def diff_page(
-    draft_id: str, from_version: int, to_version: int, diff_text: str, *, banner: bool
+    draft_id: str,
+    from_version: int,
+    to_version: int,
+    diff_text: str,
+    *,
+    banner: bool,
+    signed_in: str | None = None,
 ) -> str:
     lines = []
     for line in diff_text.splitlines():
@@ -1169,7 +1228,13 @@ def diff_page(
 <p><a href="/content/drafts/{escape(draft_id)}">back to post</a></p>
 <pre class="lat-code">{rendered}</pre>
 """
-    return page(f"Diff v{from_version} to v{to_version}", body, banner=banner, active=POSTS_TAB)
+    return page(
+        f"Diff v{from_version} to v{to_version}",
+        body,
+        banner=banner,
+        signed_in=signed_in,
+        active=POSTS_TAB,
+    )
 
 
 # --- Preview tab ------------------------------------------------------------
@@ -1181,7 +1246,9 @@ def _toolchain_badge(drift: bool) -> str:
     return badge("drift", "warn") if drift else badge("match", "ok")
 
 
-def preview_list_page(rows: list[dict[str, Any]], *, banner: bool) -> str:
+def preview_list_page(
+    rows: list[dict[str, Any]], *, banner: bool, signed_in: str | None = None
+) -> str:
     if not rows:
         table = "<tr><td colspan=6>no built previews yet.</td></tr>"
     else:
@@ -1211,7 +1278,7 @@ def preview_list_page(rows: list[dict[str, Any]], *, banner: bool) -> str:
     body = f"""
 {_table(heads, table)}
 """
-    return page("Preview", body, banner=banner, active=PREVIEW_TAB)
+    return page("Preview", body, banner=banner, signed_in=signed_in, active=PREVIEW_TAB)
 
 
 def _format_wall_time(seconds: Any) -> str | None:
@@ -1284,7 +1351,14 @@ def _success_result_html(result: dict[str, Any], post_url: str | None) -> str:
     return f"<ul>{''.join(rows)}</ul>"
 
 
-def run_log_page(run: dict[str, Any], log_text: str, post_url: str | None, *, banner: bool) -> str:
+def run_log_page(
+    run: dict[str, Any],
+    log_text: str,
+    post_url: str | None,
+    *,
+    banner: bool,
+    signed_in: str | None = None,
+) -> str:
     # A queued run has no result at all; a failed one's result carries
     # `error_class` and gets a notice; a successful one's result is
     # rendered by `_success_result_html`, which only knows specific keys.
@@ -1313,4 +1387,4 @@ toolchain drift: {run.get("toolchain_drift")}</p>
 {result_html}
 <pre class="lat-code">{escape(log_text) or "(no log captured yet)"}</pre>
 """
-    return page(f"Run {run['id']}", body, banner=banner, active=PREVIEW_TAB)
+    return page(f"Run {run['id']}", body, banner=banner, signed_in=signed_in, active=PREVIEW_TAB)
