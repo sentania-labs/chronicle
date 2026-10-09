@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from chronicle.api.deps import Services
 from chronicle.api.errors import ApiError
-from chronicle.api.images import alt_text_for, is_plain_filename, normalise, safe_upload_filename
+from chronicle.api.images import alt_text_for, is_plain_filename, safe_upload_filename
 
 from .conftest import png_bytes
 from .test_ui import make_draft
@@ -218,26 +218,31 @@ def test_a_non_ascii_filename_keeps_its_extension_and_two_of_them_do_not_collide
     assert len(services.store.get_draft(draft_id).images) == 2
 
 
-def test_a_refused_attach_leaves_no_orphan_image_record(
+def test_a_pasted_image_with_collision_derives_a_unique_filename(
     client: TestClient, services: Services
 ) -> None:
+    """A paste that would collide with an existing image gets a derived name
+    instead of a 409, and no orphan is left behind because the upload
+    succeeded.
+    """
     draft_id = make_draft(services, "drafting")
     assert upload(client, draft_id, "a b.png", png_bytes((1, 2, 3))).status_code == 200
-    # A different image that cleans to the same name: the attach is refused,
-    # and the blob and record `put_image` had already written must go too.
+    # A different image that cleans to the same name: it gets derived to
+    # ``a-b-2.png`` instead of raising 409.
     other = png_bytes((9, 9, 9))
-    refused = upload(client, draft_id, "a-b.png", other)
-    assert refused.status_code == 409
-    assert refused.json()["code"] == "image_filename_conflict"
-    sha = normalise(other).sha256
-    assert services.store.index.image_id_for_sha(sha) is None
-    assert not list(services.store.images_dir.rglob("*" + sha[:12] + "*"))
-    # The same refusal on an image that already existed must not delete it.
+    result = upload(client, draft_id, "a-b.png", other)
+    assert result.status_code == 200
+    assert result.json()["filename"] == "a-b-2.png"
+    # The second image is attached.
+    draft = services.store.get_draft(draft_id)
+    names = {item.filename for item in draft.images}
+    assert names == {"a-b.png", "a-b-2.png"}
+    # The same refusal on an image that already existed still keeps it.
     existing, _ = services.store.put_image(png_bytes((7, 7, 7)), "keep.png")
     other_draft = make_draft(services, "drafting")
     upload(client, other_draft, "keep.png", png_bytes((5, 5, 5)))
     clash = upload(client, other_draft, "keep.png", png_bytes((7, 7, 7)))
-    assert clash.status_code == 409
+    assert clash.status_code == 200
     assert services.store.get_image(existing.image_id).filename == "keep.png"
 
 

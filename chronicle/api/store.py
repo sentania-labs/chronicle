@@ -1536,15 +1536,23 @@ class Store:
     ) -> tuple[Image, bool]:
         """`put_image` then `attach_image`, as one step that leaves nothing behind.
 
-        The editor's upload. If the attach is refused (a name already on the
-        draft, an unknown draft or role) and this call is what created the
-        image, its blob, sidecar and index row are removed again, so a refused
-        upload does not leave an orphan image record. An image that already
-        existed is never touched. An inline reference to an already-stored
-        image is refused when its stored name is not one a markdown reference
-        can carry (`images.is_plain_filename`): an earlier `/v1` upload or an
-        import can have named it anything, and the editor would otherwise
-        insert text that does not parse.
+        The editor's upload. If the attach is refused (an unknown draft or
+        role) and this call is what created the image, its blob, sidecar and
+        index row are removed again, so a refused upload does not leave an
+        orphan image record. An image that already existed is never touched.
+
+        When the pasted filename would collide with an attached image that has
+        different content, the filename is automatically derived to be unique
+        (image-2.png, image-3.png, and so on) so the paste succeeds and the
+        build places both files under static/images/<slug>/. A direct call to
+        `attach_image` (the `/v1` route) still returns 409 on such a
+        collision, because that is an explicit rename by the consumer.
+
+        An inline reference to an already-stored image is refused when its
+        stored name is not one a markdown reference can carry
+        (`images.is_plain_filename`): an earlier `/v1` upload or an import
+        can have named it anything, and the editor would otherwise insert text
+        that does not parse.
         """
         record, created = self._put_image_unlocked(raw, filename)
         try:
@@ -1556,12 +1564,60 @@ class Store:
                     "reference cannot carry (spaces, parentheses or other punctuation); "
                     "attach it as the feature image, or upload a different copy",
                 )
-            self._attach_image_unlocked(draft_id, record.image_id, role, actor)
+            draft = self.get_draft(draft_id)
+            derived: str | None = None
+            if self._would_collide(draft, record.image_id, record.filename):
+                derived = self._unique_filename(draft, record.image_id, record.filename)
+                if created:
+                    record.filename = derived
+                    self._write_json(
+                        self._image_sidecar_path(record.image_id),
+                        record.model_dump(mode="json"),
+                    )
+            self._attach_image_unlocked(
+                draft_id, record.image_id, role, actor, override_filename=derived
+            )
         except ApiError:
             if created:
                 self._discard_image_unlocked(record)
             raise
         return record, created
+
+    def _would_collide(self, draft: Draft, image_id: str, filename: str) -> bool:
+        """True when another attached image on the draft already has `filename`.
+
+        An image re-attached under its own `image_id` (changing role or
+        position) is not a collision: the check below that the `image_id`
+        differs is what lets re-attach be a no-op.
+        """
+        return any(item.filename == filename and item.image_id != image_id for item in draft.images)
+
+    def _unique_filename(self, draft: Draft, image_id: str, base: str) -> str:
+        """Derive a filename unique among the draft's attached images.
+
+        Appends a numeric suffix to the stem: ``image.png`` ->
+        ``image-2.png``, ``image-2.png`` -> ``image-3.png``, and so on. The
+        comparison is case-insensitive so that ``Image.png`` and ``image.png``
+        on the same draft cannot both be attached, even though the
+        filesystem may permit it.
+        """
+        existing_lower = {
+            item.filename.lower() for item in draft.images if item.image_id != image_id
+        }
+
+        def _next_candidate(n: int) -> str:
+            stem, dot, ext = base.rpartition(".")
+            suffix = f"-{n}"
+            if dot:
+                return f"{stem}{suffix}.{ext}"
+            return f"{stem}{suffix}"
+
+        n = 2
+        while True:
+            candidate = _next_candidate(n)
+            if candidate.lower() not in existing_lower:
+                return candidate
+            n += 1
 
     def _discard_image_unlocked(self, record: Image) -> None:
         directory = self.images_dir / record.image_id[:2]
@@ -1573,7 +1629,14 @@ class Store:
     def attach_image(self, draft_id: str, image_id: str, role: str, actor: str) -> Draft:
         return self._attach_image_unlocked(draft_id, image_id, role, actor)
 
-    def _attach_image_unlocked(self, draft_id: str, image_id: str, role: str, actor: str) -> Draft:
+    def _attach_image_unlocked(
+        self,
+        draft_id: str,
+        image_id: str,
+        role: str,
+        actor: str,
+        override_filename: str | None = None,
+    ) -> Draft:
         if role not in IMAGE_ROLES:
             raise ApiError(
                 422, "image_role_unknown", f"role must be one of {', '.join(IMAGE_ROLES)}"
@@ -1585,7 +1648,8 @@ class Store:
             (
                 item
                 for item in draft.images
-                if item.filename == image.filename and item.image_id != image_id
+                if item.filename == (override_filename or image.filename)
+                and item.image_id != image_id
             ),
             None,
         )
@@ -1600,7 +1664,13 @@ class Store:
                 f"draft {draft_id} already has an attached image named {image.filename!r}",
             )
         draft.images = [item for item in draft.images if item.image_id != image_id]
-        draft.images.append(DraftImage(image_id=image_id, filename=image.filename, role=role))
+        draft.images.append(
+            DraftImage(
+                image_id=image_id,
+                filename=override_filename or image.filename,
+                role=role,
+            )
+        )
         draft.updated_at = now_stamp()
         self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
         self._append_event(type="draft.image_attach", actor=actor, draft_id=draft_id)
