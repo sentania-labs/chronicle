@@ -29,7 +29,7 @@ from typing import Any, cast
 
 import yaml
 
-from . import announce, convert, gitrepo
+from . import announce, convert, gitrepo, lint_renaming
 from . import digest as digest_mod
 from .atomic import write_atomic
 from .errors import ApiError
@@ -1029,20 +1029,34 @@ class Store:
             return f"base_version {from_version} does not exist, no diff available"
         return self._diff(draft_id, from_version, to_version)
 
-    @locked
-    def save_draft(
+    # DRAFT SAVING -----------------------------------------------------------
+    # The public ``save_draft`` is ``@locked``; the unlocked half is
+    # ``_save_draft_unlocked`` for callers already inside the lock
+    # (``rename_image`` is one such caller).  The lock is not reentrant; a
+    # nested ``@locked`` would deadlock.
+
+    def _save_draft_unlocked(
         self,
         draft_id: str,
+        draft: Draft,
         actor: str,
         base_version: int,
         frontmatter: dict[str, Any],
         body: str,
         message: str = "",
         announcements: dict[str, Any] | None = None,
+        event_type: str | None = None,
     ) -> Draft:
-        # Compared against the stored body below, which is always LF (#51).
+        """Unlocked draft save: create a version, bump ``version_no``, and
+        write the draft and its event (must be called under ``self._lock``).
+
+        When ``event_type`` is None the event type is derived from the content
+        change (``draft.revise`` for a body change, ``draft.saved`` for
+        announcements-only).  When ``event_type`` is the empty string no event
+        is written.
+        """
         body = to_lf(body)
-        draft = self.get_draft(draft_id)
+
         watch = self.get_watch(draft_id)
         if watch is not None and watch.kind == "publish":
             raise ApiError(
@@ -1053,12 +1067,6 @@ class Store:
                 pr_url=watch.pr_url,
                 pr_number=watch.pr_number,
             )
-        # The same refusal for the stretch before the PR exists: approve has
-        # queued a publish run (or the publisher is building it) but no watch
-        # yet. Without it a save lands in that window, the draft stays
-        # `approved`, and the run converts text nobody previewed or approved
-        # (issue 41). A run that finishes releases the draft either way: a PR
-        # is a watch, a failure returns the draft to `in_review`.
         self._refuse_while_publishing(draft, "saved")
         check_frontmatter(frontmatter, current_url=draft.frontmatter.get("url"))
 
@@ -1072,9 +1080,6 @@ class Store:
             frontmatter = {**frontmatter, "date": carried}
 
         if base_version != draft.version_no:
-            # A base_version that names no real version (0 aside, or ahead of
-            # current) is still a conflict, not a lookup failure, so the diff
-            # is best effort and its absence never changes the status code.
             raise ApiError(
                 409,
                 "stale_base_version",
@@ -1093,16 +1098,10 @@ class Store:
                 slug=draft.slug,
             )
 
-        # Omitted means keep: only a caller that sends a mapping (`{}`
-        # included) replaces what the draft carries (ADR 021). Checked after
-        # the conflict check above so a stale save is always the 409 it was
-        # before this field existed, and never a 422 about announcements.
         if announcements is None:
             new_announcements = dict(draft.announcements)
         else:
             check_announcements(announcements)
-            # Every value is a string by the line above; the rebuild is what
-            # tells the type checker so without a cast.
             new_announcements = {key: str(value) for key, value in announcements.items()}
 
         version = Version(
@@ -1136,17 +1135,46 @@ class Store:
         draft.updated_at = version.created_at
         self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
 
-        self._append_event(
-            type="draft.revise" if transition is not None else "draft.saved",
-            actor=actor,
-            draft_id=draft_id,
-            from_status=from_status,
-            to_status=draft.status,
-        )
+        # Write the event.  ``event_type`` empty string means skip the event;
+        # a provided string is used verbatim; None derives from the change.
+        if event_type == "":
+            pass  # rename writes its own event
+        elif event_type is not None:
+            self._append_event(
+                type=event_type,
+                actor=actor,
+                draft_id=draft_id,
+                from_status=from_status,
+                to_status=draft.status,
+            )
+        else:
+            self._append_event(
+                type="draft.revise" if transition is not None else "draft.saved",
+                actor=actor,
+                draft_id=draft_id,
+                from_status=from_status,
+                to_status=draft.status,
+            )
         self._commit(f"draft {draft_id}: version {version.version_no} by {actor}", actor)
         self.index.upsert_draft(draft)
         self.index.upsert_version(version)
         return draft
+
+    @locked
+    def save_draft(
+        self,
+        draft_id: str,
+        actor: str,
+        base_version: int,
+        frontmatter: dict[str, Any],
+        body: str,
+        message: str = "",
+        announcements: dict[str, Any] | None = None,
+    ) -> Draft:
+        draft = self.get_draft(draft_id)
+        return self._save_draft_unlocked(
+            draft_id, draft, actor, base_version, frontmatter, body, message, announcements
+        )
 
     # Feedback
 
@@ -1701,6 +1729,101 @@ class Store:
         self._commit(f"draft {draft_id}: detach image {image_id}", actor)
         self.index.upsert_draft(draft)
         return draft
+
+    @locked
+    def rename_image(self, draft_id: str, image_id: str, new_filename: str, actor: str) -> Draft:
+        """Rename an attached image and rewrite every body reference to it.
+
+        Updates ``DraftImage.filename``, rewrites markdown image references
+        in the body (both the bare filename and the
+        ``/images/<slug>/<filename>`` form), skips code spans, records a
+        ``draft.image_rename`` event, and returns a 409
+        ``image_filename_conflict`` when another attachment on the draft
+        already has that name (case-insensitive).
+
+        The body rewrite goes through ``save_draft`` so that a ``Version`` is
+        created, ``base_version`` is checked, and status transitions are
+        applied correctly (issue 86 review, P1).
+        """
+        draft = self.get_draft(draft_id)
+        self._refuse_while_publishing(draft, "have an image renamed")
+        old_item = next((item for item in draft.images if item.image_id == image_id), None)
+        if old_item is None:
+            raise ApiError(
+                404, "image_not_attached", f"image {image_id} is not attached to draft {draft_id}"
+            )
+
+        # Check for conflicts with another attached image (case-insensitive).
+        new_key = new_filename.casefold()
+        conflict = next(
+            (
+                item
+                for item in draft.images
+                if item.filename.casefold() == new_key and item.image_id != image_id
+            ),
+            None,
+        )
+        if conflict is not None:
+            raise ApiError(
+                409,
+                "image_filename_conflict",
+                f"another attached image is already named {new_filename!r}",
+            )
+
+        old_filename = old_item.filename
+        # Use image_dir (the pinned slug) for published image references;
+        # draft.slug can differ for custom-URL posts.
+        ref_slug = draft.image_dir or draft.slug or ""
+        # Rewrite body references outside code spans.
+        new_body, _replaced = lint_renaming.rewrite_body_image_ref(
+            draft.body, old_filename, new_filename, ref_slug
+        )
+
+        # Pass the rewritten body through the unlocked save path so that a
+        # Version is created, base_version is checked, and status transitions
+        # are applied (rename_image is already @locked, so the unlocked
+        # variant avoids a nested-lock deadlock).  event_type="" so we only
+        # record the draft.image_rename event, not a draft.revise.
+        draft = self._save_draft_unlocked(
+            draft_id,
+            draft,
+            actor,
+            draft.version_no,
+            draft.frontmatter,
+            new_body,
+            message=f"rename image {image_id!r} {old_filename!r} -> {new_filename!r}",
+            event_type="",
+        )
+
+        # Update the DraftImage record (_save_draft_unlocked returns a reloaded
+        # draft that has our lock; modify it in-place and write back).
+        for item in draft.images:
+            if item.image_id == image_id:
+                item.filename = new_filename
+                self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
+                break
+        self._append_event(type="draft.image_rename", actor=actor, draft_id=draft_id)
+        self._commit(
+            f"draft {draft_id}: rename image {image_id} {old_filename!r} -> {new_filename!r}",
+            actor,
+        )
+        self.index.upsert_draft(draft)
+        return draft
+
+    def lint_body_image_refs(self, draft_id: str, *, slug: str) -> list[str]:
+        """Check the draft's body references against its attached images.
+
+        Returns a list of warning strings for any
+        ``/images/<slug>/<file>`` reference where ``<file>`` is not found
+        among the draft's ``DraftImage.filename`` values.  Code spans are
+        skipped.
+        """
+        draft = self.get_draft(draft_id)
+        attached = {item.filename for item in draft.images}
+        attached_lower = {name.lower(): name for name in attached}
+        return lint_renaming.lint_staged_images_from_attachments(
+            draft.body, slug=slug, attachments=attached, attachments_lower=attached_lower
+        )
 
     # Posts and runs
 

@@ -938,6 +938,65 @@ def draft_image_detach(
     return RedirectResponse(f"/content/drafts/{draft_id}", status_code=303)
 
 
+@router.post("/content/drafts/{draft_id}/images/{image_id}/rename")
+async def draft_image_rename(
+    draft_id: str,
+    image_id: str,
+    request: Request,
+    _origin: None = Depends(check_same_origin),
+    consumer: Consumer = Depends(require_ui_consumer),
+    services: Services = Depends(get_services),
+) -> Any:
+    """Rename an attached image and rewrite body references.
+
+    Returns JSON with the new filename, the rewritten body, and a URL for the
+    renamed file when the client asks for ``Accept: application/json``.
+    """
+    from ..images import safe_upload_filename
+
+    form = await request.form()
+    raw_name = str(form.get("filename", ""))
+    safe_name = safe_upload_filename(raw_name) if raw_name else ""
+    if not safe_name:
+        return JSONResponse(
+            {"ok": False, "error": "image_rename_empty_name"},
+            status_code=422,
+        )
+    try:
+        with services.leases.writing(draft_id, consumer.name):
+            draft = services.store.rename_image(draft_id, image_id, safe_name, consumer.name)
+    except ApiError as exc:
+        return JSONResponse(
+            {"ok": False, "error": exc.code, "message": exc.message},
+            status_code=exc.status_code,
+        )
+    return JSONResponse(
+        {
+            "ok": True,
+            "filename": next(
+                (img.filename for img in draft.images if img.image_id == image_id),
+                draft.images[0].filename if draft.images else "",
+            ),
+            "body": draft.body,
+            "image_url": tpl.image_url(draft_id, image_id),
+        }
+    )
+
+
+# --- Draft status/lint -------------------------------------------------------
+
+
+@router.get("/content/drafts/{draft_id}/lint")
+def draft_lint(
+    draft_id: str,
+    services: Services = Depends(get_services),
+) -> JSONResponse:
+    """Return lint warnings for the draft, mainly dangling image references."""
+    draft = services.store.get_draft(draft_id)
+    warnings = services.store.lint_body_image_refs(draft_id, slug=draft.slug or "")
+    return JSONResponse({"ok": True, "warnings": warnings})
+
+
 # --- Preview tab ------------------------------------------------------------
 
 

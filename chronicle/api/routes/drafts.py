@@ -222,3 +222,24 @@ def detach_image(
     # A detach can orphan a reference in the body the editor has open.
     with services.leases.writing(draft_id, consumer.name):
         return _dump(services.store.detach_image(draft_id, image_id, consumer.name))
+
+
+class ImageRename(BaseModel):
+    filename: str
+
+
+@router.post("/{draft_id}/images/{image_id}/rename")
+def rename_image(
+    draft_id: str,
+    image_id: str,
+    payload: ImageRename,
+    consumer: Consumer = Depends(require_consumer),
+    services: Services = Depends(get_services),
+) -> dict[str, Any]:
+    """Rename an attached image and rewrite body references."""
+    from ..images import safe_upload_filename
+
+    safe_name = safe_upload_filename(payload.filename)
+    with services.leases.writing(draft_id, consumer.name):
+        draft = services.store.rename_image(draft_id, image_id, safe_name, consumer.name)
+    return _dump(draft)

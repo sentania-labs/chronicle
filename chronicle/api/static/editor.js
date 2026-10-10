@@ -621,6 +621,31 @@ function copyStateText(outcome) {
   var saved = currentState();
   var serverVersion = Number(baseInput.value);
 
+  // --- Lint alerts (issue 86 review, P2) -------------------------------------
+  var lintEl = document.getElementById("lint-alerts");
+
+  function renderLint(warnings) {
+    if (!lintEl) { return; }
+    if (!warnings || warnings.length === 0) {
+      lintEl.innerHTML = "";
+      return;
+    }
+    lintEl.innerHTML = warnings.map(function (w) { return '<div class="chr-lint-item">' + sanitize(w) + "</div>"; }).join("");
+  }
+
+  function fetchLint() {
+    if (!lintEl || !draftId) { return; }
+    fetch("/content/drafts/" + encodeURIComponent(draftId) + "/lint", { credentials: "same-origin" })
+      .then(function (resp) { return resp.json(); })
+      .then(function (result) {
+        renderLint(result && result.ok ? (result.warnings || []) : []);
+      })
+      .catch(function () { /* lint is best-effort */ });
+  }
+
+  // Load lint warnings on page load and after every save or upload.
+  fetchLint();
+
   // --- Save state ------------------------------------------------------
   function setState(state, detail) {
     stateEl.setAttribute("data-state", state);
@@ -850,6 +875,7 @@ function copyStateText(outcome) {
             writeBackup();
             setState("dirty");
           }
+          fetchLint();
           return;
         }
         if (result.status === 409 && doc.getElementById("attempted-body")) {
@@ -1002,7 +1028,7 @@ function copyStateText(outcome) {
         }
         onChange();
         say(outcome.message, false);
-        return refreshFromServer();
+        return refreshFromServer().then(function () { fetchLint(); });
       })
       .catch(function () {
         say("Upload failed: could not reach the server.", true);
@@ -1083,6 +1109,62 @@ function copyStateText(outcome) {
       uploadAll(target.files, null);
       target.value = "";
     }
+  });
+  // Rename button: POST to the rename endpoint, replace the row's filename
+  // cell and update the editor body when the server returns.
+  document.addEventListener("click", function (event) {
+    var btn = event.target.closest && event.target.closest("[data-image-rename]");
+    if (!btn) {
+      return;
+    }
+    event.preventDefault();
+    var imageId = btn.getAttribute("data-image-rename");
+    var row = btn.closest("tr");
+    var renameBtn = btn;
+    renameBtn.disabled = true;
+    renameBtn.textContent = "Renaming...";
+    var form = new FormData();
+    form.append("filename", prompt("New filename:"));
+    if (!form.get("filename")) {
+      renameBtn.disabled = false;
+      renameBtn.textContent = "Rename";
+      return;
+    }
+    fetch("/content/drafts/" + encodeURIComponent(draftId) + "/images/" + encodeURIComponent(imageId) + "/rename", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+      body: form,
+    })
+      .then(function (resp) { return resp.json(); })
+      .then(function (result) {
+        if (!result || result.ok !== true) {
+          renameBtn.disabled = false;
+          renameBtn.textContent = "Rename";
+          say("Rename failed: " + (result && result.message), true);
+          return;
+        }
+        // Update the row's filename cell.
+        if (row) {
+          var cell = row.querySelector("td.chr-mono");
+          if (cell) { cell.textContent = result.filename; }
+        }
+        // Update the image list row's data attributes for the live render.
+        if (row) {
+          row.setAttribute("data-image-filename", result.filename);
+        }
+        // Update the editor body.
+        if (result.body) { setBody(result.body); }
+        onChange();
+        fetchLint();
+        renameBtn.disabled = false;
+        renameBtn.textContent = "Rename";
+      })
+      .catch(function () {
+        renameBtn.disabled = false;
+        renameBtn.textContent = "Rename";
+        say("Rename failed: could not reach the server.", true);
+      });
   });
   ["dragenter", "dragover"].forEach(function (name) {
     document.addEventListener(name, function (event) {
