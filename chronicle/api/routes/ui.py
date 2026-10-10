@@ -973,7 +973,10 @@ async def draft_image_rename(
     return JSONResponse(
         {
             "ok": True,
-            "filename": draft.images[0].filename,
+            "filename": next(
+                (img.filename for img in draft.images if img.image_id == image_id),
+                draft.images[0].filename if draft.images else "",
+            ),
             "body": draft.body,
             "image_url": tpl.image_url(draft_id, image_id),
         }

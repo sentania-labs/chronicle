@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -249,6 +250,11 @@ def _publish(
     linted_body, lint_warnings = lint.lint_and_normalize_body(draft.body, slug=draft.slug)
     for warning in lint_warnings:
         log.info("run %s: lint: %s", run.id, warning)
+    # The normalization pass can add leading slashes that turn bare
+    # ``images/<slug>/file`` refs into ``/images/<slug>/file`` refs; check
+    # again so that those newly-formed refs are also validated (issue 86
+    # review, P2).
+    _check_missing_image_refs_for_body(linted_body, draft)
     working_draft = draft.model_copy(
         update={"body": linted_body, "frontmatter": stamped_frontmatter}
     )
@@ -510,10 +516,20 @@ def _check_missing_image_refs(draft: Draft) -> None:
     Scans ``/images/<slug>/<file>`` references outside code spans; a file
     not found in ``draft.images`` means the publish would ship a 404.
     """
+    _check_missing_image_refs_for_body(draft.body, draft)
+
+
+def _check_missing_image_refs_for_body(body: str, draft: Draft) -> None:
+    """Version of the missing-image check that operates on a specific body
+    string rather than ``draft.body`` (issue 86 review, P2)."""
     from .lint import _FINAL_IMAGE_REF_RE, _scan_outside_code
 
     attached = {item.filename for item in draft.images}
-    attached_lower = {name.lower(): name for name in attached}
+
+    # image_dir (the pinned slug) rather than draft.slug: a custom-URL post
+    # can have a slug that differs from the directory under static/images/
+    # (issue 86 review, P1).
+    ref_slug = draft.image_dir or draft.slug
 
     class _Finder:
         def __init__(self) -> None:
@@ -521,17 +537,20 @@ def _check_missing_image_refs(draft: Draft) -> None:
 
         def __call__(self, seg: str) -> list[str]:
             for m in _FINAL_IMAGE_REF_RE.finditer(seg):
-                ref_slug, filename = m.group(1), m.group(2)
-                if ref_slug != draft.slug:
+                ref_slug_match, full_capture = m.group(1), m.group(2)
+                if ref_slug_match != ref_slug:
                     continue
-                if filename in attached:
-                    continue
-                if filename.lower() not in attached_lower:
+                # Extract only the URL target, not trailing prose
+                # (e.g. "/images/post/photo.png shown above" -> "photo.png").
+                filename = re.split(r"\s|\.|\n", full_capture, maxsplit=1)[0]
+                # Case-sensitive: conversion uploads the file with its original
+                # casing, so only an exact match counts (issue 86 review, P2).
+                if filename not in attached:
                     self.missing.append(m.group(0))
             return []
 
     finder = _Finder()
-    _scan_outside_code(draft.body, finder)
+    _scan_outside_code(body, finder)
     if finder.missing:
         raise PublishFailed(
             "missing_image",

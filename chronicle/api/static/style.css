@@ -339,3 +339,7 @@ details#published > summary { cursor: pointer; font-weight: 600; padding: var(--
 .side-tabs > .lat-tabs { flex-wrap: wrap; margin-bottom: var(--space-5); }
 .side-tabs .lat-tab { padding: 8px 8px; white-space: nowrap; }
 .side-tab-panel[hidden] { display: none; }
+
+/* Lint warnings (issue 86 review, P2). */
+.chr-lint { margin: 0 0 var(--space-5); }
+.chr-lint .chr-lint-item { background: var(--warn-soft); border-left: 3px solid var(--warn); padding: 4px 10px; font-size: 13px; margin-bottom: 4px; color: var(--warn-ink); }

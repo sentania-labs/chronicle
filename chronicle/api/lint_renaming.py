@@ -52,12 +52,18 @@ def rewrite_body_image_ref(
 
         seg = _FINAL_IMAGE_REF_RE.sub(_dir_repl, seg)
 
-        # Rewrite bare markdown references: ![alt](old).
-        bare_pat = r"!\[([^\]]*)\]\(\s*" + re.escape(old_filename) + r"\s*\)"
+        # Rewrite bare markdown references: ![alt](old), ![alt](old "title").
+        bare_pat = (
+            r"!\[([^\]]*)\]\(\s*" + re.escape(old_filename) + r"\s*((?:\"[^\"]*\"|'[^']*')?)\s*\)"
+        )
 
         def _bare_repl(m: re.Match[str]) -> str:
             alt_text = m.group(1)
-            replacement = f"![{alt_text}]({new_filename})"
+            title = m.group(2) or ""
+            if title:
+                replacement = f"![{alt_text}]({new_filename}{title})"
+            else:
+                replacement = f"![{alt_text}]({new_filename})"
             replaced.append(m.group(0))
             return replacement
 

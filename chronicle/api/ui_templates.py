@@ -912,7 +912,8 @@ def _announcement_hidden_fields(announcements: dict[str, Any]) -> str:
 def _image_upload_form(draft_id: str, images: list[dict[str, Any]]) -> str:
     # Works with no script at all (a plain multipart post that re-renders the
     # page); editor.js upgrades it to upload-in-place and insert-at-cursor.
-    return f"""{_image_list(draft_id, images)}
+    return f"""<div id="lint-alerts" class="chr-lint" data-lint-draft="{escape(draft_id)}"></div>
+{_image_list(draft_id, images)}
 <form id="image-form" method="post" action="/content/drafts/{escape(draft_id)}/images" enctype="multipart/form-data">
 <div id="dropzone" class="dropzone">Drop an image on the editor or here, or choose one.</div>
 <label class="lat-label" for="file">Upload image</label>
