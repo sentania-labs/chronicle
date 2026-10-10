@@ -1577,6 +1577,8 @@ class Store:
             self._attach_image_unlocked(
                 draft_id, record.image_id, role, actor, override_filename=derived
             )
+            if derived is not None and not created:
+                record = record.model_copy(update={"filename": derived})
         except ApiError:
             if created:
                 self._discard_image_unlocked(record)
@@ -1590,7 +1592,11 @@ class Store:
         position) is not a collision: the check below that the `image_id`
         differs is what lets re-attach be a no-op.
         """
-        return any(item.filename == filename and item.image_id != image_id for item in draft.images)
+        filename_key = filename.casefold()
+        return any(
+            item.filename.casefold() == filename_key and item.image_id != image_id
+            for item in draft.images
+        )
 
     def _unique_filename(self, draft: Draft, image_id: str, base: str) -> str:
         """Derive a filename unique among the draft's attached images.
@@ -1601,8 +1607,8 @@ class Store:
         on the same draft cannot both be attached, even though the
         filesystem may permit it.
         """
-        existing_lower = {
-            item.filename.lower() for item in draft.images if item.image_id != image_id
+        existing_keys = {
+            item.filename.casefold() for item in draft.images if item.image_id != image_id
         }
 
         def _next_candidate(n: int) -> str:
@@ -1615,7 +1621,7 @@ class Store:
         n = 2
         while True:
             candidate = _next_candidate(n)
-            if candidate.lower() not in existing_lower:
+            if candidate.casefold() not in existing_keys:
                 return candidate
             n += 1
 
@@ -1644,12 +1650,13 @@ class Store:
         draft = self.get_draft(draft_id)
         self._refuse_while_publishing(draft, "given a new image")
         image = self.get_image(image_id)
+        target_filename = override_filename or image.filename
+        target_filename_key = target_filename.casefold()
         conflict = next(
             (
                 item
                 for item in draft.images
-                if item.filename == (override_filename or image.filename)
-                and item.image_id != image_id
+                if item.filename.casefold() == target_filename_key and item.image_id != image_id
             ),
             None,
         )
@@ -1661,13 +1668,13 @@ class Store:
             raise ApiError(
                 409,
                 "image_filename_conflict",
-                f"draft {draft_id} already has an attached image named {image.filename!r}",
+                f"draft {draft_id} already has an attached image named {target_filename!r}",
             )
         draft.images = [item for item in draft.images if item.image_id != image_id]
         draft.images.append(
             DraftImage(
                 image_id=image_id,
-                filename=override_filename or image.filename,
+                filename=target_filename,
                 role=role,
             )
         )

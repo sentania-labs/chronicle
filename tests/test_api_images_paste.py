@@ -17,9 +17,12 @@ Re-attaching the same ``image_id`` (changing role) stays a no-op.
 
 from __future__ import annotations
 
+import shutil
+
 import pytest
 from fastapi.testclient import TestClient
 
+from chronicle.api import convert, lint
 from chronicle.api.deps import Services
 from chronicle.api.errors import ApiError
 from chronicle.api.store import Store
@@ -72,6 +75,38 @@ def test_two_pastes_attach_with_derived_filenames(client: TestClient, services: 
     # The markdown references the derived filenames.
     assert first_body["markdown"] == "![image](image.png)"
     assert second_body["markdown"] == "![image 2](image-2.png)"
+
+
+def test_two_pastes_convert_and_pass_staged_image_lint(
+    client: TestClient, services: Services, tmp_path
+) -> None:
+    """Both derived references survive conversion and match staged files."""
+    draft_id = _make_draft_id(client, services)
+    first = paste(client, draft_id, png_bytes((10, 20, 30))).json()
+    second = paste(client, draft_id, png_bytes((20, 30, 40))).json()
+    markdown = f"{first['markdown']}\n{second['markdown']}"
+
+    draft = services.store.get_draft(draft_id)
+    services.store.save_draft(draft.id, "scott", draft.version_no, draft.frontmatter, markdown)
+    draft = services.store.get_draft(draft_id)
+    draft.slug = "pasted-images"
+    draft.image_dir = "pasted-images"
+    converted = convert.convert(draft)
+
+    normalized, warnings = lint.lint_and_normalize_body(converted.text, slug="pasted-images")
+    assert warnings == []
+    assert "![image](/images/pasted-images/image.png)" in normalized
+    assert "![image 2](/images/pasted-images/image-2.png)" in normalized
+
+    destination = tmp_path / "static" / "images" / "pasted-images"
+    destination.mkdir(parents=True)
+    for placement in converted.images:
+        shutil.copyfile(
+            services.store.image_blob(placement.image_id),
+            destination / placement.site_path.rsplit("/", 1)[-1],
+        )
+    assert {path.name for path in destination.iterdir()} == {"image.png", "image-2.png"}
+    assert lint.lint_staged_images(normalized, slug="pasted-images", dest_dir=destination) == []
 
 
 def test_three_pastes_derive_image_3_png(client: TestClient, services: Services) -> None:
@@ -156,6 +191,39 @@ def test_explicit_rename_onto_existing_name_returns_409(
     assert len(draft["images"]) == 1
 
 
+def test_explicit_rename_collision_is_case_insensitive(
+    client: TestClient, agent_token: str
+) -> None:
+    """An explicit attach cannot differ from an existing name only by case."""
+    first_id = client.post(
+        "/v1/images",
+        files={"file": ("Image.PNG", png_bytes((10, 20, 30)), "image/png")},
+        headers=auth(agent_token),
+    ).json()["image_id"]
+    second_id = client.post(
+        "/v1/images",
+        files={"file": ("image.png", png_bytes((20, 30, 40)), "image/png")},
+        headers=auth(agent_token),
+    ).json()["image_id"]
+    draft_id = client.post("/v1/drafts", json={}, headers=auth(agent_token)).json()["id"]
+    assert (
+        client.put(
+            f"/v1/drafts/{draft_id}/images/{first_id}",
+            json={"role": "inline"},
+            headers=auth(agent_token),
+        ).status_code
+        == 200
+    )
+
+    conflict = client.put(
+        f"/v1/drafts/{draft_id}/images/{second_id}",
+        json={"role": "inline"},
+        headers=auth(agent_token),
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"] == "image_filename_conflict"
+
+
 # --- Store-level tests: _would_collide and _unique_filename ----------------
 
 
@@ -228,6 +296,41 @@ def test_put_and_attach_image_derives_on_collision(store: Store) -> None:
     draft = store.get_draft(draft.id)
     filenames = {item.filename for item in draft.images}
     assert filenames == {"image.png", "image-2.png"}
+
+
+def test_deduplicated_upload_returns_derived_per_draft_filename(store: Store) -> None:
+    """A shared image sidecar keeps its name while the paste returns its attachment name."""
+    source, _ = store.create_draft("scott")
+    shared, _ = store.put_and_attach_image(
+        source.id, png_bytes((10, 20, 30)), "image.png", "inline", "scott"
+    )
+    target, _ = store.create_draft("scott")
+    store.put_and_attach_image(target.id, png_bytes((20, 30, 40)), "image.png", "inline", "scott")
+
+    effective, created = store.put_and_attach_image(
+        target.id, png_bytes((10, 20, 30)), "image.png", "inline", "scott"
+    )
+    assert created is False
+    assert effective.filename == "image-2.png"
+    assert store.get_image(shared.image_id).filename == "image.png"
+    assert {item.filename for item in store.get_draft(target.id).images} == {
+        "image.png",
+        "image-2.png",
+    }
+
+
+def test_paste_collision_is_case_insensitive(store: Store) -> None:
+    """A pasted name differing only by case receives the lowest free suffix."""
+    draft, _ = store.create_draft("scott")
+    store.put_and_attach_image(draft.id, png_bytes((10, 20, 30)), "Image.PNG", "inline", "scott")
+    effective, _ = store.put_and_attach_image(
+        draft.id, png_bytes((20, 30, 40)), "image.png", "inline", "scott"
+    )
+    assert effective.filename == "image-2.png"
+    assert {item.filename for item in store.get_draft(draft.id).images} == {
+        "Image.PNG",
+        "image-2.png",
+    }
 
 
 def test_put_and_attach_image_re_attach_same_image_is_no_op(store: Store) -> None:
