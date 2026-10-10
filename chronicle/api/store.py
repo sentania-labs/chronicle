@@ -29,7 +29,7 @@ from typing import Any, cast
 
 import yaml
 
-from . import announce, convert, gitrepo
+from . import announce, convert, gitrepo, lint_renaming
 from . import digest as digest_mod
 from .atomic import write_atomic
 from .errors import ApiError
@@ -1701,6 +1701,76 @@ class Store:
         self._commit(f"draft {draft_id}: detach image {image_id}", actor)
         self.index.upsert_draft(draft)
         return draft
+
+    @locked
+    def rename_image(self, draft_id: str, image_id: str, new_filename: str, actor: str) -> Draft:
+        """Rename an attached image and rewrite every body reference to it.
+
+        Updates ``DraftImage.filename``, rewrites markdown image references
+        in the body (both the bare filename and the
+        ``/images/<slug>/<filename>`` form), skips code spans, records a
+        ``draft.image_rename`` event, and returns a 409
+        ``image_filename_conflict`` when another attachment on the draft
+        already has that name (case-insensitive).
+        """
+        draft = self.get_draft(draft_id)
+        self._refuse_while_publishing(draft, "have an image renamed")
+        old_item = next((item for item in draft.images if item.image_id == image_id), None)
+        if old_item is None:
+            raise ApiError(
+                404, "image_not_attached", f"image {image_id} is not attached to draft {draft_id}"
+            )
+
+        # Check for conflicts with another attached image (case-insensitive).
+        new_key = new_filename.casefold()
+        conflict = next(
+            (
+                item
+                for item in draft.images
+                if item.filename.casefold() == new_key and item.image_id != image_id
+            ),
+            None,
+        )
+        if conflict is not None:
+            raise ApiError(
+                409,
+                "image_filename_conflict",
+                f"another attached image is already named {new_filename!r}",
+            )
+
+        old_filename = old_item.filename
+        # Rewrite body references outside code spans.
+        new_body, _replaced = lint_renaming.rewrite_body_image_ref(
+            draft.body, old_filename, new_filename, draft.slug or ""
+        )
+
+        # Update the DraftImage record.
+        old_item.filename = new_filename
+        draft.body = new_body
+        draft.updated_at = now_stamp()
+        self._write_json(self._draft_path(draft_id), draft.model_dump(mode="json"))
+        self._append_event(type="draft.image_rename", actor=actor, draft_id=draft_id)
+        self._commit(
+            f"draft {draft_id}: rename image {image_id} {old_filename!r} -> {new_filename!r}",
+            actor,
+        )
+        self.index.upsert_draft(draft)
+        return draft
+
+    def lint_body_image_refs(self, draft_id: str, *, slug: str) -> list[str]:
+        """Check the draft's body references against its attached images.
+
+        Returns a list of warning strings for any
+        ``/images/<slug>/<file>`` reference where ``<file>`` is not found
+        among the draft's ``DraftImage.filename`` values.  Code spans are
+        skipped.
+        """
+        draft = self.get_draft(draft_id)
+        attached = {item.filename for item in draft.images}
+        attached_lower = {name.lower(): name for name in attached}
+        return lint_renaming.lint_staged_images_from_attachments(
+            draft.body, slug=slug, attachments=attached, attachments_lower=attached_lower
+        )
 
     # Posts and runs
 

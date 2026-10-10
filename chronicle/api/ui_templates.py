@@ -661,7 +661,10 @@ def _image_list(draft_id: str, images: list[dict[str, Any]]) -> str:
         f'data-image-src="{escape(image_url(draft_id, img["image_id"]))}">'
         f'<td class="chr-mono">{escape(img["filename"])}</td>'
         f"<td>{escape(img['role'])}</td>"
-        f'<td><form method="post" action="/content/drafts/{escape(draft_id)}/images/{escape(img["image_id"])}/detach">'
+        f'<td><button class="lat-btn lat-btn--ghost chr-link" '
+        f'data-image-rename="{escape(img["image_id"])}" '
+        f'title="Rename this attachment">Rename</button> '
+        f'<form method="post" action="/content/drafts/{escape(draft_id)}/images/{escape(img["image_id"])}/detach">'
         '<button type="submit" class="lat-btn lat-btn--ghost">Detach</button></form></td>'
         "</tr>"
         for img in images

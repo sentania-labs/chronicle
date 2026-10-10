@@ -236,6 +236,9 @@ def _publish(
     if not draft.slug:
         raise PublishFailed("no_slug", f"draft {draft.id} has no pinned slug")
 
+    # Check for dangling image references before conversion (issue 86).
+    _check_missing_image_refs(draft)
+
     date = (
         (draft.published or {}).get("date") or draft.frontmatter.get("date") or stamp_publish_date()
     )
@@ -498,6 +501,42 @@ def expire_unclaimed_runs(
         )
         expired.append(finished)
     return expired
+
+
+def _check_missing_image_refs(draft: Draft) -> None:
+    """Raise ``PublishFailed`` when the body references an image that is not
+    attached to the draft.
+
+    Scans ``/images/<slug>/<file>`` references outside code spans; a file
+    not found in ``draft.images`` means the publish would ship a 404.
+    """
+    from .lint import _FINAL_IMAGE_REF_RE, _scan_outside_code
+
+    attached = {item.filename for item in draft.images}
+    attached_lower = {name.lower(): name for name in attached}
+
+    class _Finder:
+        def __init__(self) -> None:
+            self.missing: list[str] = []
+
+        def __call__(self, seg: str) -> list[str]:
+            for m in _FINAL_IMAGE_REF_RE.finditer(seg):
+                ref_slug, filename = m.group(1), m.group(2)
+                if ref_slug != draft.slug:
+                    continue
+                if filename in attached:
+                    continue
+                if filename.lower() not in attached_lower:
+                    self.missing.append(m.group(0))
+            return []
+
+    finder = _Finder()
+    _scan_outside_code(draft.body, finder)
+    if finder.missing:
+        raise PublishFailed(
+            "missing_image",
+            f"body references {finder.missing[0]!r} which has no attached image",
+        )
 
 
 def write_heartbeat(store: Store) -> None:
