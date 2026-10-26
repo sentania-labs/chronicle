@@ -60,6 +60,17 @@ spec:
             # target only, drop this mount and the `backups` volume below.
             - name: backups
               mountPath: /backups
+          # The api loads the index (hundreds of drafts) before uvicorn binds,
+          # which takes about 30 s on a 354-draft blog. Without this, the
+          # liveness probe starts at once, fails three times in that window,
+          # and the kubelet kills a healthy api (issue 89). Liveness only
+          # begins once this passes: up to 30 x 5 s = 150 s to bind.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /readyz

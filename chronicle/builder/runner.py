@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import threading
 import time
 import uuid
@@ -36,6 +37,14 @@ IGNORE_GIT = shutil.ignore_patterns(".git")
 # (heartbeat: settings.poll_seconds * 5 + 30s; lease: settings.lease_seconds)
 # closes.
 KEEPALIVE_SECONDS = 5.0
+
+
+# How long the index may stay locked, tick after tick, before the builder
+# stops deferring and lets the error crash it. The api holds the shared
+# index's write lock while it rebuilds it at startup (about 30 s on 354
+# drafts, issue 89), so this is a generous multiple of that; a lock that
+# outlasts it is not a rebuild and a restart is the honest response.
+LOCK_DEFER_LIMIT_SECONDS = 300.0
 
 
 class BuildFailed(Exception):
@@ -475,3 +484,64 @@ def tick(store: Store, settings: BuilderSettings, leases: LeaseDirectory) -> boo
         # live claim instead of this one's stale one (round C3 review).
         leases.release(run.id, settings.builder_id)
     return True
+
+
+def is_index_locked(exc: BaseException) -> bool:
+    """True for SQLite's transient "another connection holds the lock" errors.
+
+    Matches the message, not the class: `OperationalError` also covers a
+    missing table or a malformed query, which must never be deferred.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
+class LockDeferral:
+    """Defers a tick or a startup step that hit a locked index, boundedly.
+
+    The index is a derived cache the api rebuilds in place (ADR 006), so a
+    lock held by that rebuild passes on its own. Each locked failure is
+    logged and counted; the first success clears the count, and a lock that
+    lasts longer than `limit_seconds` since the first failure is re-raised.
+    Anything that is not a lock error propagates untouched.
+    """
+
+    def __init__(self, limit_seconds: float = LOCK_DEFER_LIMIT_SECONDS) -> None:
+        self.limit_seconds = limit_seconds
+        self.since: float | None = None
+        self.deferrals = 0
+
+    def run(self, step: str, fn: Any, default: Any = False) -> Any:
+        try:
+            result = fn()
+        except sqlite3.OperationalError as exc:
+            if not is_index_locked(exc):
+                raise
+            now = time.monotonic()
+            if self.since is None:
+                self.since = now
+            waited = now - self.since
+            if waited > self.limit_seconds:
+                log.error("index still locked after %.0fs during %s, giving up", waited, step)
+                raise
+            self.deferrals += 1
+            log.warning(
+                "index locked during %s (%s), deferring; locked for %.0fs, deferral %d",
+                step,
+                exc,
+                waited,
+                self.deferrals,
+            )
+            return default
+        if self.since is not None:
+            log.info(
+                "index unlocked, resuming %s after %d deferral(s) over %.0fs",
+                step,
+                self.deferrals,
+                time.monotonic() - self.since,
+            )
+        self.since = None
+        self.deferrals = 0
+        return result
