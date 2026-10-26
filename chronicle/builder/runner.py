@@ -58,7 +58,7 @@ class Heartbeat:
     builder_id: str
     last_loop_at: str
     hugo_version: str
-    queue_depth: int
+    queue_depth: int | None
     preview_writable: bool
 
     def as_dict(self) -> dict[str, Any]:
@@ -106,13 +106,16 @@ def check_writable(path: Path) -> bool:
 
 
 def write_heartbeat(
-    settings: BuilderSettings, store: Store, hugo_version: str, preview_writable: bool
+    settings: BuilderSettings,
+    hugo_version: str,
+    preview_writable: bool,
+    queue_depth: int | None,
 ) -> None:
     heartbeat = Heartbeat(
         builder_id=settings.builder_id,
         last_loop_at=now_stamp(),
         hugo_version=hugo_version,
-        queue_depth=store.queue_depth("preview"),
+        queue_depth=queue_depth,
         preview_writable=preview_writable,
     )
     path = settings.heartbeat_path
@@ -121,6 +124,31 @@ def write_heartbeat(
     payload = json.dumps(heartbeat.as_dict(), indent=2, sort_keys=True) + "\n"
     temp.write_text(payload, encoding="utf-8")
     temp.replace(path)
+
+
+def write_loop_heartbeat(settings: BuilderSettings, store: Store | None) -> bool:
+    """Stamp this loop pass and report whether a build could succeed right now.
+
+    Every pass writes one, before anything that reads the index: a pass the
+    lock deferral cuts short, and the startup wait before the store is even
+    open (`store` is None then, so there is no queue to count), both still
+    count as alive. Otherwise a builder correctly riding out the api's index
+    rebuild (issue 89) goes stale to the liveness probe and is killed well
+    inside `LOCK_DEFER_LIMIT_SECONDS`.
+
+    Checked every pass, not only at startup, so a fresh-volume or PVC
+    ownership defect fixed without restarting the builder is picked up on
+    the next poll instead of requiring a restart to clear the flag. Both
+    paths have to be writable for a build to succeed, so either one being
+    wrong is reported the same way: `preview_writable` folds in the work
+    dir check rather than adding a second heartbeat field for it.
+    """
+    installed = hugo.installed_version(settings.hugo_bin)
+    preview_dir = store.preview_dir if store is not None else settings.data_dir / "preview"
+    preview_writable = check_writable(preview_dir) and check_writable(settings.work_dir)
+    queue_depth = store.queue_depth("preview") if store is not None else None
+    write_heartbeat(settings, installed, preview_writable, queue_depth)
+    return preview_writable
 
 
 class BuildKeepAlive:
@@ -158,7 +186,12 @@ class BuildKeepAlive:
 
     def _run(self) -> None:
         while not self._stop.wait(KEEPALIVE_SECONDS):
-            write_heartbeat(self._settings, self._store, self._hugo_version, self._preview_writable)
+            write_heartbeat(
+                self._settings,
+                self._hugo_version,
+                self._preview_writable,
+                self._store.queue_depth("preview"),
+            )
             self._lease = self._leases.renew(self._lease)
 
     def stop(self) -> Lease:
@@ -454,16 +487,8 @@ def tick(store: Store, settings: BuilderSettings, leases: LeaseDirectory) -> boo
     Returns whether a run was claimed, purely so `main.run` can log something
     more useful than "polled" on every idle tick.
     """
+    preview_writable = write_loop_heartbeat(settings, store)
     recover_expired_leases(store, leases, settings.builder_id)
-    installed = hugo.installed_version(settings.hugo_bin)
-    # Checked every tick, not only at startup, so a fresh-volume or PVC
-    # ownership defect fixed without restarting the builder is picked up on
-    # the next poll instead of requiring a restart to clear the flag. Both
-    # paths have to be writable for a build to succeed, so either one being
-    # wrong is reported the same way: `preview_writable` folds in the work
-    # dir check rather than adding a second heartbeat field for it.
-    preview_writable = check_writable(store.preview_dir) and check_writable(settings.work_dir)
-    write_heartbeat(settings, store, installed, preview_writable)
     if not preview_writable:
         # Leave every queued run queued rather than claiming and burning it:
         # a claim here would finish the run `failed` with a misleading Hugo

@@ -923,3 +923,59 @@ def test_a_write_locked_claim_leaves_a_run_the_next_tick_recovers_and_builds(
     for _ in range(2):
         deferral.run("tick", lambda: runner.tick(store, builder_settings, leases))
     assert store.get_run(run_id).status == "succeeded"
+
+
+def test_a_deferred_tick_still_writes_a_fresh_heartbeat(
+    data_dir: Path, builder_settings: BuilderSettings
+) -> None:
+    # The liveness probe reads only the heartbeat, so a builder waiting out
+    # the api's rebuild must stamp one on every deferred pass or be killed
+    # long before LOCK_DEFER_LIMIT_SECONDS.
+    store = _short_timeout_store(data_dir)
+    leases = LeaseDirectory(builder_settings.leases_dir, builder_settings.lease_seconds)
+    deferral = runner.LockDeferral()
+    holder = _hold_index_write_lock(store)
+    try:
+        assert deferral.run("tick", lambda: runner.tick(store, builder_settings, leases)) is False
+    finally:
+        holder.close()
+    assert deferral.deferrals == 1
+    assert builder_main.healthcheck(builder_settings) == 0
+    heartbeat = json.loads(builder_settings.heartbeat_path.read_text(encoding="utf-8"))
+    assert heartbeat["queue_depth"] == 0
+
+
+def test_startup_wait_for_a_locked_store_writes_a_heartbeat_before_the_store_opens(
+    data_dir: Path, builder_settings: BuilderSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CHRONICLE_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("CHRONICLE_BUILDER_ONCE", "1")
+    monkeypatch.setenv("CHRONICLE_BUILDER_POLL_SECONDS", "0.01")
+    monkeypatch.setenv("CHRONICLE_BUILDER_HUGO_BIN", builder_settings.hugo_bin)
+    (data_dir / "site").mkdir(parents=True, exist_ok=True)
+    settings = BuilderSettings.from_env()
+
+    real_open = Store.open
+    attempts: list[int] = []
+
+    def _locked_once(path: Path) -> Store:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real_open(path)
+
+    monkeypatch.setattr(builder_main.Store, "open", staticmethod(_locked_once))
+
+    original_write = runner.write_heartbeat
+    seen: list[tuple[int | None, int]] = []
+
+    def _spy(*args: object, **kwargs: object) -> None:
+        original_write(*args, **kwargs)  # type: ignore[arg-type]
+        seen.append((args[3], builder_main.healthcheck(settings)))  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runner, "write_heartbeat", _spy)
+    with caplog_disabled():
+        builder_main.run()
+    assert len(attempts) == 2
+    assert seen[0] == (None, 0)
+    assert seen[-1] == (0, 0)

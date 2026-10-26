@@ -20,7 +20,13 @@ from datetime import datetime
 from ..api.store import Store
 from . import hugo
 from .leases import LeaseDirectory
-from .runner import KEEPALIVE_SECONDS, LockDeferral, recover_expired_leases, tick
+from .runner import (
+    KEEPALIVE_SECONDS,
+    LockDeferral,
+    recover_expired_leases,
+    tick,
+    write_loop_heartbeat,
+)
 from .settings import BuilderSettings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -67,11 +73,14 @@ def _run_loop() -> None:
     )
     # The api rebuilds the shared index in place when it starts, holding its
     # write lock; a locked index here is that rebuild, not a fault (issue 89).
+    # Each wait still stamps the heartbeat, or the liveness probe would kill
+    # a builder that is only waiting its turn.
     deferral = LockDeferral()
     store = None
     while store is None:
         store = deferral.run("opening the store", lambda: Store.open(settings.data_dir), None)
         if store is None:
+            write_loop_heartbeat(settings, None)
             time.sleep(settings.poll_seconds)
     leases = LeaseDirectory(settings.leases_dir, settings.lease_seconds)
 
@@ -86,6 +95,7 @@ def _run_loop() -> None:
             None,
         )
         if recovered is None:
+            write_loop_heartbeat(settings, store)
             time.sleep(settings.poll_seconds)
     if recovered:
         log.info("recovered %d run(s) left mid-build by a previous builder", recovered)
