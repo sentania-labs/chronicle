@@ -814,18 +814,25 @@ def _hold_index_write_lock(store: Store, mode: str = "EXCLUSIVE") -> sqlite3.Con
     return holder
 
 
-def _short_timeout_store(data_dir: Path) -> Store:
-    store = Store.open(data_dir)
+def _queued_run_on_a_short_timeout_index(
+    store: Store, settings: BuilderSettings
+) -> tuple[str, LeaseDirectory]:
+    """One queued preview run against an index that gives up on a lock at once.
+
+    An idle tick never touches the index (recovery and the claim walk the
+    queue directory and read run files), so only a tick with something to
+    claim reaches it, at `Store.start_run`'s index write.
+    """
     store.index.conn.execute("PRAGMA busy_timeout = 0")
-    return store
+    _prep_site(store)
+    return _queue_preview(store, _make_draft(store)), _leases(settings)
 
 
 def test_tick_against_an_index_the_api_is_rebuilding_raises_database_is_locked(
-    data_dir: Path, builder_settings: BuilderSettings
+    store: Store, builder_settings: BuilderSettings
 ) -> None:
     # The reproduction: no deferral, the raw tick crashes as in issue 89.
-    store = _short_timeout_store(data_dir)
-    leases = LeaseDirectory(builder_settings.leases_dir, builder_settings.lease_seconds)
+    _, leases = _queued_run_on_a_short_timeout_index(store, builder_settings)
     holder = _hold_index_write_lock(store)
     try:
         with pytest.raises(sqlite3.OperationalError, match="locked"):
@@ -835,10 +842,9 @@ def test_tick_against_an_index_the_api_is_rebuilding_raises_database_is_locked(
 
 
 def test_a_locked_index_defers_the_tick_and_the_next_one_proceeds(
-    data_dir: Path, builder_settings: BuilderSettings, caplog: pytest.LogCaptureFixture
+    store: Store, builder_settings: BuilderSettings, caplog: pytest.LogCaptureFixture
 ) -> None:
-    store = _short_timeout_store(data_dir)
-    leases = LeaseDirectory(builder_settings.leases_dir, builder_settings.lease_seconds)
+    run_id, leases = _queued_run_on_a_short_timeout_index(store, builder_settings)
     deferral = runner.LockDeferral()
     holder = _hold_index_write_lock(store)
     try:
@@ -850,33 +856,15 @@ def test_a_locked_index_defers_the_tick_and_the_next_one_proceeds(
         assert "index locked during tick" in caplog.text
     finally:
         holder.close()
-    deferral.run("tick", lambda: runner.tick(store, builder_settings, leases))
-    assert deferral.deferrals == 0 and deferral.since is None
-
-
-def test_a_deferred_tick_leaves_a_queued_run_queued_and_buildable(
-    store: Store, builder_settings: BuilderSettings
-) -> None:
-    store.index.conn.execute("PRAGMA busy_timeout = 0")
-    _prep_site(store)
-    run_id = _queue_preview(store, _make_draft(store))
-    leases = LeaseDirectory(builder_settings.leases_dir, builder_settings.lease_seconds)
-    deferral = runner.LockDeferral()
-    holder = _hold_index_write_lock(store)
-    try:
-        deferral.run("tick", lambda: runner.tick(store, builder_settings, leases))
-    finally:
-        holder.close()
-    assert store.get_run(run_id).status == "queued"
     assert deferral.run("tick", lambda: runner.tick(store, builder_settings, leases)) is True
+    assert deferral.deferrals == 0 and deferral.since is None
     assert store.get_run(run_id).status == "succeeded"
 
 
 def test_a_lock_that_outlasts_the_limit_is_raised(
-    data_dir: Path, builder_settings: BuilderSettings
+    store: Store, builder_settings: BuilderSettings
 ) -> None:
-    store = _short_timeout_store(data_dir)
-    leases = LeaseDirectory(builder_settings.leases_dir, builder_settings.lease_seconds)
+    _, leases = _queued_run_on_a_short_timeout_index(store, builder_settings)
     deferral = runner.LockDeferral(limit_seconds=0)
     holder = _hold_index_write_lock(store)
     try:
@@ -904,13 +892,10 @@ def test_a_write_locked_claim_leaves_a_run_the_next_tick_recovers_and_builds(
 ) -> None:
     # A writer holding only the reserved lock lets the claim's file write land
     # and fails its index upsert: the filesystem is the truth (ADR 006), so the
-    # run reads `building` in its file while the cache still says `queued`
-    # until the rebuild that held the lock (the api's `reindex`) finishes;
-    # then recovery sees a building run with no lease and puts it back.
-    store.index.conn.execute("PRAGMA busy_timeout = 0")
-    _prep_site(store)
-    run_id = _queue_preview(store, _make_draft(store))
-    leases = LeaseDirectory(builder_settings.leases_dir, builder_settings.lease_seconds)
+    # run reads `building` in its file while the cache still says `queued`.
+    # The next tick's recovery must find it from the queue directory, not the
+    # index, and put it back; no reindex is anyone's job here.
+    run_id, leases = _queued_run_on_a_short_timeout_index(store, builder_settings)
     deferral = runner.LockDeferral()
     holder = _hold_index_write_lock(store, "IMMEDIATE")
     try:
@@ -919,20 +904,19 @@ def test_a_write_locked_claim_leaves_a_run_the_next_tick_recovers_and_builds(
         holder.close()
     assert deferral.deferrals == 1
     assert store.index.run_ids_with_status("queued") == [run_id]
-    store.reindex()
-    for _ in range(2):
-        deferral.run("tick", lambda: runner.tick(store, builder_settings, leases))
+    assert store.get_run(run_id).status == "building"
+    assert not leases.held(run_id)
+    assert deferral.run("tick", lambda: runner.tick(store, builder_settings, leases)) is True
     assert store.get_run(run_id).status == "succeeded"
 
 
 def test_a_deferred_tick_still_writes_a_fresh_heartbeat(
-    data_dir: Path, builder_settings: BuilderSettings
+    store: Store, builder_settings: BuilderSettings
 ) -> None:
     # The liveness probe reads only the heartbeat, so a builder waiting out
     # the api's rebuild must stamp one on every deferred pass or be killed
     # long before LOCK_DEFER_LIMIT_SECONDS.
-    store = _short_timeout_store(data_dir)
-    leases = LeaseDirectory(builder_settings.leases_dir, builder_settings.lease_seconds)
+    _, leases = _queued_run_on_a_short_timeout_index(store, builder_settings)
     deferral = runner.LockDeferral()
     holder = _hold_index_write_lock(store)
     try:
@@ -942,7 +926,7 @@ def test_a_deferred_tick_still_writes_a_fresh_heartbeat(
     assert deferral.deferrals == 1
     assert builder_main.healthcheck(builder_settings) == 0
     heartbeat = json.loads(builder_settings.heartbeat_path.read_text(encoding="utf-8"))
-    assert heartbeat["queue_depth"] == 0
+    assert heartbeat["queue_depth"] == 1
 
 
 def test_startup_wait_for_a_locked_store_writes_a_heartbeat_before_the_store_opens(

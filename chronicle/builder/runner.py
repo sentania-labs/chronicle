@@ -217,6 +217,14 @@ def recover_expired_leases(store: Store, leases: LeaseDirectory, actor: str) -> 
     before this second case existed). A run still marked `building` with no
     live lease at all, expired or missing, was not being built by anyone the
     moment this loop looked, full stop.
+
+    The second case walks the queue directory and reads each run's file,
+    not the index: a claim keeps its queue entry until `finish_run` drops
+    it, and `Store.start_run` writes the file before the index row, so a
+    lock hit between the two (issue 89) leaves a file that says `building`
+    under an index row that still says `queued`. The filesystem is the
+    truth (ADR 006); an index-driven read would never see that run, and
+    `claim_next` skips it, so nothing short of a reindex would ever build it.
     """
     recovered = 0
     for lease in leases.expired_leases():
@@ -225,8 +233,9 @@ def recover_expired_leases(store: Store, leases: LeaseDirectory, actor: str) -> 
             store.requeue_run(lease.run_id, actor, f"lease held by {lease.builder_id} expired")
             recovered += 1
         leases.release(lease.run_id)
-    for run in store.runs_in_flight("preview"):
-        if not leases.held(run.id):
+    for entry in store.queued_entries(kind="preview"):
+        run = store.get_run(str(entry["run_id"]))
+        if run.status == "building" and not leases.held(run.id):
             store.requeue_run(run.id, actor, "building with no live lease")
             recovered += 1
     return recovered
