@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import stat
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -799,3 +801,165 @@ def test_failed_build_after_a_symlink_swap_leaves_the_old_preview_live(
     assert destination.is_symlink()
     assert destination.resolve() == live_target
     assert (destination / "index.html").exists()
+
+
+def _hold_index_write_lock(store: Store, mode: str = "EXCLUSIVE") -> sqlite3.Connection:
+    """A second connection mid-write, the api's startup rebuild in miniature.
+
+    EXCLUSIVE is what a large rebuild transaction reaches once its page cache
+    spills, and it blocks readers too (issue 89's `run_ids_with_status`).
+    """
+    holder = sqlite3.connect(store.index.path, isolation_level=None)
+    holder.execute(f"BEGIN {mode}")
+    return holder
+
+
+def _queued_run_on_a_short_timeout_index(
+    store: Store, settings: BuilderSettings
+) -> tuple[str, LeaseDirectory]:
+    """One queued preview run against an index that gives up on a lock at once.
+
+    An idle tick never touches the index (recovery and the claim walk the
+    queue directory and read run files), so only a tick with something to
+    claim reaches it, at `Store.start_run`'s index write.
+    """
+    store.index.conn.execute("PRAGMA busy_timeout = 0")
+    _prep_site(store)
+    return _queue_preview(store, _make_draft(store)), _leases(settings)
+
+
+def test_tick_against_an_index_the_api_is_rebuilding_raises_database_is_locked(
+    store: Store, builder_settings: BuilderSettings
+) -> None:
+    # The reproduction: no deferral, the raw tick crashes as in issue 89.
+    _, leases = _queued_run_on_a_short_timeout_index(store, builder_settings)
+    holder = _hold_index_write_lock(store)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            runner.tick(store, builder_settings, leases)
+    finally:
+        holder.close()
+
+
+def test_a_locked_index_defers_the_tick_and_the_next_one_proceeds(
+    store: Store, builder_settings: BuilderSettings, caplog: pytest.LogCaptureFixture
+) -> None:
+    run_id, leases = _queued_run_on_a_short_timeout_index(store, builder_settings)
+    deferral = runner.LockDeferral()
+    holder = _hold_index_write_lock(store)
+    try:
+        with caplog.at_level(logging.WARNING, logger="chronicle.builder"):
+            assert (
+                deferral.run("tick", lambda: runner.tick(store, builder_settings, leases)) is False
+            )
+        assert deferral.deferrals == 1
+        assert "index locked during tick" in caplog.text
+    finally:
+        holder.close()
+    assert deferral.run("tick", lambda: runner.tick(store, builder_settings, leases)) is True
+    assert deferral.deferrals == 0 and deferral.since is None
+    assert store.get_run(run_id).status == "succeeded"
+
+
+def test_a_lock_that_outlasts_the_limit_is_raised(
+    store: Store, builder_settings: BuilderSettings
+) -> None:
+    _, leases = _queued_run_on_a_short_timeout_index(store, builder_settings)
+    deferral = runner.LockDeferral(limit_seconds=0)
+    holder = _hold_index_write_lock(store)
+    try:
+        deferral.run("tick", lambda: runner.tick(store, builder_settings, leases))
+        time.sleep(0.01)
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            deferral.run("tick", lambda: runner.tick(store, builder_settings, leases))
+    finally:
+        holder.close()
+
+
+def test_other_operational_errors_are_never_deferred() -> None:
+    deferral = runner.LockDeferral()
+
+    def broken() -> bool:
+        raise sqlite3.OperationalError("no such table: runs")
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        deferral.run("tick", broken)
+    assert deferral.deferrals == 0
+
+
+def test_a_write_locked_claim_leaves_a_run_the_next_tick_recovers_and_builds(
+    store: Store, builder_settings: BuilderSettings
+) -> None:
+    # A writer holding only the reserved lock lets the claim's file write land
+    # and fails its index upsert: the filesystem is the truth (ADR 006), so the
+    # run reads `building` in its file while the cache still says `queued`.
+    # The next tick's recovery must find it from the queue directory, not the
+    # index, and put it back; no reindex is anyone's job here.
+    run_id, leases = _queued_run_on_a_short_timeout_index(store, builder_settings)
+    deferral = runner.LockDeferral()
+    holder = _hold_index_write_lock(store, "IMMEDIATE")
+    try:
+        deferral.run("tick", lambda: runner.tick(store, builder_settings, leases))
+    finally:
+        holder.close()
+    assert deferral.deferrals == 1
+    assert store.index.run_ids_with_status("queued") == [run_id]
+    assert store.get_run(run_id).status == "building"
+    assert not leases.held(run_id)
+    assert deferral.run("tick", lambda: runner.tick(store, builder_settings, leases)) is True
+    assert store.get_run(run_id).status == "succeeded"
+
+
+def test_a_deferred_tick_still_writes_a_fresh_heartbeat(
+    store: Store, builder_settings: BuilderSettings
+) -> None:
+    # The liveness probe reads only the heartbeat, so a builder waiting out
+    # the api's rebuild must stamp one on every deferred pass or be killed
+    # long before LOCK_DEFER_LIMIT_SECONDS.
+    _, leases = _queued_run_on_a_short_timeout_index(store, builder_settings)
+    deferral = runner.LockDeferral()
+    holder = _hold_index_write_lock(store)
+    try:
+        assert deferral.run("tick", lambda: runner.tick(store, builder_settings, leases)) is False
+    finally:
+        holder.close()
+    assert deferral.deferrals == 1
+    assert builder_main.healthcheck(builder_settings) == 0
+    heartbeat = json.loads(builder_settings.heartbeat_path.read_text(encoding="utf-8"))
+    assert heartbeat["queue_depth"] == 1
+
+
+def test_startup_wait_for_a_locked_store_writes_a_heartbeat_before_the_store_opens(
+    data_dir: Path, builder_settings: BuilderSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CHRONICLE_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("CHRONICLE_BUILDER_ONCE", "1")
+    monkeypatch.setenv("CHRONICLE_BUILDER_POLL_SECONDS", "0.01")
+    monkeypatch.setenv("CHRONICLE_BUILDER_HUGO_BIN", builder_settings.hugo_bin)
+    (data_dir / "site").mkdir(parents=True, exist_ok=True)
+    settings = BuilderSettings.from_env()
+
+    real_open = Store.open
+    attempts: list[int] = []
+
+    def _locked_once(path: Path) -> Store:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real_open(path)
+
+    monkeypatch.setattr(builder_main.Store, "open", staticmethod(_locked_once))
+
+    original_write = runner.write_heartbeat
+    seen: list[tuple[int | None, int]] = []
+
+    def _spy(*args: object, **kwargs: object) -> None:
+        original_write(*args, **kwargs)  # type: ignore[arg-type]
+        seen.append((args[3], builder_main.healthcheck(settings)))  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runner, "write_heartbeat", _spy)
+    with caplog_disabled():
+        builder_main.run()
+    assert len(attempts) == 2
+    assert seen[0] == (None, 0)
+    assert seen[-1] == (0, 0)

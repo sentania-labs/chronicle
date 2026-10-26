@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import threading
 import time
 import uuid
@@ -38,6 +39,14 @@ IGNORE_GIT = shutil.ignore_patterns(".git")
 KEEPALIVE_SECONDS = 5.0
 
 
+# How long the index may stay locked, tick after tick, before the builder
+# stops deferring and lets the error crash it. The api holds the shared
+# index's write lock while it rebuilds it at startup (about 30 s on 354
+# drafts, issue 89), so this is a generous multiple of that; a lock that
+# outlasts it is not a rebuild and a restart is the honest response.
+LOCK_DEFER_LIMIT_SECONDS = 300.0
+
+
 class BuildFailed(Exception):
     def __init__(self, error_class: str, message: str) -> None:
         super().__init__(message)
@@ -49,7 +58,7 @@ class Heartbeat:
     builder_id: str
     last_loop_at: str
     hugo_version: str
-    queue_depth: int
+    queue_depth: int | None
     preview_writable: bool
 
     def as_dict(self) -> dict[str, Any]:
@@ -97,13 +106,16 @@ def check_writable(path: Path) -> bool:
 
 
 def write_heartbeat(
-    settings: BuilderSettings, store: Store, hugo_version: str, preview_writable: bool
+    settings: BuilderSettings,
+    hugo_version: str,
+    preview_writable: bool,
+    queue_depth: int | None,
 ) -> None:
     heartbeat = Heartbeat(
         builder_id=settings.builder_id,
         last_loop_at=now_stamp(),
         hugo_version=hugo_version,
-        queue_depth=store.queue_depth("preview"),
+        queue_depth=queue_depth,
         preview_writable=preview_writable,
     )
     path = settings.heartbeat_path
@@ -112,6 +124,31 @@ def write_heartbeat(
     payload = json.dumps(heartbeat.as_dict(), indent=2, sort_keys=True) + "\n"
     temp.write_text(payload, encoding="utf-8")
     temp.replace(path)
+
+
+def write_loop_heartbeat(settings: BuilderSettings, store: Store | None) -> bool:
+    """Stamp this loop pass and report whether a build could succeed right now.
+
+    Every pass writes one, before anything that reads the index: a pass the
+    lock deferral cuts short, and the startup wait before the store is even
+    open (`store` is None then, so there is no queue to count), both still
+    count as alive. Otherwise a builder correctly riding out the api's index
+    rebuild (issue 89) goes stale to the liveness probe and is killed well
+    inside `LOCK_DEFER_LIMIT_SECONDS`.
+
+    Checked every pass, not only at startup, so a fresh-volume or PVC
+    ownership defect fixed without restarting the builder is picked up on
+    the next poll instead of requiring a restart to clear the flag. Both
+    paths have to be writable for a build to succeed, so either one being
+    wrong is reported the same way: `preview_writable` folds in the work
+    dir check rather than adding a second heartbeat field for it.
+    """
+    installed = hugo.installed_version(settings.hugo_bin)
+    preview_dir = store.preview_dir if store is not None else settings.data_dir / "preview"
+    preview_writable = check_writable(preview_dir) and check_writable(settings.work_dir)
+    queue_depth = store.queue_depth("preview") if store is not None else None
+    write_heartbeat(settings, installed, preview_writable, queue_depth)
+    return preview_writable
 
 
 class BuildKeepAlive:
@@ -149,7 +186,12 @@ class BuildKeepAlive:
 
     def _run(self) -> None:
         while not self._stop.wait(KEEPALIVE_SECONDS):
-            write_heartbeat(self._settings, self._store, self._hugo_version, self._preview_writable)
+            write_heartbeat(
+                self._settings,
+                self._hugo_version,
+                self._preview_writable,
+                self._store.queue_depth("preview"),
+            )
             self._lease = self._leases.renew(self._lease)
 
     def stop(self) -> Lease:
@@ -175,6 +217,14 @@ def recover_expired_leases(store: Store, leases: LeaseDirectory, actor: str) -> 
     before this second case existed). A run still marked `building` with no
     live lease at all, expired or missing, was not being built by anyone the
     moment this loop looked, full stop.
+
+    The second case walks the queue directory and reads each run's file,
+    not the index: a claim keeps its queue entry until `finish_run` drops
+    it, and `Store.start_run` writes the file before the index row, so a
+    lock hit between the two (issue 89) leaves a file that says `building`
+    under an index row that still says `queued`. The filesystem is the
+    truth (ADR 006); an index-driven read would never see that run, and
+    `claim_next` skips it, so nothing short of a reindex would ever build it.
     """
     recovered = 0
     for lease in leases.expired_leases():
@@ -183,8 +233,9 @@ def recover_expired_leases(store: Store, leases: LeaseDirectory, actor: str) -> 
             store.requeue_run(lease.run_id, actor, f"lease held by {lease.builder_id} expired")
             recovered += 1
         leases.release(lease.run_id)
-    for run in store.runs_in_flight("preview"):
-        if not leases.held(run.id):
+    for entry in store.queued_entries(kind="preview"):
+        run = store.get_run(str(entry["run_id"]))
+        if run.status == "building" and not leases.held(run.id):
             store.requeue_run(run.id, actor, "building with no live lease")
             recovered += 1
     return recovered
@@ -445,16 +496,8 @@ def tick(store: Store, settings: BuilderSettings, leases: LeaseDirectory) -> boo
     Returns whether a run was claimed, purely so `main.run` can log something
     more useful than "polled" on every idle tick.
     """
+    preview_writable = write_loop_heartbeat(settings, store)
     recover_expired_leases(store, leases, settings.builder_id)
-    installed = hugo.installed_version(settings.hugo_bin)
-    # Checked every tick, not only at startup, so a fresh-volume or PVC
-    # ownership defect fixed without restarting the builder is picked up on
-    # the next poll instead of requiring a restart to clear the flag. Both
-    # paths have to be writable for a build to succeed, so either one being
-    # wrong is reported the same way: `preview_writable` folds in the work
-    # dir check rather than adding a second heartbeat field for it.
-    preview_writable = check_writable(store.preview_dir) and check_writable(settings.work_dir)
-    write_heartbeat(settings, store, installed, preview_writable)
     if not preview_writable:
         # Leave every queued run queued rather than claiming and burning it:
         # a claim here would finish the run `failed` with a misleading Hugo
@@ -475,3 +518,64 @@ def tick(store: Store, settings: BuilderSettings, leases: LeaseDirectory) -> boo
         # live claim instead of this one's stale one (round C3 review).
         leases.release(run.id, settings.builder_id)
     return True
+
+
+def is_index_locked(exc: BaseException) -> bool:
+    """True for SQLite's transient "another connection holds the lock" errors.
+
+    Matches the message, not the class: `OperationalError` also covers a
+    missing table or a malformed query, which must never be deferred.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
+class LockDeferral:
+    """Defers a tick or a startup step that hit a locked index, boundedly.
+
+    The index is a derived cache the api rebuilds in place (ADR 006), so a
+    lock held by that rebuild passes on its own. Each locked failure is
+    logged and counted; the first success clears the count, and a lock that
+    lasts longer than `limit_seconds` since the first failure is re-raised.
+    Anything that is not a lock error propagates untouched.
+    """
+
+    def __init__(self, limit_seconds: float = LOCK_DEFER_LIMIT_SECONDS) -> None:
+        self.limit_seconds = limit_seconds
+        self.since: float | None = None
+        self.deferrals = 0
+
+    def run(self, step: str, fn: Any, default: Any = False) -> Any:
+        try:
+            result = fn()
+        except sqlite3.OperationalError as exc:
+            if not is_index_locked(exc):
+                raise
+            now = time.monotonic()
+            if self.since is None:
+                self.since = now
+            waited = now - self.since
+            if waited > self.limit_seconds:
+                log.error("index still locked after %.0fs during %s, giving up", waited, step)
+                raise
+            self.deferrals += 1
+            log.warning(
+                "index locked during %s (%s), deferring; locked for %.0fs, deferral %d",
+                step,
+                exc,
+                waited,
+                self.deferrals,
+            )
+            return default
+        if self.since is not None:
+            log.info(
+                "index unlocked, resuming %s after %d deferral(s) over %.0fs",
+                step,
+                self.deferrals,
+                time.monotonic() - self.since,
+            )
+        self.since = None
+        self.deferrals = 0
+        return result
