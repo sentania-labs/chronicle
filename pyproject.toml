@@ -24,7 +24,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     # Decodes an upload to decide its real type and re-encodes it without
     # metadata, so the filename extension is never trusted.
-    "pillow>=10.3",
+    "pillow>=13.0.0",
     # Admin password hashing (a human-chosen, low-entropy secret): argon2 is
     # deliberately different from the plain sha256 ADR 007 uses for consumer
     # tokens, which are 256-bit CSPRNG values with nothing for a KDF to slow.
@@ -34,7 +34,7 @@ dependencies = [
     "cryptography>=42",
     # Signs the App JWT (RS256) used to authenticate to GitHub as the App
     # itself, before an installation token exists.
-    "pyjwt>=2.8",
+    "pyjwt>=2.15.0",
     # The GitHub client and the digest command both make outbound HTTPS
     # calls; httpx's base_url and transport options are what let tests point
     # both at a mock instead of the network.
