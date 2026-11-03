@@ -51,7 +51,7 @@ dependencies = [
     # signature (Authlib 1.8 verifies its own id tokens the same way and
     # marks its older `authlib.jose` deprecated), the same rule the pydantic
     # entry above follows.
-    "authlib>=1.8.0",
+    "authlib>=1.9.1",
     "joserfc>=1.7",
 ]
 
