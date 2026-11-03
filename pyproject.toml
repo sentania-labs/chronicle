@@ -52,7 +52,7 @@ dependencies = [
     # marks its older `authlib.jose` deprecated), the same rule the pydantic
     # entry above follows.
     "authlib>=1.9.1",
-    "joserfc>=1.7",
+    "joserfc>=1.7.6",
 ]
 
 [project.scripts]
